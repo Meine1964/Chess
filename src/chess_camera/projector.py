@@ -95,6 +95,7 @@ class ProjectorWindow(QWidget):
         self._pattern: QImage | None = None
         self._projector_grid: NDArray[np.float32] | None = None
         self._selected_square: tuple[int, int] | None = None
+        self._selected_square_is_light: bool | None = None
         self.setWindowTitle("Chess Projector Output")
         self.setCursor(Qt.CursorShape.BlankCursor)
 
@@ -173,12 +174,19 @@ class ProjectorWindow(QWidget):
         self._display_mode = "squares"
         self.update()
 
-    def show_square(self, row: int, column: int) -> None:
+    def show_square(
+        self,
+        row: int,
+        column: int,
+        *,
+        light_square: bool | None = None,
+    ) -> None:
         if self._projector_grid is None:
             raise RuntimeError("No calibrated projector grid is available.")
         if not 0 <= row < 8 or not 0 <= column < 8:
             raise ValueError("Projected square must be inside the 8x8 board.")
         self._selected_square = (row, column)
+        self._selected_square_is_light = light_square
         self._display_mode = "selected_square"
         self.update()
 
@@ -225,7 +233,11 @@ class ProjectorWindow(QWidget):
             polygon = square_polygons(self._projector_grid)[row * 8 + column]
             color = (
                 PROJECTED_ON_LIGHT_SQUARE
-                if (row + column) % 2 == 0
+                if (
+                    self._selected_square_is_light
+                    if self._selected_square_is_light is not None
+                    else (row + column) % 2 == 0
+                )
                 else PROJECTED_ON_DARK_SQUARE
             )
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)

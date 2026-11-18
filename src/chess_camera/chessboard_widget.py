@@ -7,6 +7,19 @@ LICHESS_DARK = QColor("#b58863")
 LICHESS_SELECTED = QColor("#d7da4f")
 
 
+def rotate_square(
+    row: int,
+    column: int,
+    clockwise_quarter_turns: int,
+) -> tuple[int, int]:
+    if not 0 <= row < 8 or not 0 <= column < 8:
+        raise ValueError("Square must be inside the 8x8 board.")
+    turns = clockwise_quarter_turns % 4
+    for _turn in range(turns):
+        row, column = column, 7 - row
+    return row, column
+
+
 def square_at_position(
     position: QPointF,
     width: int,

@@ -113,6 +113,14 @@ def test_projector_renders_patterns_and_calibrated_squares(
     assert selected_center == PROJECTED_ON_DARK_SQUARE
     assert adjacent_center.red() == 0
 
+    window.show_square(2, 3, light_square=True)
+    application.processEvents()
+    logical_light_image = window.grab().toImage()
+    assert (
+        logical_light_image.pixelColor(145, 64)
+        == PROJECTED_ON_LIGHT_SQUARE
+    )
+
     window.show_square(2, 2)
     application.processEvents()
     light_square_image = window.grab().toImage()

@@ -21,6 +21,7 @@ from .projector_calibration import (
     interpolate_grid_point,
     locate_validation_target,
     measure_coverage,
+    quick_realign_mapping,
     refine_projector_mesh,
     remap_projector_mapping,
     validation_result,
@@ -100,10 +101,15 @@ class ProjectorCalibrationController(QObject):
         self._capture_token = 0
         self._run_token = 0
         self._quick_verification = False
+        self._quick_phase = ""
 
     @property
     def active(self) -> bool:
         return self._active
+
+    @property
+    def quick_verification(self) -> bool:
+        return self._quick_verification
 
     def start(self, projector_width: int, projector_height: int) -> None:
         if self._active:
@@ -114,6 +120,7 @@ class ProjectorCalibrationController(QObject):
         self._active = True
         self._run_token += 1
         self._quick_verification = False
+        self._quick_phase = ""
         self._collecting = False
         self._projector_size = (projector_width, projector_height)
         self._captures.clear()
@@ -151,6 +158,7 @@ class ProjectorCalibrationController(QObject):
         self._active = True
         self._run_token += 1
         self._quick_verification = True
+        self._quick_phase = "fit"
         self._collecting = False
         self._projector_size = (projector_width, projector_height)
         self._captures.clear()
@@ -172,9 +180,9 @@ class ProjectorCalibrationController(QObject):
             )
         ]
         self._step_index = 0
-        self._progress_total = 7
+        self._progress_total = 12
         self.active_changed.emit(True)
-        self.status_changed.emit("Starting quick calibration verification.")
+        self.status_changed.emit("Starting measured quick realignment.")
         self.progress_changed.emit(0, self._progress_total)
         self._display_current_step()
 
@@ -393,13 +401,23 @@ class ProjectorCalibrationController(QObject):
             raise RuntimeError("Calibration mapping is not available.")
         self.status_changed.emit("Mapping complete; refreshing black reference.")
         if self._quick_verification:
-            self._validation_coordinates = [
-                (0.5, 0.5),
-                (7.5, 0.5),
-                (3.5, 3.5),
-                (0.5, 7.5),
-                (7.5, 7.5),
-            ]
+            if self._quick_phase == "fit":
+                self._validation_coordinates = [
+                    (0.5, 0.5),
+                    (7.5, 0.5),
+                    (3.5, 3.5),
+                    (0.5, 7.5),
+                    (7.5, 7.5),
+                ]
+                self._validation_progress_base = 1
+            else:
+                self._validation_coordinates = [
+                    (3.5, 0.5),
+                    (7.5, 3.5),
+                    (3.5, 7.5),
+                    (0.5, 3.5),
+                ]
+                self._validation_progress_base = 7
         else:
             self._validation_coordinates = [
                 (0.5, 0.5),
@@ -412,11 +430,11 @@ class ProjectorCalibrationController(QObject):
                 (3.5, 7.5),
                 (7.5, 7.5),
             ]
-        self._validation_progress_base = (
-            self._progress_total
-            - len(self._validation_coordinates)
-            - 1
-        )
+            self._validation_progress_base = (
+                self._progress_total
+                - len(self._validation_coordinates)
+                - 1
+            )
         self._validation_index = 0
         self._show_validation_black()
 
@@ -531,6 +549,33 @@ class ProjectorCalibrationController(QObject):
         measured = np.asarray(self._validation_measured, dtype=np.float32)
         expected = np.asarray(self._validation_expected, dtype=np.float32)
         widths = np.asarray(self._validation_widths, dtype=np.float32)
+        if self._quick_verification and self._quick_phase == "fit":
+            board_coordinates = np.asarray(
+                self._validation_coordinates,
+                dtype=np.float32,
+            )
+            self._mapping = quick_realign_mapping(
+                self._mapping,
+                board_coordinates,
+                measured,
+                self._projector_size,
+            )
+            self._projector.set_projector_grid(
+                self._mapping.projector_grid
+            )
+            self._quick_phase = "validate"
+            self._validation_expected.clear()
+            self._validation_measured.clear()
+            self._validation_widths.clear()
+            self._validation_index = -1
+            self._captures.pop("validation_black", None)
+            self.status_changed.emit(
+                "Candidate quick correction fitted; measuring independent "
+                "validation targets."
+            )
+            self._start_validation()
+            return
+
         validation = validation_result(measured, expected, widths)
         if validation.maximum_square_fraction >= 0.1:
             if (
@@ -560,7 +605,7 @@ class ProjectorCalibrationController(QObject):
             self._progress_total,
         )
         self.status_changed.emit(
-            f"{'Quick verification' if self._quick_verification else 'Calibration'} "
+            f"{'Quick realignment' if self._quick_verification else 'Calibration'} "
             f"succeeded: {validation.maximum_error:.2f} px maximum "
             "validation error."
         )

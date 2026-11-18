@@ -5,19 +5,24 @@ import numpy as np
 import pytest
 
 from src.chess_camera.board_detector import BoardDetection
-from src.chess_camera.calibration_controller import CalibrationResult
+from src.chess_camera.calibration_controller import (
+    CalibrationResult,
+    ProjectorCalibrationController,
+)
 from src.chess_camera.calibration_store import CalibrationStore
 from src.chess_camera.projector_calibration import (
     CalibrationError,
     MappingResult,
     ValidationResult,
     decode_gray_code,
+    detect_board_orientation,
     fit_projector_mapping,
     gray_code_bit_count,
     gray_code_pattern,
     interpolate_grid_point,
     locate_validation_target,
     measure_coverage,
+    quick_realign_mapping,
     remap_projector_mapping,
     refine_projector_mesh,
     square_polygons,
@@ -100,6 +105,30 @@ def test_coverage_requires_response_on_every_square() -> None:
     illuminated[10:20, 10:20] = black[10:20, 10:20]
     with pytest.raises(CalibrationError, match="board square"):
         measure_coverage(black, illuminated, detection)
+
+
+def test_detects_board_orientation_from_square_color_parity() -> None:
+    detection = _detection()
+    standard = np.zeros((100, 100), dtype=np.uint8)
+    rotated = np.zeros((100, 100), dtype=np.uint8)
+    for row in range(8):
+        for column in range(8):
+            corners = np.rint(
+                np.asarray(
+                    [
+                        detection.grid_points[row, column],
+                        detection.grid_points[row, column + 1],
+                        detection.grid_points[row + 1, column + 1],
+                        detection.grid_points[row + 1, column],
+                    ]
+                )
+            ).astype(np.int32)
+            standard_value = 200 if (row + column) % 2 == 0 else 40
+            cv2.fillConvexPoly(standard, corners, standard_value)
+            cv2.fillConvexPoly(rotated, corners, 240 - standard_value)
+
+    assert detect_board_orientation(standard, detection.grid_points) == 0
+    assert detect_board_orientation(rotated, detection.grid_points) == 1
 
 
 def test_mapping_recovers_projector_grid_from_dense_measurements() -> None:
@@ -247,6 +276,141 @@ def test_mapping_remaps_board_motion_with_local_correction() -> None:
 
     np.testing.assert_allclose(remapped.projector_grid, expected, atol=0.01)
     np.testing.assert_allclose(remapped.camera_grid, moved_grid)
+
+
+def test_quick_realign_recovers_minor_geometry_change() -> None:
+    camera_grid = _detection(20, 20, 180, 180).grid_points
+    old_homography = np.asarray(
+        [[1.5, 0.02, 12], [0.01, 1.2, 8], [0, 0, 1]],
+        dtype=np.float32,
+    )
+    local_correction = np.asarray([2, -1], dtype=np.float32)
+    old_projector_grid = cv2.perspectiveTransform(
+        camera_grid.reshape(-1, 1, 2),
+        old_homography,
+    ).reshape(9, 9, 2)
+    old_projector_grid += local_correction
+    mapping = MappingResult(
+        camera_grid=camera_grid,
+        projector_grid=old_projector_grid,
+        camera_to_projector_homography=old_homography,
+        coverage_ratio=1.0,
+        decoded_ratio=1.0,
+        inlier_ratio=1.0,
+        rms_error=0.0,
+        maximum_error=0.0,
+    )
+    board_coordinates = np.asarray(
+        [
+            [0.5, 0.5],
+            [7.5, 0.5],
+            [3.5, 3.5],
+            [0.5, 7.5],
+            [7.5, 7.5],
+        ],
+        dtype=np.float32,
+    )
+    true_homography = np.asarray(
+        [[1.48, 0.03, 20], [0.015, 1.19, 3], [0, 0, 1]],
+        dtype=np.float32,
+    )
+    inverse_true = np.linalg.inv(true_homography).astype(np.float32)
+    commanded = np.asarray(
+        [
+            interpolate_grid_point(old_projector_grid, float(x), float(y))
+            for x, y in board_coordinates
+        ],
+        dtype=np.float32,
+    )
+    measured = cv2.perspectiveTransform(
+        (commanded - local_correction).reshape(-1, 1, 2),
+        inverse_true,
+    ).reshape(-1, 2)
+
+    realigned = quick_realign_mapping(
+        mapping,
+        board_coordinates,
+        measured,
+        (400, 300),
+    )
+    expected_grid = cv2.perspectiveTransform(
+        camera_grid.reshape(-1, 1, 2),
+        true_homography,
+    ).reshape(9, 9, 2)
+    expected_grid += local_correction
+
+    np.testing.assert_allclose(
+        realigned.projector_grid,
+        expected_grid,
+        atol=0.02,
+    )
+    np.testing.assert_allclose(
+        realigned.camera_to_projector_homography,
+        true_homography,
+        atol=0.001,
+    )
+
+
+def test_quick_realign_uses_independent_validation_phase() -> None:
+    class FakeProjector:
+        def __init__(self) -> None:
+            self.grid: np.ndarray | None = None
+
+        def set_projector_grid(self, grid: np.ndarray) -> None:
+            self.grid = grid.copy()
+
+    detection = _detection()
+    mapping = MappingResult(
+        camera_grid=detection.grid_points,
+        projector_grid=detection.grid_points,
+        camera_to_projector_homography=np.eye(3, dtype=np.float32),
+        coverage_ratio=1.0,
+        decoded_ratio=1.0,
+        inlier_ratio=1.0,
+        rms_error=0.0,
+        maximum_error=0.0,
+    )
+    projector = FakeProjector()
+    controller = ProjectorCalibrationController(projector, object())
+    fitting_coordinates = [
+        (0.5, 0.5),
+        (7.5, 0.5),
+        (3.5, 3.5),
+        (0.5, 7.5),
+        (7.5, 7.5),
+    ]
+    measured = [
+        interpolate_grid_point(detection.grid_points, x, y)
+        for x, y in fitting_coordinates
+    ]
+    controller._active = True
+    controller._quick_verification = True
+    controller._quick_phase = "fit"
+    controller._projector_size = (200, 200)
+    controller._detection = detection
+    controller._mapping = mapping
+    controller._validation_coordinates = fitting_coordinates
+    controller._validation_expected = [point.copy() for point in measured]
+    controller._validation_measured = [point.copy() for point in measured]
+    controller._validation_widths = [10.0] * len(measured)
+    controller._captures["validation_black"] = np.zeros(
+        (100, 100),
+        dtype=np.uint8,
+    )
+    controller._show_validation_black = lambda: None
+
+    controller._finish_validation()
+
+    assert controller._quick_phase == "validate"
+    assert controller._validation_coordinates == [
+        (3.5, 0.5),
+        (7.5, 3.5),
+        (3.5, 7.5),
+        (0.5, 3.5),
+    ]
+    assert controller._validation_index == 0
+    assert "validation_black" not in controller._captures
+    assert projector.grid is not None
 
 
 def test_validation_target_and_metrics_measure_camera_error() -> None:

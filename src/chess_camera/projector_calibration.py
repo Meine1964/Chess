@@ -464,6 +464,66 @@ def square_polygons(
     return polygons
 
 
+def detect_board_orientation(
+    gray: GrayImage,
+    camera_grid: FloatArray,
+    *,
+    minimum_contrast: float = 3.0,
+) -> int:
+    if gray.ndim != 2:
+        raise ValueError("Board orientation requires a grayscale image.")
+    if camera_grid.shape != (9, 9, 2):
+        raise ValueError("The camera grid must have shape (9, 9, 2).")
+    if minimum_contrast <= 0:
+        raise ValueError("Minimum orientation contrast must be positive.")
+
+    parity_brightness: tuple[list[float], list[float]] = ([], [])
+    height, width = gray.shape
+    for row in range(8):
+        for column in range(8):
+            corners = np.asarray(
+                [
+                    camera_grid[row, column],
+                    camera_grid[row, column + 1],
+                    camera_grid[row + 1, column + 1],
+                    camera_grid[row + 1, column],
+                ],
+                dtype=np.float32,
+            )
+            center = np.mean(corners, axis=0)
+            inset = center + (corners - center) * 0.55
+            left = max(0, int(np.floor(np.min(inset[:, 0]))))
+            right = min(width, int(np.ceil(np.max(inset[:, 0]))) + 1)
+            top = max(0, int(np.floor(np.min(inset[:, 1]))))
+            bottom = min(height, int(np.ceil(np.max(inset[:, 1]))) + 1)
+            if left >= right or top >= bottom:
+                raise CalibrationError(
+                    "A board square has no measurable orientation area."
+                )
+            local_polygon = np.rint(
+                inset - np.asarray([left, top], dtype=np.float32)
+            ).astype(np.int32)
+            mask = np.zeros((bottom - top, right - left), dtype=np.uint8)
+            cv2.fillConvexPoly(mask, local_polygon, 1)
+            values = gray[top:bottom, left:right][mask > 0]
+            if values.size == 0:
+                raise CalibrationError(
+                    "A board square has no measurable orientation pixels."
+                )
+            parity_brightness[(row + column) % 2].append(
+                float(np.median(values))
+            )
+
+    even_brightness = float(np.median(parity_brightness[0]))
+    odd_brightness = float(np.median(parity_brightness[1]))
+    if abs(even_brightness - odd_brightness) < minimum_contrast:
+        raise CalibrationError(
+            "The light and dark board squares do not have enough contrast "
+            "to determine orientation."
+        )
+    return 0 if even_brightness > odd_brightness else 1
+
+
 def remap_projector_mapping(
     mapping: MappingResult,
     current_camera_grid: FloatArray,
@@ -526,6 +586,102 @@ def remap_projector_mapping(
         mapping,
         camera_grid=current_camera_grid.copy(),
         projector_grid=current_projector_grid,
+    )
+
+
+def quick_realign_mapping(
+    mapping: MappingResult,
+    board_coordinates: FloatArray,
+    measured_camera_points: FloatArray,
+    projector_size: tuple[int, int],
+) -> MappingResult:
+    if (
+        board_coordinates.ndim != 2
+        or board_coordinates.shape[1] != 2
+        or board_coordinates.shape[0] < 4
+    ):
+        raise ValueError(
+            "At least four two-dimensional board coordinates are required."
+        )
+    if measured_camera_points.shape != board_coordinates.shape:
+        raise ValueError(
+            "Measured camera points must match the board coordinates."
+        )
+
+    old_global_grid = np.asarray(
+        cv2.perspectiveTransform(
+            mapping.camera_grid.reshape(-1, 1, 2),
+            mapping.camera_to_projector_homography,
+        ),
+        dtype=np.float32,
+    ).reshape(9, 9, 2)
+    local_corrections = mapping.projector_grid - old_global_grid
+    commanded_points = np.asarray(
+        [
+            interpolate_grid_point(
+                mapping.projector_grid,
+                float(board_x),
+                float(board_y),
+            )
+            for board_x, board_y in board_coordinates
+        ],
+        dtype=np.float32,
+    )
+    fitting_corrections = np.asarray(
+        [
+            interpolate_grid_point(
+                local_corrections,
+                float(board_x),
+                float(board_y),
+            )
+            for board_x, board_y in board_coordinates
+        ],
+        dtype=np.float32,
+    )
+    global_commands = commanded_points - fitting_corrections
+    homography, _mask = cv2.findHomography(
+        measured_camera_points,
+        global_commands,
+        method=0,
+    )
+    if homography is None or not np.all(np.isfinite(homography)):
+        raise CalibrationError(
+            "Quick realignment could not fit a camera-to-projector mapping."
+        )
+    typed_homography = np.asarray(homography, dtype=np.float32)
+    new_global_grid = np.asarray(
+        cv2.perspectiveTransform(
+            mapping.camera_grid.reshape(-1, 1, 2),
+            typed_homography,
+        ),
+        dtype=np.float32,
+    ).reshape(9, 9, 2)
+    new_projector_grid = np.asarray(
+        new_global_grid + local_corrections,
+        dtype=np.float32,
+    )
+    _validate_projector_grid(
+        new_projector_grid,
+        projector_size[0],
+        projector_size[1],
+    )
+
+    predicted_commands = np.asarray(
+        cv2.perspectiveTransform(
+            measured_camera_points.reshape(-1, 1, 2),
+            typed_homography,
+        ),
+        dtype=np.float32,
+    ).reshape(-1, 2)
+    predicted_commands += fitting_corrections
+    errors = np.linalg.norm(predicted_commands - commanded_points, axis=1)
+    return replace(
+        mapping,
+        projector_grid=new_projector_grid,
+        camera_to_projector_homography=typed_homography,
+        inlier_ratio=1.0,
+        rms_error=float(np.sqrt(np.mean(np.square(errors)))),
+        maximum_error=float(np.max(errors)),
     )
 
 

@@ -1,6 +1,6 @@
 # Projector-to-Chessboard Calibration Specification
 
-**Version:** 0.11
+**Version:** 0.13
 **Status:** Initial implementation validated on hardware  
 **Platform:** Python on Windows  
 **Camera:** Logitech Webcam C930e at 1920x1080  
@@ -41,8 +41,8 @@ The initial calibration path is implemented with:
   `calibrations/latest.json`.
 - Strict restoration of the saved calibration when camera identifier, camera
   resolution, projector name, and projector resolution all match.
-- Manual quick verification that remaps the current board position and checks
-  five projected square-center targets.
+- Manual quick realignment that fits a candidate from five projected targets
+  and measures sufficiency with four independent validation targets.
 - Up-to-five-Hz non-disruptive continuous board remapping and active-square
   projector verification.
 - An interactive 8x8 board using the classic Lichess brown palette.
@@ -67,8 +67,8 @@ The first successful hardware run measured:
 - 8.0% maximum error as a fraction of local square width.
 
 The current implementation restores a strictly matching saved calibration and
-provides **Quick verify saved calibration**. Automatic periodic verification
-and drift-triggered recalibration remain future work.
+provides **Quick realign / assess**. Automatic drift-triggered recalibration
+remains intentionally disabled.
 
 ## 2. Scope
 
@@ -82,7 +82,7 @@ The calibration feature shall:
 6. Measure alignment independently after calibration.
 7. Reject incomplete, unstable, or inaccurate calibrations.
 8. Save successful calibrations, restore only exact hardware/resolution
-   matches, and provide five-target quick verification.
+   matches, and provide measured quick realignment with held-out validation.
 
 The first implementation assumes:
 
@@ -508,26 +508,31 @@ non-disruptive monitor can detect projector movement only while a square is
 illuminated or when the next square is selected. Periodic visible probes and
 always-on anchor marks are intentionally not used.
 
-### 14.2 Manual quick verification
+### 14.2 Manual quick realignment and sufficiency measurement
 
-A quick verification sequence shall project at least five targets:
+A quick realignment sequence shall project:
 
-- Four positions near the board corners.
-- The board center.
+- Five fitting targets at four corner-square centers and the board center.
+- Four independent validation targets at the centers of the board edges.
 
-The saved calibration may continue to be used only when all targets are
-detected and remain within the configured drift threshold.
+The fitting targets shall calculate a candidate camera-to-projector homography
+without changing the active verified calibration. The saved local correction
+field shall be transferred to the candidate mapping.
 
-The implemented manual quick verification:
+The implemented manual quick realignment:
 
 1. Captures a current projector-black frame.
 2. Redetects the complete empty board.
 3. Remaps the saved projector mesh to the current camera-grid coordinates.
-4. Projects targets at four corner-square centers and one central square
-   center.
-5. Applies the same maximum 10%-of-local-square-width validation threshold as
-   full calibration.
-6. Requires full Gray-code calibration when any check fails.
+4. Projects five fitting targets and measures their camera centroids.
+5. Fits a candidate homography while retaining the saved local mesh
+   corrections.
+6. Refreshes the black reference and projects four targets that were not used
+   for fitting.
+7. Accepts and saves the candidate only when every independent validation
+   target remains below 10% of local square width.
+8. Otherwise reports that full calibration is required and restores the
+   previous verified calibration without replacing or deleting it.
 
 A complete calibration is required after:
 
@@ -537,13 +542,13 @@ A complete calibration is required after:
   plane.
 - Camera or projector resolution changes.
 - Display reconnection that changes geometry.
-- Quick verification failure.
+- Quick realignment insufficiency.
 
 Moving the board within the same calibrated plane does not necessarily require
 a complete Gray-code calibration. The application may redetect the 9x9 board
 grid and apply the existing camera-to-projector mapping, followed by quick
-verification. Any uncertainty about whether the plane changed shall trigger a
-complete calibration.
+realignment assessment. Any candidate that fails independent validation shall
+trigger a complete calibration recommendation.
 
 Move indicators shall be suspended while verification or calibration patterns
 are displayed.
@@ -570,8 +575,8 @@ A successful calibration shall be stored with:
 Saved calibration data is treated as invalid if camera identifier, camera
 resolution, projector name, or projector resolution does not match. A matching
 record is restored with an explicit warning to recalibrate after hardware or
-board-plane movement. Manual five-target quick verification is available;
-automatic periodic verification remains planned.
+board-plane movement. Manual measured quick realignment is available;
+automatic recalibration is intentionally not performed.
 
 ## 16. Diagnostics
 
@@ -611,7 +616,11 @@ The implemented calibration interface provides:
 - An all-squares fill preview.
 - Automatic save after successful validation.
 - Strict matching-calibration restore.
-- **Quick verify saved calibration** action.
+- **Quick realign / assess** action.
+- Automatic standard-orientation detection from the median light/dark parity
+  of all 64 inset square interiors while the projector is black. Reversed
+  parity applies a remembered 90-degree coordinate rotation consistently to
+  selected-square projection and optical verification.
 - Selectable continuous-alignment monitor status.
 - The interactive square-selection board described below.
 
@@ -694,11 +703,12 @@ the user.
 - Reject inaccurate calibration.
 - Add bounded iterative refinement.
 
-### Stage 5: Persistence and manual quick verification - implemented
+### Stage 5: Persistence and manual quick realignment - implemented
 
 - Save successful calibration records.
 - Reload matching records.
-- Verify board stability and five projected targets on request.
+- Fit five projected targets and independently validate four additional
+  targets on request.
 
 ## 20. Test Requirements
 
@@ -744,8 +754,9 @@ The projector-calibration milestone is complete when:
 6. Calibration failure always returns the projector to black.
 7. Successful calibration can be saved and restored for a strict matching
    hardware/resolution configuration.
-8. A restored calibration can be verified with five projected targets without
-   rerunning the 40-state Gray-code sequence.
+8. A restored calibration can be quickly realigned from five projected targets
+   and accepted only after four independent targets pass, without rerunning the
+   40-state Gray-code sequence.
 
 Automatic periodic verification remains beyond the initial implemented
 milestone.

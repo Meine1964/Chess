@@ -1,6 +1,6 @@
 # Projector/Camera Chessboard Calibration Specification
 
-**Version:** 1.9
+**Version:** 2.3
 **Status:** Core camera/projector workflow implemented and hardware validated
 **Initial platform:** Python on Windows  
 **Camera connection:** USB  
@@ -613,6 +613,18 @@ The current interface contains:
 - Alignment errors do not discard the last verified calibration or start
   recalibration. Temporary board-follow mappings become verified only after
   optical confirmation; an error restores the previous verified mapping.
+- The interactive board remembers its last selected square independently from
+  current projector output. Black, previews, closure, calibration, and
+  alignment errors retain the highlight. Temporary operations automatically
+  restore that square; an explicit Black action keeps output black until the
+  highlighted square is clicked again.
+- While the projector is black, automatic board-orientation detection compares
+  inset brightness over all 64 physical squares. Standard orientation requires
+  the bottom-right square to be white; when the detected color parity is
+  reversed, logical coordinates are rotated by 90 degrees. The result is
+  remembered for starts where pieces obscure the board. Projection and optical
+  monitoring use the same transformed coordinates, while adaptive indicator
+  color follows the logical square color.
 - Live camera preview.
 - **Take snapshot** action.
 - **Resume live camera** action.
@@ -644,8 +656,8 @@ The current interface contains:
 - Emergency "projector black" control.
 - Strict restore of the latest saved calibration when camera identifier,
   camera resolution, projector name, and projector resolution match.
-- **Quick verify saved calibration** action using a black reference and five
-  projected square-center targets.
+- **Quick realign / assess** action using five fitting targets and four
+  independent validation targets.
 - Selectable continuous-alignment status showing board drift and active-square
   projection error.
 - Lichess-colored clickable 8x8 board.
@@ -766,9 +778,10 @@ This milestone is implemented for the stationary empty-board setup:
    matching camera/projector identities and resolutions.
 9. A clickable Lichess board projects one physical square using adaptive
    cyan/azure colors.
-10. A quick verification mode redetects and remaps the current board position,
-    then validates five projected square-center targets against the same 10%
-    error threshold.
+10. A measured quick-realignment mode redetects and remaps the current board,
+    uses five projected targets to fit a candidate camera-to-projector
+    homography while retaining local mesh corrections, and accepts it only
+    when four independent targets pass the same 10% error threshold.
 11. A non-disruptive background monitor checks the live board grid up to five
     times per second, continuously remaps board movement, and verifies any
     currently projected square.
