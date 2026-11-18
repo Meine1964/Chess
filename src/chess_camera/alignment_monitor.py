@@ -4,7 +4,12 @@ import cv2
 import numpy as np
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal, Slot
 
-from .board_detector import BoardDetection, BoardDetector, ImageArray
+from .board_detector import (
+    BoardDetection,
+    BoardDetector,
+    ImageArray,
+    StableBoardTracker,
+)
 from .calibration_controller import CalibrationResult
 from .projector_calibration import (
     CalibrationError,
@@ -27,7 +32,7 @@ class _DetectionTask(QRunnable):
         self,
         generation: int,
         frame: ImageArray,
-        detector: BoardDetector,
+        detector: BoardDetector | StableBoardTracker,
     ) -> None:
         super().__init__()
         self._generation = generation
@@ -78,6 +83,7 @@ class AlignmentMonitor(QObject):
             )
 
         self._detector = detector
+        self._tracker = StableBoardTracker(detector)
         self._thread_pool = QThreadPool.globalInstance()
         self._timer = QTimer(self)
         self._timer.setInterval(interval_milliseconds)
@@ -107,6 +113,7 @@ class AlignmentMonitor(QObject):
         if projector_size[0] <= 1 or projector_size[1] <= 1:
             raise ValueError("Projector dimensions must be greater than one.")
         self._result = result
+        self._tracker.reset(result.board_detection)
         self._projector_size = projector_size
         self._selected_square = None
         self._output_mode = "black"
@@ -125,6 +132,7 @@ class AlignmentMonitor(QObject):
 
     def clear(self) -> None:
         self._result = None
+        self._tracker.reset()
         self._selected_square = None
         self._output_mode = "paused"
         self._black_reference = None
@@ -186,7 +194,7 @@ class AlignmentMonitor(QObject):
             return
         frame = self._latest_frame.copy()
         generation = self._generation
-        task = _DetectionTask(generation, frame, self._detector)
+        task = _DetectionTask(generation, frame, self._tracker)
         task.signals.completed.connect(self._check_completed)
         task.signals.failed.connect(self._check_failed)
         self._check_running = True
@@ -216,6 +224,8 @@ class AlignmentMonitor(QObject):
             self.status_changed.emit(
                 "Alignment check failed because its camera frame was invalid."
             )
+            return
+        if self._tracker.state != "stable_board":
             return
         if detection is None:
             return

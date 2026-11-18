@@ -355,6 +355,13 @@ class CameraWindow(QMainWindow):
             self._start_quick_verification
         )
         self._quick_verify_button.setEnabled(False)
+        self._validate_calibration_button = QPushButton(
+            "Validate calibration"
+        )
+        self._validate_calibration_button.clicked.connect(
+            self._start_validation_only
+        )
+        self._validate_calibration_button.setEnabled(False)
         self._cancel_calibration_button = QPushButton("Cancel calibration")
         self._cancel_calibration_button.clicked.connect(
             self._cancel_projector_calibration
@@ -370,6 +377,7 @@ class CameraWindow(QMainWindow):
         self._show_squares_button.setEnabled(False)
         calibration_layout = QHBoxLayout()
         calibration_layout.addWidget(self._start_calibration_button)
+        calibration_layout.addWidget(self._validate_calibration_button)
         calibration_layout.addWidget(self._quick_verify_button)
         calibration_layout.addWidget(self._cancel_calibration_button)
         calibration_layout.addWidget(self._show_grid_button)
@@ -744,6 +752,42 @@ class CameraWindow(QMainWindow):
                 str(error),
             )
 
+    def _start_validation_only(self) -> None:
+        result = self._calibration_result
+        if result is None:
+            QMessageBox.warning(
+                self,
+                "Projector calibration validation",
+                "No matching saved calibration is available.",
+            )
+            return
+        if self._latest_frame is None:
+            QMessageBox.warning(
+                self,
+                "Projector calibration validation",
+                "No camera frame is available yet.",
+            )
+            return
+        if not self._open_projector():
+            return
+
+        self._suspend_selected_square()
+        selected_index = self._projector_selector.currentIndex()
+        screen_geometry = self._screens[selected_index].geometry()
+        try:
+            self._calibrator.start_validation_only(
+                result,
+                screen_geometry.width(),
+                screen_geometry.height(),
+            )
+        except (RuntimeError, ValueError) as error:
+            self._projector_window.show_black()
+            QMessageBox.critical(
+                self,
+                "Projector calibration validation",
+                str(error),
+            )
+
     def _black_projector(self) -> None:
         if self._calibrator.active:
             self._calibrator.cancel()
@@ -827,6 +871,9 @@ class CameraWindow(QMainWindow):
         self._quick_verify_button.setEnabled(
             not active and self._calibration_result is not None
         )
+        self._validate_calibration_button.setEnabled(
+            not active and self._calibration_result is not None
+        )
         self._cancel_calibration_button.setEnabled(active)
         self._camera_selector.setEnabled(not active)
         self._projector_selector.setEnabled(not active)
@@ -890,7 +937,10 @@ class CameraWindow(QMainWindow):
     def _projector_calibration_failed(self, message: str) -> None:
         self._projector_window.show_black()
         if (
-            self._calibrator.quick_verification
+            (
+                self._calibrator.quick_verification
+                or self._calibrator.validation_only
+            )
             and self._calibration_result is not None
         ):
             result = self._calibration_result
@@ -906,11 +956,21 @@ class CameraWindow(QMainWindow):
                 (geometry.width(), geometry.height()),
             )
             self._alignment_monitor.set_black()
-            self._projector_status.setText(
-                f"Quick realignment is insufficient: {message} "
-                "The previous verified calibration remains active; use full "
-                "calibration when convenient."
+            operation = (
+                "Quick realignment"
+                if self._calibrator.quick_verification
+                else "Validation"
             )
+            self._projector_status.setText(
+                f"{operation} failed: {message} The previous verified "
+                "calibration remains active."
+            )
+            if self._calibrator.validation_only:
+                QMessageBox.warning(
+                    self,
+                    "Projector calibration validation failed",
+                    message,
+                )
             self._restore_remembered_square()
             return
         self._invalidate_calibration()
@@ -1006,6 +1066,7 @@ class CameraWindow(QMainWindow):
         self._show_grid_button.setEnabled(True)
         self._show_squares_button.setEnabled(True)
         self._quick_verify_button.setEnabled(True)
+        self._validate_calibration_button.setEnabled(True)
         selected_screen = self._screens[
             self._projector_selector.currentIndex()
         ]
@@ -1034,6 +1095,7 @@ class CameraWindow(QMainWindow):
         self._show_grid_button.setEnabled(False)
         self._show_squares_button.setEnabled(False)
         self._quick_verify_button.setEnabled(False)
+        self._validate_calibration_button.setEnabled(False)
         self._alignment_monitor.clear()
         self._set_calibration_indicator(
             self._camera_calibration_indicator,

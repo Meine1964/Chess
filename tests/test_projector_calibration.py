@@ -1,4 +1,5 @@
 import json
+from collections.abc import Callable
 
 import cv2
 import numpy as np
@@ -373,11 +374,11 @@ def test_quick_realign_uses_independent_validation_phase() -> None:
     projector = FakeProjector()
     controller = ProjectorCalibrationController(projector, object())
     fitting_coordinates = [
-        (0.5, 0.5),
-        (7.5, 0.5),
-        (3.5, 3.5),
-        (0.5, 7.5),
-        (7.5, 7.5),
+        (1.0, 1.0),
+        (7.0, 1.0),
+        (1.0, 7.0),
+        (7.0, 7.0),
+        (4.0, 4.0),
     ]
     measured = [
         interpolate_grid_point(detection.grid_points, x, y)
@@ -403,14 +404,148 @@ def test_quick_realign_uses_independent_validation_phase() -> None:
 
     assert controller._quick_phase == "validate"
     assert controller._validation_coordinates == [
-        (3.5, 0.5),
-        (7.5, 3.5),
-        (3.5, 7.5),
-        (0.5, 3.5),
+        (4.0, 1.0),
+        (7.0, 4.0),
+        (4.0, 7.0),
+        (1.0, 4.0),
     ]
     assert controller._validation_index == 0
     assert "validation_black" not in controller._captures
     assert projector.grid is not None
+
+
+def test_validation_targets_avoid_starting_piece_centers() -> None:
+    detection = _detection()
+    mapping = MappingResult(
+        camera_grid=detection.grid_points,
+        projector_grid=detection.grid_points,
+        camera_to_projector_homography=np.eye(3, dtype=np.float32),
+        coverage_ratio=1.0,
+        decoded_ratio=1.0,
+        inlier_ratio=1.0,
+        rms_error=0.0,
+        maximum_error=0.0,
+    )
+    controller = ProjectorCalibrationController(object(), object())
+    controller._detection = detection
+    controller._mapping = mapping
+    controller._show_validation_black = lambda: None
+
+    controller._start_validation()
+
+    occupied_centers = np.asarray(
+        [
+            (column + 0.5, row + 0.5)
+            for row in (0, 1, 6, 7)
+            for column in range(8)
+        ],
+        dtype=np.float32,
+    )
+    targets = np.asarray(
+        controller._validation_coordinates,
+        dtype=np.float32,
+    )
+    distances = np.linalg.norm(
+        targets[:, np.newaxis, :] - occupied_centers[np.newaxis, :, :],
+        axis=2,
+    )
+
+    assert targets.shape == (9, 2)
+    assert float(np.min(distances)) > 0.7
+    assert float(np.min(targets)) == pytest.approx(1.0)
+    assert float(np.max(targets)) == pytest.approx(7.0)
+
+
+def test_missing_validation_target_tries_nearby_candidate() -> None:
+    controller = ProjectorCalibrationController(object(), object())
+    controller._validation_candidates = [
+        [(1.0, 1.0), (1.25, 1.0)]
+    ]
+    controller._validation_coordinates = [(1.0, 1.0)]
+    controller._validation_expected = [
+        np.asarray([20.0, 20.0], dtype=np.float32)
+    ]
+    controller._validation_widths = [20.0]
+    controller._validation_index = 0
+    controller._captures["validation_black"] = np.zeros(
+        (50, 50),
+        dtype=np.uint8,
+    )
+    scheduled: list[Callable[[], None]] = []
+    controller._schedule = lambda _delay, callback: scheduled.append(
+        callback
+    )
+
+    controller._accept_validation_capture(
+        np.zeros((50, 50), dtype=np.uint8)
+    )
+
+    assert controller._validation_coordinates == [(1.25, 1.0)]
+    assert controller._validation_expected == []
+    assert controller._validation_widths == []
+    assert controller._validation_candidate_index == 1
+    assert len(scheduled) == 1
+
+
+def test_validation_only_reuses_mapping_without_refinement() -> None:
+    class FakeProjector:
+        def __init__(self) -> None:
+            self.grid: np.ndarray | None = None
+
+        def set_projector_grid(self, grid: np.ndarray) -> None:
+            self.grid = grid.copy()
+
+    detection = _detection()
+    mapping = MappingResult(
+        camera_grid=detection.grid_points,
+        projector_grid=detection.grid_points + 5.0,
+        camera_to_projector_homography=np.eye(3, dtype=np.float32),
+        coverage_ratio=1.0,
+        decoded_ratio=1.0,
+        inlier_ratio=1.0,
+        rms_error=0.0,
+        maximum_error=0.0,
+    )
+    empty_points = np.empty((0, 2), dtype=np.float32)
+    result = CalibrationResult(
+        board_detection=detection,
+        mapping=mapping,
+        validation=ValidationResult(
+            measured_points=empty_points,
+            expected_points=empty_points,
+            errors=np.empty(0, dtype=np.float32),
+            mean_error=0.0,
+            rms_error=0.0,
+            maximum_error=0.0,
+            maximum_square_fraction=0.0,
+        ),
+    )
+    projector = FakeProjector()
+    controller = ProjectorCalibrationController(projector, object())
+    controller._show_validation_black = lambda: None
+
+    controller.start_validation_only(result, 200, 200)
+
+    assert controller.validation_only
+    assert not controller.quick_verification
+    assert controller._mapping is mapping
+    assert len(controller._validation_coordinates) == 9
+    assert projector.grid is not None
+    np.testing.assert_array_equal(projector.grid, mapping.projector_grid)
+
+    controller._validation_expected = [
+        np.asarray([20.0, 20.0], dtype=np.float32)
+    ] * 9
+    controller._validation_measured = [
+        np.asarray([22.0, 20.0], dtype=np.float32)
+    ] * 9
+    controller._validation_widths = [10.0] * 9
+
+    with pytest.raises(CalibrationError, match="20.0%"):
+        controller._finish_validation()
+
+    assert controller._refinement_iteration == 0
+    assert controller._mapping is mapping
 
 
 def test_validation_target_and_metrics_measure_camera_error() -> None:

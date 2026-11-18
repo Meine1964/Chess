@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import Literal, TypeAlias
 
 import cv2
 import numpy as np
@@ -24,8 +24,165 @@ class BoardDetection:
         return self.grid_points[[0, 0, 8, 8], [0, 8, 8, 0]]
 
 
+TrackingState = Literal[
+    "searching",
+    "candidate_accumulating",
+    "stable_board",
+    "motion_or_occlusion",
+    "insufficient_evidence",
+]
+
+
+class StableBoardTracker:
+    """Keep confirmed board geometry stable through motion and occlusion."""
+
+    def __init__(
+        self,
+        detector: "BoardDetector",
+        *,
+        stable_frame_count: int = 3,
+        motion_pixel_threshold: int = 25,
+        motion_fraction_threshold: float = 0.03,
+        unchanged_corner_threshold: float = 2.0,
+        candidate_corner_threshold: float = 6.0,
+    ) -> None:
+        if stable_frame_count < 1:
+            raise ValueError("Stable frame count must be at least one.")
+        if motion_pixel_threshold < 1:
+            raise ValueError("Motion pixel threshold must be positive.")
+        if not 0 < motion_fraction_threshold < 1:
+            raise ValueError("Motion fraction threshold must be between 0 and 1.")
+        if unchanged_corner_threshold <= 0 or candidate_corner_threshold <= 0:
+            raise ValueError("Corner thresholds must be positive.")
+
+        self._detector = detector
+        self._stable_frame_count = stable_frame_count
+        self._motion_pixel_threshold = motion_pixel_threshold
+        self._motion_fraction_threshold = motion_fraction_threshold
+        self._unchanged_corner_threshold = unchanged_corner_threshold
+        self._candidate_corner_threshold = candidate_corner_threshold
+        self._confirmed: BoardDetection | None = None
+        self._candidate: BoardDetection | None = None
+        self._candidate_count = 0
+        self._previous_gray: ImageArray | None = None
+        self._state: TrackingState = "searching"
+
+    @property
+    def state(self) -> TrackingState:
+        return self._state
+
+    @property
+    def confirmed(self) -> BoardDetection | None:
+        return self._confirmed
+
+    def reset(self, confirmed: BoardDetection | None = None) -> None:
+        self._confirmed = confirmed
+        self._candidate = None
+        self._candidate_count = 0
+        self._previous_gray = None
+        self._state = "stable_board" if confirmed is not None else "searching"
+
+    def detect(self, frame: ImageArray) -> BoardDetection | None:
+        gray = self._gray(frame)
+        if self._has_motion(gray):
+            self._candidate = None
+            self._candidate_count = 0
+            self._previous_gray = gray.copy()
+            self._state = "motion_or_occlusion"
+            return self._confirmed
+        self._previous_gray = gray.copy()
+
+        detection = self._detector.detect(frame)
+        if detection is None:
+            self._candidate = None
+            self._candidate_count = 0
+            self._state = (
+                "motion_or_occlusion"
+                if self._confirmed is not None
+                else "insufficient_evidence"
+            )
+            return self._confirmed
+
+        if self._confirmed is not None:
+            confirmed_displacement = self._corner_displacement(
+                detection,
+                self._confirmed,
+            )
+            if confirmed_displacement <= self._unchanged_corner_threshold:
+                self._candidate = None
+                self._candidate_count = 0
+                self._state = "stable_board"
+                return self._confirmed
+
+        if (
+            self._candidate is not None
+            and self._corner_displacement(detection, self._candidate)
+            <= self._candidate_corner_threshold
+        ):
+            self._candidate_count += 1
+            self._candidate = detection
+        else:
+            self._candidate = detection
+            self._candidate_count = 1
+
+        if self._candidate_count >= self._stable_frame_count:
+            self._confirmed = self._candidate
+            self._candidate = None
+            self._candidate_count = 0
+            self._state = "stable_board"
+            return self._confirmed
+
+        self._state = "candidate_accumulating"
+        return self._confirmed
+
+    def _has_motion(self, gray: ImageArray) -> bool:
+        if self._previous_gray is None or self._previous_gray.shape != gray.shape:
+            return False
+        difference = cv2.absdiff(gray, self._previous_gray)
+        moving = difference >= self._motion_pixel_threshold
+        if self._confirmed is None:
+            return float(np.mean(moving)) >= self._motion_fraction_threshold
+
+        mask = np.zeros(gray.shape, dtype=np.uint8)
+        cv2.fillConvexPoly(
+            mask,
+            np.rint(self._confirmed.outer_corners).astype(np.int32),
+            1,
+        )
+        board_pixels = int(np.count_nonzero(mask))
+        if board_pixels == 0:
+            return False
+        moving_board_pixels = int(np.count_nonzero(np.logical_and(moving, mask)))
+        return (
+            moving_board_pixels / board_pixels
+            >= self._motion_fraction_threshold
+        )
+
+    @staticmethod
+    def _corner_displacement(
+        first: BoardDetection,
+        second: BoardDetection,
+    ) -> float:
+        return float(
+            np.max(
+                np.linalg.norm(
+                    first.outer_corners - second.outer_corners,
+                    axis=1,
+                )
+            )
+        )
+
+    @staticmethod
+    def _gray(frame: ImageArray) -> ImageArray:
+        if frame.ndim == 3:
+            return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if frame.ndim == 2:
+            return frame
+        raise ValueError("Expected a grayscale or BGR camera frame.")
+
+
 class BoardDetector:
-    """Detect an empty 8x8 chessboard and reconstruct its full 9x9 grid."""
+    """Detect an 8x8 playing plane and reconstruct its equal-square grid."""
 
     _INNER_PATTERN = (7, 7)
     _DETECTION_FLAGS = (
@@ -195,34 +352,42 @@ class BoardDetector:
                         continue
 
                     perimeter = cv2.arcLength(contour, True)
-                    candidate = cv2.approxPolyDP(
-                        contour,
-                        0.02 * perimeter,
-                        True,
-                    )
-                    if len(candidate) != 4 or not cv2.isContourConvex(candidate):
-                        continue
+                    for approximation_ratio in (0.02, 0.04, 0.06):
+                        candidate = cv2.approxPolyDP(
+                            contour,
+                            approximation_ratio * perimeter,
+                            True,
+                        )
+                        if (
+                            len(candidate) != 4
+                            or not cv2.isContourConvex(candidate)
+                        ):
+                            continue
 
-                    corners = self._order_corners(
-                        np.asarray(candidate, dtype=np.float32).reshape(4, 2)
-                    )
-                    corners, grid_alignment = self._refine_grid_corners(
-                        color_frame,
-                        corners,
-                    )
-                    score, separation = self._alternating_color_score(
-                        color_frame,
-                        corners,
-                    )
-                    detection = self._detection_from_quadrilateral(
-                        corners,
-                        score,
-                        separation,
-                        grid_alignment,
-                        gray.shape,
-                    )
-                    if detection is not None:
-                        detections.append(detection)
+                        corners = self._order_corners(
+                            np.asarray(
+                                candidate,
+                                dtype=np.float32,
+                            ).reshape(4, 2)
+                        )
+                        corners, grid_alignment = self._refine_grid_corners(
+                            color_frame,
+                            corners,
+                        )
+                        score, separation = self._alternating_color_score(
+                            color_frame,
+                            corners,
+                        )
+                        detection = self._detection_from_quadrilateral(
+                            corners,
+                            score,
+                            separation,
+                            grid_alignment,
+                            gray.shape,
+                        )
+                        if detection is not None:
+                            detections.append(detection)
+                        break
         return detections
 
     def _detection_from_quadrilateral(
@@ -306,39 +471,78 @@ class BoardDetector:
             axis=1,
         )
 
-        vertical_positions: list[int] = []
-        horizontal_positions: list[int] = []
-        alignment_ratios: list[float] = []
-        for grid_index in range(1, 8):
-            expected = round(grid_index * (target_size - 1) / 8)
-            search_start = expected - 20
-            search_end = expected + 21
-            vertical_window = vertical_profile[search_start:search_end]
-            horizontal_window = horizontal_profile[search_start:search_end]
-            vertical_position = search_start + int(
-                np.argmax(vertical_window)
+        def find_grid_lines(
+            profile: FloatArray,
+        ) -> tuple[list[int], list[float]]:
+            def scan(sequential: bool) -> tuple[list[int], list[float]]:
+                positions: list[int] = []
+                ratios: list[float] = []
+                spacing = (target_size - 1) / 8
+                search_radius = 24 if sequential else 20
+                for grid_index in range(1, 8):
+                    expected = round(
+                        positions[-1] + spacing
+                        if sequential and positions
+                        else grid_index * (target_size - 1) / 8
+                    )
+                    if not 0 <= expected < target_size:
+                        return [], []
+                    search_start = max(0, expected - search_radius)
+                    search_end = min(
+                        target_size,
+                        expected + search_radius + 1,
+                    )
+                    window = profile[search_start:search_end]
+                    if window.size == 0:
+                        return [], []
+                    position = search_start + int(np.argmax(window))
+                    positions.append(position)
+                    ratios.append(
+                        float(
+                            profile[
+                                max(0, expected - 2) : expected + 3
+                            ].max()
+                            / (window.max() + 1.0)
+                        )
+                    )
+                    if sequential and len(positions) >= 2:
+                        spacing = float(
+                            np.median(np.diff(np.asarray(positions)))
+                        )
+                        if not 32.0 <= spacing <= 96.0:
+                            return [], []
+                return positions, ratios
+
+            def fit_residual(positions: list[int]) -> float:
+                indices = np.arange(1, 8, dtype=np.float32)
+                slope, offset = np.polyfit(indices, positions, 1)
+                return float(
+                    np.sqrt(
+                        np.mean(
+                            np.square(
+                                np.asarray(positions)
+                                - (slope * indices + offset)
+                            )
+                        )
+                    )
+                )
+
+            nominal = scan(False)
+            sequential = scan(True)
+            if not sequential[0]:
+                return nominal
+            return min(
+                (nominal, sequential),
+                key=lambda candidate: fit_residual(candidate[0]),
             )
-            horizontal_position = search_start + int(
-                np.argmax(horizontal_window)
-            )
-            vertical_positions.append(vertical_position)
-            horizontal_positions.append(horizontal_position)
-            alignment_ratios.extend(
-                [
-                    float(
-                        vertical_profile[
-                            max(0, expected - 2) : expected + 3
-                        ].max()
-                        / (vertical_window.max() + 1.0)
-                    ),
-                    float(
-                        horizontal_profile[
-                            max(0, expected - 2) : expected + 3
-                        ].max()
-                        / (horizontal_window.max() + 1.0)
-                    ),
-                ]
-            )
+
+        vertical_positions, vertical_ratios = find_grid_lines(
+            vertical_profile
+        )
+        horizontal_positions, horizontal_ratios = find_grid_lines(
+            horizontal_profile
+        )
+        alignment_ratios = vertical_ratios + horizontal_ratios
 
         grid_indices = np.arange(1, 8, dtype=np.float32)
         x_slope, x_offset = np.polyfit(
@@ -381,12 +585,23 @@ class BoardDetector:
         ):
             return corners, alignment
 
+        x_start = float(x_offset)
+        x_end = float(x_offset + 8 * x_slope)
+        if abs(x_start) > 16.0:
+            x_start = 0.0
+            x_end = float(target_size - 1)
+        y_start = float(y_offset)
+        y_end = float(y_offset + 8 * y_slope)
+        if abs(y_start) > 16.0:
+            y_start = 0.0
+            y_end = float(target_size - 1)
+
         normalized_corners = np.array(
             [
-                [x_offset, y_offset],
-                [x_offset + 8 * x_slope, y_offset],
-                [x_offset + 8 * x_slope, y_offset + 8 * y_slope],
-                [x_offset, y_offset + 8 * y_slope],
+                [x_start, y_start],
+                [x_end, y_start],
+                [x_end, y_end],
+                [x_start, y_end],
             ],
             dtype=np.float32,
         )
@@ -467,15 +682,36 @@ class BoardDetector:
 
         cell_means: list[FloatArray] = []
         parities: list[int] = []
+        cell_size = target_size / 8
         for row in range(8):
             for column in range(8):
-                y_start = int((row + 0.25) * target_size / 8)
-                y_end = int((row + 0.75) * target_size / 8)
-                x_start = int((column + 0.25) * target_size / 8)
-                x_end = int((column + 0.75) * target_size / 8)
+                patches: list[FloatArray] = []
+                for y_fraction in (0.12, 0.70):
+                    for x_fraction in (0.12, 0.70):
+                        y_start = int(
+                            row * cell_size + y_fraction * cell_size
+                        )
+                        y_end = int(
+                            row * cell_size
+                            + (y_fraction + 0.18) * cell_size
+                        )
+                        x_start = int(
+                            column * cell_size + x_fraction * cell_size
+                        )
+                        x_end = int(
+                            column * cell_size
+                            + (x_fraction + 0.18) * cell_size
+                        )
+                        patches.append(
+                            lab_board[y_start:y_end, x_start:x_end].reshape(
+                                -1,
+                                3,
+                            )
+                        )
                 cell_means.append(
-                    lab_board[y_start:y_end, x_start:x_end].mean(
-                        axis=(0, 1)
+                    np.median(
+                        np.concatenate(patches, axis=0),
+                        axis=0,
                     )
                 )
                 parities.append((row + column) % 2)
@@ -484,13 +720,15 @@ class BoardDetector:
         parity = np.asarray(parities)
         first_class = means[parity == 0]
         second_class = means[parity == 1]
-        first_center = first_class.mean(axis=0)
-        second_center = second_class.mean(axis=0)
+        first_center = np.median(first_class, axis=0)
+        second_center = np.median(second_class, axis=0)
         separation = float(np.linalg.norm(first_center - second_center))
         within_class_spread = float(
             (
-                np.linalg.norm(first_class - first_center, axis=1).mean()
-                + np.linalg.norm(second_class - second_center, axis=1).mean()
+                np.median(np.linalg.norm(first_class - first_center, axis=1))
+                + np.median(
+                    np.linalg.norm(second_class - second_center, axis=1)
+                )
             )
             / 2
         )

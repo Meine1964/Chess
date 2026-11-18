@@ -42,6 +42,21 @@ class _CaptureStep:
     description: str
 
 
+_STARTING_POSITION_CORNER_TARGETS = [
+    [(1.0, 1.0), (1.25, 1.0)],
+    [(7.0, 1.0), (6.75, 1.0)],
+    [(1.0, 7.0), (1.25, 7.0)],
+    [(7.0, 7.0), (6.75, 7.0)],
+]
+_STARTING_POSITION_EDGE_TARGETS = [
+    [(4.0, 1.0), (4.25, 1.0)],
+    [(7.0, 4.0), (7.0, 4.25)],
+    [(4.0, 7.0), (3.75, 7.0)],
+    [(1.0, 4.0), (1.0, 3.75)],
+]
+_STARTING_POSITION_CENTER_TARGET = [(4.0, 4.0), (4.25, 4.0)]
+
+
 class ProjectorCalibrationController(QObject):
     status_changed = Signal(str)
     progress_changed = Signal(int, int)
@@ -91,6 +106,8 @@ class ProjectorCalibrationController(QObject):
         self._detection: BoardDetection | None = None
         self._mapping: MappingResult | None = None
         self._validation_coordinates: list[tuple[float, float]] = []
+        self._validation_candidates: list[list[tuple[float, float]]] = []
+        self._validation_candidate_index = 0
         self._validation_expected: list[FloatArray] = []
         self._validation_measured: list[FloatArray] = []
         self._validation_widths: list[float] = []
@@ -101,6 +118,7 @@ class ProjectorCalibrationController(QObject):
         self._capture_token = 0
         self._run_token = 0
         self._quick_verification = False
+        self._validation_only = False
         self._quick_phase = ""
 
     @property
@@ -111,6 +129,10 @@ class ProjectorCalibrationController(QObject):
     def quick_verification(self) -> bool:
         return self._quick_verification
 
+    @property
+    def validation_only(self) -> bool:
+        return self._validation_only
+
     def start(self, projector_width: int, projector_height: int) -> None:
         if self._active:
             raise RuntimeError("Projector calibration is already active.")
@@ -120,6 +142,7 @@ class ProjectorCalibrationController(QObject):
         self._active = True
         self._run_token += 1
         self._quick_verification = False
+        self._validation_only = False
         self._quick_phase = ""
         self._collecting = False
         self._projector_size = (projector_width, projector_height)
@@ -129,6 +152,8 @@ class ProjectorCalibrationController(QObject):
         self._validation_expected.clear()
         self._validation_measured.clear()
         self._validation_widths.clear()
+        self._validation_candidates.clear()
+        self._validation_candidate_index = 0
         self._validation_index = -1
         self._refinement_iteration = 0
         self._steps = self._build_capture_steps(
@@ -158,6 +183,7 @@ class ProjectorCalibrationController(QObject):
         self._active = True
         self._run_token += 1
         self._quick_verification = True
+        self._validation_only = False
         self._quick_phase = "fit"
         self._collecting = False
         self._projector_size = (projector_width, projector_height)
@@ -167,6 +193,8 @@ class ProjectorCalibrationController(QObject):
         self._validation_expected.clear()
         self._validation_measured.clear()
         self._validation_widths.clear()
+        self._validation_candidates.clear()
+        self._validation_candidate_index = 0
         self._validation_index = -1
         self._refinement_iteration = 0
         self._steps = [
@@ -185,6 +213,44 @@ class ProjectorCalibrationController(QObject):
         self.status_changed.emit("Starting measured quick realignment.")
         self.progress_changed.emit(0, self._progress_total)
         self._display_current_step()
+
+    def start_validation_only(
+        self,
+        result: CalibrationResult,
+        projector_width: int,
+        projector_height: int,
+    ) -> None:
+        if self._active:
+            raise RuntimeError("Projector calibration is already active.")
+        if projector_width <= 1 or projector_height <= 1:
+            raise ValueError("Projector dimensions must be greater than one.")
+
+        self._active = True
+        self._run_token += 1
+        self._quick_verification = False
+        self._validation_only = True
+        self._quick_phase = ""
+        self._collecting = False
+        self._projector_size = (projector_width, projector_height)
+        self._captures.clear()
+        self._detection = result.board_detection
+        self._mapping = result.mapping
+        self._validation_expected.clear()
+        self._validation_measured.clear()
+        self._validation_widths.clear()
+        self._validation_candidates.clear()
+        self._validation_candidate_index = 0
+        self._validation_index = -1
+        self._refinement_iteration = 0
+        self._steps.clear()
+        self._progress_total = 10
+        self._projector.set_projector_grid(result.mapping.projector_grid)
+        self.active_changed.emit(True)
+        self.status_changed.emit(
+            "Starting validation of the existing projector calibration."
+        )
+        self.progress_changed.emit(0, self._progress_total)
+        self._start_validation()
 
     def cancel(self) -> None:
         if not self._active:
@@ -402,39 +468,33 @@ class ProjectorCalibrationController(QObject):
         self.status_changed.emit("Mapping complete; refreshing black reference.")
         if self._quick_verification:
             if self._quick_phase == "fit":
-                self._validation_coordinates = [
-                    (0.5, 0.5),
-                    (7.5, 0.5),
-                    (3.5, 3.5),
-                    (0.5, 7.5),
-                    (7.5, 7.5),
-                ]
+                self._validation_candidates = (
+                    _STARTING_POSITION_CORNER_TARGETS
+                    + [_STARTING_POSITION_CENTER_TARGET]
+                )
                 self._validation_progress_base = 1
             else:
-                self._validation_coordinates = [
-                    (3.5, 0.5),
-                    (7.5, 3.5),
-                    (3.5, 7.5),
-                    (0.5, 3.5),
-                ]
+                self._validation_candidates = _STARTING_POSITION_EDGE_TARGETS
                 self._validation_progress_base = 7
         else:
-            self._validation_coordinates = [
-                (0.5, 0.5),
-                (3.5, 0.5),
-                (7.5, 0.5),
-                (0.5, 3.5),
-                (3.5, 3.5),
-                (7.5, 3.5),
-                (0.5, 7.5),
-                (3.5, 7.5),
-                (7.5, 7.5),
-            ]
+            self._validation_candidates = (
+                _STARTING_POSITION_CORNER_TARGETS
+                + _STARTING_POSITION_EDGE_TARGETS
+                + [_STARTING_POSITION_CENTER_TARGET]
+            )
             self._validation_progress_base = (
                 self._progress_total
-                - len(self._validation_coordinates)
+                - len(self._validation_candidates)
                 - 1
             )
+        self._validation_candidates = [
+            candidates.copy()
+            for candidates in self._validation_candidates
+        ]
+        self._validation_coordinates = [
+            candidates[0] for candidates in self._validation_candidates
+        ]
+        self._validation_candidate_index = 0
         self._validation_index = 0
         self._show_validation_black()
 
@@ -478,7 +538,7 @@ class ProjectorCalibrationController(QObject):
             board_x,
             board_y,
         )
-        radius = max(4, min(24, round(projector_square_width * 0.18)))
+        radius = max(4, min(20, round(projector_square_width * 0.14)))
         width, height = self._projector_size
         pattern = np.zeros((height, width), dtype=np.uint8)
         cv2.circle(
@@ -520,14 +580,35 @@ class ProjectorCalibrationController(QObject):
 
         expected = self._validation_expected[-1]
         square_width = self._validation_widths[-1]
-        measured = locate_validation_target(
-            self._captures["validation_black"],
-            averaged,
-            expected,
-            max(8, round(square_width * 0.75)),
-        )
+        try:
+            measured = locate_validation_target(
+                self._captures["validation_black"],
+                averaged,
+                expected,
+                max(8, round(square_width * 0.75)),
+            )
+        except CalibrationError:
+            candidates = self._validation_candidates[
+                self._validation_index
+            ]
+            next_candidate = self._validation_candidate_index + 1
+            if next_candidate >= len(candidates):
+                raise
+            self._validation_expected.pop()
+            self._validation_widths.pop()
+            self._validation_candidate_index = next_candidate
+            self._validation_coordinates[self._validation_index] = (
+                candidates[next_candidate]
+            )
+            self.status_changed.emit(
+                f"Validation target {self._validation_index + 1} was not "
+                "detected; trying an alternative location."
+            )
+            self._schedule(0, self._show_validation_target_safely)
+            return
         self._validation_measured.append(measured)
         self._validation_index += 1
+        self._validation_candidate_index = 0
         completed_steps = (
             self._validation_progress_base
             + self._validation_index
@@ -580,6 +661,7 @@ class ProjectorCalibrationController(QObject):
         if validation.maximum_square_fraction >= 0.1:
             if (
                 not self._quick_verification
+                and not self._validation_only
                 and self._refinement_iteration
                 < self._maximum_refinement_iterations
             ):
@@ -604,10 +686,16 @@ class ProjectorCalibrationController(QObject):
             self._progress_total,
             self._progress_total,
         )
+        operation = (
+            "Quick realignment"
+            if self._quick_verification
+            else "Validation"
+            if self._validation_only
+            else "Calibration"
+        )
         self.status_changed.emit(
-            f"{'Quick realignment' if self._quick_verification else 'Calibration'} "
-            f"succeeded: {validation.maximum_error:.2f} px maximum "
-            "validation error."
+            f"{operation} succeeded: {validation.maximum_error:.2f} px "
+            "maximum validation error."
         )
         self.completed.emit(result)
 
@@ -658,6 +746,10 @@ class ProjectorCalibrationController(QObject):
         self._validation_expected.clear()
         self._validation_measured.clear()
         self._validation_widths.clear()
+        self._validation_coordinates = [
+            candidates[0] for candidates in self._validation_candidates
+        ]
+        self._validation_candidate_index = 0
         self._validation_index = 0
         self._schedule(0, self._show_validation_black)
 

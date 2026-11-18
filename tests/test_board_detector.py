@@ -1,11 +1,12 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import cv2
 import numpy as np
 from PySide6.QtMultimedia import QCameraDevice
 
-from src.chess_camera.board_detector import BoardDetector
+from src.chess_camera.board_detector import BoardDetector, StableBoardTracker
 from src.chess_camera.camera_app import (
     _is_external_camera,
     _resolve_camera_index,
@@ -32,6 +33,49 @@ def _perspective_board() -> tuple[np.ndarray, np.ndarray]:
         dtype=np.float32,
     )
     destination_corners = np.array(
+        [[310, 95], [1010, 145], [920, 650], [225, 590]],
+        dtype=np.float32,
+    )
+    transform = cv2.getPerspectiveTransform(source_corners, destination_corners)
+    image = cv2.warpPerspective(
+        board,
+        transform,
+        (1280, 720),
+        borderValue=(140, 140, 140),
+    )
+    return image, destination_corners
+
+
+def _perspective_board_with_starting_pieces() -> tuple[np.ndarray, np.ndarray]:
+    square_size = 80
+    board_size = square_size * 8
+    board = np.zeros((board_size, board_size, 3), dtype=np.uint8)
+    for row in range(8):
+        for column in range(8):
+            color = 225 if (row + column) % 2 else 25
+            cv2.rectangle(
+                board,
+                (column * square_size, row * square_size),
+                ((column + 1) * square_size, (row + 1) * square_size),
+                (color,) * 3,
+                -1,
+            )
+    for row in (0, 1, 6, 7):
+        piece_color = 55 if row < 2 else 205
+        outline_color = 210 if row < 2 else 45
+        for column in range(8):
+            center = (
+                round((column + 0.5) * square_size),
+                round((row + 0.5) * square_size),
+            )
+            cv2.circle(board, center, 25, (outline_color,) * 3, -1)
+            cv2.circle(board, center, 21, (piece_color,) * 3, -1)
+
+    source_corners = np.asarray(
+        [[0, 0], [board_size, 0], [board_size, board_size], [0, board_size]],
+        dtype=np.float32,
+    )
+    destination_corners = np.asarray(
         [[310, 95], [1010, 145], [920, 650], [225, 590]],
         dtype=np.float32,
     )
@@ -128,6 +172,141 @@ def test_uses_alternating_color_fallback_when_corners_are_unavailable(
         axis=1,
     )
     assert float(np.max(corner_error)) < 12.0
+
+
+def test_detects_playing_surface_with_starting_pieces(
+    monkeypatch,
+) -> None:
+    image, expected_corners = _perspective_board_with_starting_pieces()
+    detector = BoardDetector()
+    monkeypatch.setattr(
+        detector,
+        "_find_inner_corners",
+        lambda _gray: (False, None),
+    )
+
+    detection = detector.detect(image)
+
+    assert detection is not None
+    corner_error = np.linalg.norm(
+        detection.outer_corners - expected_corners,
+        axis=1,
+    )
+    assert float(np.max(corner_error)) < 15.0
+
+
+def test_rejects_visible_board_side_as_playing_surface(
+    monkeypatch,
+) -> None:
+    image = np.full((720, 1280, 3), 140, dtype=np.uint8)
+    top_corners = np.asarray(
+        [[310, 95], [1010, 145], [920, 600], [225, 550]],
+        dtype=np.float32,
+    )
+    visible_side = np.asarray(
+        [
+            top_corners[3],
+            top_corners[2],
+            top_corners[2] + np.asarray([-4, 55], dtype=np.float32),
+            top_corners[3] + np.asarray([4, 55], dtype=np.float32),
+        ],
+        dtype=np.int32,
+    )
+    cv2.fillConvexPoly(image, visible_side, (70, 95, 120))
+    _place_board(image, top_corners)
+    detector = BoardDetector()
+    monkeypatch.setattr(
+        detector,
+        "_find_inner_corners",
+        lambda _gray: (False, None),
+    )
+
+    detection = detector.detect(image)
+
+    assert detection is not None
+    corner_error = np.linalg.norm(
+        detection.outer_corners - top_corners,
+        axis=1,
+    )
+    assert float(np.max(corner_error)) < 15.0
+
+
+def test_grid_refinement_handles_invalid_sequential_spacing() -> None:
+    rng = np.random.default_rng(2)
+    frame = rng.integers(
+        0,
+        256,
+        (512, 512, 3),
+        dtype=np.uint8,
+    )
+    corners = np.asarray(
+        [[0, 0], [511, 0], [511, 511], [0, 511]],
+        dtype=np.float32,
+    )
+
+    refined, _alignment = BoardDetector._refine_grid_corners(
+        frame,
+        corners,
+    )
+
+    assert refined.shape == (4, 2)
+    assert np.all(np.isfinite(refined))
+
+
+def test_tracker_freezes_through_motion_and_confirms_stable_move() -> None:
+    image, _expected_corners = _perspective_board()
+    initial = BoardDetector().detect(image)
+    assert initial is not None
+    moved = replace(
+        initial,
+        grid_points=(
+            initial.grid_points
+            + np.asarray([12, 4], dtype=np.float32)
+        ),
+    )
+
+    class SequenceDetector:
+        def __init__(self) -> None:
+            self.results = [moved, moved, moved, moved]
+
+        def detect(self, _frame: np.ndarray):
+            return self.results.pop(0)
+
+    tracker = StableBoardTracker(SequenceDetector(), stable_frame_count=3)
+    tracker.reset(initial)
+    stable_frame = np.zeros_like(image)
+    moving_frame = stable_frame.copy()
+    moving_frame[150:600, 300:950] = 255
+
+    assert tracker.detect(stable_frame) is initial
+    assert tracker.detect(moving_frame) is initial
+    assert tracker.state == "motion_or_occlusion"
+    assert tracker.detect(stable_frame) is initial
+    assert tracker.state == "motion_or_occlusion"
+    assert tracker.detect(stable_frame) is initial
+    assert tracker.detect(stable_frame) is initial
+    confirmed = tracker.detect(stable_frame)
+
+    assert confirmed is moved
+    assert tracker.state == "stable_board"
+
+
+def test_tracker_keeps_confirmed_board_when_detection_is_occluded() -> None:
+    image, _expected_corners = _perspective_board()
+    initial = BoardDetector().detect(image)
+    assert initial is not None
+
+    class MissingDetector:
+        @staticmethod
+        def detect(_frame: np.ndarray):
+            return None
+
+    tracker = StableBoardTracker(MissingDetector())
+    tracker.reset(initial)
+    frame = np.zeros_like(image)
+
+    assert tracker.detect(frame) is initial
+    assert tracker.state == "motion_or_occlusion"
 
 
 def test_selects_board_closest_to_image_center() -> None:

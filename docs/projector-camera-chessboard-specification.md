@@ -1,6 +1,6 @@
 # Projector/Camera Chessboard Calibration Specification
 
-**Version:** 2.3
+**Version:** 2.4
 **Status:** Core camera/projector workflow implemented and hardware validated
 **Initial platform:** Python on Windows  
 **Camera connection:** USB  
@@ -20,8 +20,11 @@ Build a system that:
 The implemented system now includes markerless empty-board detection,
 Gray-code projector calibration, a validated 9x9 projector mesh, saved
 calibration restore, full-board projection tests, and clickable
-individual-square indication. Reliable operation with pieces present, chess move recognition, automatic
-periodic drift checks, and chess rules remain future work.
+individual-square indication. Piece-aware board localization and calibration
+without an empty-board prerequisite are specified in
+[Piece-Aware Board Localization and Calibration](./piece-aware-board-localization-specification.md).
+Their implementation, chess move recognition, and chess rules remain future
+work.
 
 ## 2. Hardware
 
@@ -262,7 +265,8 @@ infer White's side from piece colors and positions.
 
 #### Detection with pieces
 
-Support for pieces is deferred until the empty-board detector is reliable.
+Detailed requirements are defined in
+[Piece-Aware Board Localization and Calibration](./piece-aware-board-localization-specification.md).
 The later detector shall:
 
 - Infer the complete board from the visible outer boundary, unoccluded grid
@@ -301,7 +305,8 @@ The implemented sequence:
 6. Restricts decoding to the detected board polygon.
 7. Fits a robust global camera-to-projector homography.
 8. Applies local corrections to produce a 9x9 projector mesh.
-9. Projects nine independent validation targets at square centers.
+9. Projects nine independent validation targets on piece-clear planar patches
+   for the standard starting position.
 10. Applies at most two bounded local-mesh refinement iterations.
 11. Accepts only a result below 10% of local square width.
 
@@ -658,6 +663,8 @@ The current interface contains:
   camera resolution, projector name, and projector resolution match.
 - **Quick realign / assess** action using five fitting targets and four
   independent validation targets.
+- **Validate calibration** action that skips Gray-code calibration and tests
+  the existing mapping with nine distributed targets.
 - Selectable continuous-alignment status showing board drift and active-square
   projection error.
 - Lichess-colored clickable 8x8 board.
@@ -703,10 +710,11 @@ The design must account for:
 - Dark pieces absorbing projected light.
 - Light pieces reflecting and spreading projected light.
 
-Initial calibration uses an empty, alternating-color board under stable room
-lighting. The background need not be plain because projector measurements are
-masked to the detected board. Later milestones must tolerate pieces and
-partial occlusion.
+The implemented calibration currently uses an empty, alternating-color board
+under stable room lighting. The target piece-aware workflow shall calibrate
+with a normal populated board by fitting only distributed structured-light
+correspondences belonging to the planar playing surface. Pieces, hands, board
+side faces, and unreliable reflections shall be excluded.
 
 ## 10. Suggested Implementation Architecture
 
@@ -799,8 +807,8 @@ The following constraints are confirmed:
 
 - The camera and projector may move, requiring recalibration.
 - No added calibration markers are permitted.
-- Initial calibration uses an empty board.
-- Later operation must work with pieces on the board.
+- The current implementation uses an empty board, but the target workflow shall
+  calibrate and operate with pieces present.
 - The board has alternating colors. A complicated background is acceptable
   when the complete board remains detectable.
 - The camera and projector are above the board.

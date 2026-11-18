@@ -34,7 +34,8 @@ The initial calibration path is implemented with:
   bits omitted.
 - Two-projector-pixel coordinate bins for the decoded measurements.
 - Dense RANSAC homography fitting and local 9x9 grid corrections.
-- Nine independently projected validation targets.
+- Nine independently projected validation targets on piece-clear planar
+  patches for the standard starting position.
 - Up to two bounded local-mesh refinement iterations.
 - Calibrated 8x8 grid and 64 inset-square projection modes.
 - Automatic storage of the latest successful calibration in
@@ -43,6 +44,9 @@ The initial calibration path is implemented with:
   resolution, projector name, and projector resolution all match.
 - Manual quick realignment that fits a candidate from five projected targets
   and measures sufficiency with four independent validation targets.
+- Separate validation-only action that reuses the active mapping unchanged and
+  runs the nine distributed validation targets without Gray-code capture,
+  fitting, or refinement.
 - Up-to-five-Hz non-disruptive continuous board remapping and active-square
   projector verification.
 - An interactive 8x8 board using the classic Lichess brown palette.
@@ -512,8 +516,16 @@ always-on anchor marks are intentionally not used.
 
 A quick realignment sequence shall project:
 
-- Five fitting targets at four corner-square centers and the board center.
-- Four independent validation targets at the centers of the board edges.
+- Five fitting targets at four internal corner-region grid intersections and
+  the board center.
+- Four independent validation targets at internal edge-region grid
+  intersections.
+
+The targets shall remain on the top playing plane while avoiding both the
+physical board edge and the centers occupied by pieces in the standard
+starting position. Their projected radius shall be limited to 14% of local
+square width. If a target is not detected, the validator shall try one nearby
+piece-clear location in the same board region before failing.
 
 The fitting targets shall calculate a candidate camera-to-projector homography
 without changing the active verified calibration. The saved local correction
