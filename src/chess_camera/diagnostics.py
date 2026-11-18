@@ -43,6 +43,8 @@ class DiagnosticStore:
                 {
                     "confidence": detection.confidence,
                     "reprojection_error_pixels": detection.reprojection_error,
+                    "method": detection.method,
+                    "grid_alignment": detection.grid_alignment,
                     "grid_points": detection.grid_points.tolist(),
                 }
             )

@@ -1,7 +1,7 @@
 # Projector/Camera Chessboard Calibration Specification
 
-**Version:** 0.4  
-**Status:** Draft  
+**Version:** 1.0
+**Status:** Core camera/projector workflow implemented and hardware validated
 **Initial platform:** Python on Windows  
 **Camera connection:** USB  
 **Projector connection:** HDMI
@@ -17,11 +17,11 @@ Build a system that:
 5. Detects alignment drift and supports recalibration.
 6. Later uses the calibrated overlay to indicate chess moves.
 
-The first milestone stops after reliable markerless board detection from a
-camera snapshot and display of an aligned raster over the captured image. The
-projector is deliberately excluded from this milestone. Later milestones add
-projector calibration, operation with pieces present, individual-square move
-indicators, and chess rules.
+The implemented system now includes markerless empty-board detection,
+Gray-code projector calibration, a validated 9x9 projector mesh, saved
+calibration restore, full-board projection tests, and clickable
+individual-square indication. Reliable operation with pieces present, chess
+move recognition, automatic drift checks, and chess rules remain future work.
 
 ## 2. Hardware
 
@@ -41,15 +41,17 @@ indicators, and chess rules.
   coverage and reduce perspective distortion.
 - Later experiments will progressively lower, offset, or separate the devices
   to test more difficult viewing and projection angles.
-- The camera and projector may move between uses or during operation. Movement
-  invalidates the current geometric calibration and requires recalibration.
+- For the current experiments, the camera and projector are fixed on stands.
+  Moving either device invalidates the current geometric calibration and
+  requires recalibration.
 - The camera and projector may initially be placed close to each other, but
   the design must not depend on them sharing the same position or viewing
   angle.
 - The complete outer boundary of the board is visible to the camera.
 - The projector image covers the entire board with some margin.
-- The physical board has alternating square colors and is placed on a plain
-  table.
+- The physical board has alternating square colors. The background may be
+  visually complicated because calibration measurements are restricted to the
+  detected board polygon.
 - Camera settings such as autofocus and automatic exposure can preferably be
   locked after initialization.
 
@@ -175,7 +177,9 @@ The application shall treat the projector as a display device and shall:
 
 - Enumerate available displays.
 - Allow selection of the HDMI projector.
-- Open a borderless full-screen window on that display.
+- Show an exact-size frameless window at that display's global desktop
+  geometry. Operating-system fullscreen transitions are not used because they
+  were observed to move the window to a different monitor.
 - Use the MPR 600 projector's 1280x720 output resolution.
 - Prevent operating-system scaling from changing projection coordinates.
 - Keep user-interface controls on the primary monitor.
@@ -185,9 +189,11 @@ Black is the default background because it minimizes unwanted projected light.
 
 ### FR-3: Board detection
 
-For the first milestone, calibration shall use an empty, alternating-color
-board on a plain table. Later milestones shall detect and track the board when
-some grid intersections, square edges, and colors are occluded by pieces.
+The implemented calibration uses an empty, alternating-color board. The
+surrounding background may be complicated because projector measurements are
+restricted to the detected board polygon. Later milestones shall detect and
+track the board when some grid intersections, square edges, and colors are
+occluded by pieces.
 
 The application shall detect:
 
@@ -199,6 +205,8 @@ The application shall detect:
 - The board's chess orientation from its corner colors and the known White-side
   reference edge.
 - A confidence score for the detected board.
+- When more than one complete chessboard is visible, the board whose geometric
+  center is closest to the center of the camera image.
 
 The detector must not assume that board squares appear rectangular in the
 camera image. Perspective may make them trapezoidal.
@@ -212,10 +220,26 @@ The empty-board detector shall use a staged strategy:
 3. Retry internal-corner detection with less restrictive search flags.
 4. Fit a homography to the 49 internal corners and extrapolate the complete
    9x9 grid.
+5. If internal-corner detection still fails, find quadrilateral playing-surface
+   candidates, normalize each candidate to a square view, and verify that its
+   64 cell centers form two alternating color populations.
+6. Accept the best quadrilateral only when its alternating-color separation
+   and consistency exceed explicit thresholds.
+7. Retain distinct valid boards, merge repeated detections of the same physical
+   board, and select the board center nearest the image center. Detection
+   confidence shall not override this spatial selection rule.
+8. For quadrilateral detections, measure image-gradient peaks near the seven
+   expected internal grid positions in each direction, fit their spacing, and
+   extrapolate the true playing-surface boundary. Apply refinement only when
+   the fitted spacing, residual error, and edge-alignment score pass explicit
+   guards.
 
 This fallback is required because the physical wooden board has visible wood
 grain, reflections, and non-uniform illumination that can defeat a detector
-intended for high-contrast printed calibration boards.
+intended for high-contrast printed calibration boards. Detection of the
+lowest-contrast physical board remains experimental and is explicitly deferred
+from the current milestone; failure to detect that board shall not block
+projector work with the validated boards.
 
 #### Detection validation
 
@@ -251,40 +275,47 @@ The later detector shall:
 - Request recalibration when the visible evidence is insufficient or the board
   has moved.
 
+The quadrilateral detector may currently recover a board with pieces when its
+outer boundary and enough internal transitions remain visible. This is useful
+diagnostic behavior but is not yet a guarantee of piece-aware board detection.
+
 ### FR-4: Projector-to-camera calibration
 
-The system shall display a sequence of structured-light patterns:
+The detailed implemented protocol is specified in
+`projector-calibration-specification.md`. Gray-code structured light is the
+primary measurement method. Independently projected targets validate and
+locally refine the resulting projector mesh.
 
-1. Capture an image with the projector black.
-2. Project one or more bright calibration targets.
-3. Capture several images while each target is visible.
-4. Compare illuminated images with the black reference image.
-5. Locate each projected target in camera coordinates.
-6. Use the known projector coordinates and measured camera coordinates to
-   calculate a projector-to-camera homography.
-7. Validate the result using additional target positions not used to fit the
-   transformation.
+The implemented sequence:
+
+1. Captures an averaged projector-black reference.
+2. Measures full-board projector response at intensity 112.
+3. Displays 40 normal/inverse Gray-code states. The optically unresolvable
+   least-significant X and Y bits are omitted and decoded as two-pixel bins.
+4. Waits 250 ms after every display change and averages three fresh frames.
+5. Rejects any capture state that does not receive fresh frames within three
+   seconds.
+6. Restricts decoding to the detected board polygon.
+7. Fits a robust global camera-to-projector homography.
+8. Applies local corrections to produce a 9x9 projector mesh.
+9. Projects nine independent validation targets at square centers.
+10. Applies at most two bounded local-mesh refinement iterations.
+11. Accepts only a result below 10% of local square width.
 
 #### Calibration targets
 
-Targets should initially be:
+Calibration patterns and validation targets are:
 
-- Automatically selected for high contrast according to camera response,
-  ambient light, and the colors of the physical board.
+- Displayed at measured intensity 112 to avoid saturation while retaining
+  complete board response.
 - Large enough to be detected reliably.
 - Displayed against a black background.
 - Positioned away from the projector image boundaries.
 - Sampled at multiple locations across the full board region.
 
-Candidate targets may include a dot, filled circle, filled square, outlined
-shape, cross, or coded pattern. Candidate colors and shapes shall be evaluated
-experimentally. Red is not required. The selected target should maximize
-detection reliability and localization accuracy rather than resemble a future
-move indicator.
-
-At least four non-collinear point correspondences are mathematically required.
-The implementation should use substantially more points, such as 9, 16, or
-25, and estimate the mapping robustly.
+Gray-code stripes provide dense calibration correspondences. Compact filled
+circles provide independent validation without sharing geometry with the
+calibration patterns.
 
 #### Image differencing
 
@@ -313,21 +344,23 @@ Each physical square will normally map to a four-sided polygon in projector
 coordinates. It should not be represented only as an axis-aligned rectangle.
 This allows the projected overlay to follow perspective distortion accurately.
 
-### FR-6: Projection test and later square indicators
+### FR-6: Projection tests and individual-square indicators
 
-The first calibration milestone shall provide full-board grid, fill, and
-alternating test modes. Individual-square indication belongs to the following
-milestone after geometric calibration is reliable.
+The implemented renderer provides a thin full-board grid, inset fills over all
+64 squares, and one selected square. Alternating checkerboard and automatic
+all-64 stepping remain planned test modes.
 
 #### Individual-square mode
 
-- Illuminate or mark one physical square using a high-contrast color and shape.
-- Step automatically through all 64 squares.
-- Support manual previous and next controls.
-- Show the current internal square index.
-- Show chess notation after orientation is detected.
-- Allow experimental indicators such as a square fill, outline, dot, circle,
-  cross, or other localized symbol.
+- Display a Lichess-colored 8x8 board in the control window.
+- Map interface `a8` at top left through `h1` at bottom right to the physical
+  8x8 mesh.
+- Project one inset quadrilateral when its interface square is clicked.
+- Use static bright cyan `#00ffff` on dark physical squares.
+- Use related static azure `#007fff` on light physical squares.
+- Clear the projection when the selected square is clicked again or **Black**
+  is selected.
+- Show chess notation and the internal row/column for the selection.
 
 #### Full-board grid mode
 
@@ -347,9 +380,8 @@ milestone after geometric calibration is reliable.
 - Swap illuminated and non-illuminated squares periodically.
 - Make one-square alignment errors easier to see.
 
-Color and geometry are configurable throughout these tests. Calibration shall
-automatically recommend a detectable color, while allowing manual selection
-for experiments.
+The operational indicator colors are currently fixed. Brightness, inset, and
+color controls remain possible future enhancements.
 
 ### FR-7: Alignment measurement
 
@@ -531,7 +563,7 @@ not be committed to version control.
 
 ## 7. User Interface
 
-### 7.1 Current camera-only interface
+### 7.1 Current camera interface
 
 The current interface contains:
 
@@ -545,19 +577,29 @@ The current interface contains:
 - Selectable camera and detection feedback text so it can be copied.
 - Detection confidence, reprojection error, and diagnostic capture location.
 
-### 7.2 Future projector-calibration interface
+### 7.2 Current projector and calibration interface
 
-The projector-calibration interface should add:
+The current interface contains:
 
-- Projector or display selector.
+- Projector/display selector showing name, manufacturer/model, resolution, and
+  desktop position.
+- **Open projector (black)** action.
+- One white square with manually adjustable center X, center Y, and size as
+  percentages of the projector resolution.
+- **Show square**, **Black**, and **Close projector** actions.
+- Remembered projector display and target settings.
 - Start and cancel calibration actions.
-- Calibration status and current step.
-- Manual four-corner correction.
-- Projection test selector.
-- Previous and next square controls.
-- Brightness and inset controls.
-- Save and load calibration controls.
+- Calibration phase, progress, success, and failure status.
+- **Project 8x8 grid** and **Project all 64 squares** actions.
 - Emergency "projector black" control.
+- Strict restore of the latest saved calibration when camera identifier,
+  camera resolution, projector name, and projector resolution match.
+- Lichess-colored clickable 8x8 board.
+- Static cyan/azure selected-square projection.
+
+Automatic quick verification before saved-calibration reuse, manual
+correction, alternating checkerboard projection, previous/next stepping, and
+brightness/inset controls remain future enhancements.
 
 The projector window itself should contain no operating-system borders, cursor,
 status text, or controls.
@@ -595,44 +637,44 @@ The design must account for:
 - Dark pieces absorbing projected light.
 - Light pieces reflecting and spreading projected light.
 
-Initial calibration uses an empty, alternating-color board on a plain table
-under stable room lighting. Later milestones must tolerate pieces and partial
-occlusion.
+Initial calibration uses an empty, alternating-color board under stable room
+lighting. The background need not be plain because projector measurements are
+masked to the detected board. Later milestones must tolerate pieces and
+partial occlusion.
 
 ## 10. Suggested Implementation Architecture
 
+The implemented modules are:
+
 ```text
-CameraManager
-    Discovers and captures USB camera frames.
+camera_app.py
+    PySide6 control window, Qt Multimedia camera capture, and UI coordination.
 
-ProjectorWindow
-    Controls the borderless HDMI display output.
+board_detector.py
+    Markerless empty-board detection and 9x9 camera grid reconstruction.
 
-BoardDetector
-    Finds the board boundary, grid, and orientation.
+projector.py
+    Exact-display frameless output and polygon rendering.
 
-ProjectionTargetDetector
-    Finds projected calibration patterns in camera images.
+projector_calibration.py
+    Gray-code generation/decoding, coverage measurement, mapping, mesh
+    refinement, and validation calculations.
 
-CalibrationEngine
-    Estimates, validates, refines, saves, and loads transformations.
+calibration_controller.py
+    Non-blocking pattern/capture state machine and safety handling.
 
-BoardGeometry
-    Converts between board cells, camera points, and projector polygons.
+calibration_store.py
+    Atomic save and strict hardware/resolution-matched restore.
 
-ProjectionRenderer
-    Renders square fills, grids, checkerboards, and later move indicators.
+chessboard_widget.py
+    Interactive Lichess-colored 8x8 selection board.
 
-CalibrationController
-    Coordinates the multi-step calibration state machine.
-
-ControlUI
-    Presents preview, diagnostics, corrections, and test controls.
+diagnostics.py
+    Bounded camera snapshot diagnostics.
 ```
 
-OpenCV is a likely foundation for camera capture, image processing, homography
-estimation, and robust fitting. A GUI framework such as PySide6 can manage the
-control window and full-screen projector window.
+OpenCV performs image processing and geometric fitting. PySide6 provides Qt
+Multimedia camera capture, the control window, and projector rendering.
 
 ## 11. Milestone Deliverables
 
@@ -657,20 +699,27 @@ local contrast normalization, with measured confidence above 93%.
 
 ### 11.2 Milestone 2: Projector calibration
 
-The next milestone will:
+This milestone is implemented for the stationary empty-board setup:
 
-1. Open a full-screen black window on the HDMI projector.
-2. Project and detect calibration targets.
-3. Calculate the board-to-projector transformation.
-4. Render all 64 projected square polygons.
-5. Project a high-contrast full-board test pattern aligned to all 64 squares.
-6. Display measured alignment error.
-7. Detect orientation from the light corner and the configured White-side
-   reference edge.
-8. Save, reload, and revalidate a calibration.
+1. The selected HDMI display is opened black at exact global geometry.
+2. Gray-code patterns are projected and decoded.
+3. A global homography and locally corrected 9x9 projector mesh are calculated.
+4. All 64 projector polygons can be rendered.
+5. Grid and all-square test patterns are available.
+6. Nine projected square-center targets measure alignment.
+7. Calibration is accepted below 10% of local square width.
+8. A successful result is saved atomically and restored only for strictly
+   matching camera/projector identities and resolutions.
+9. A clickable Lichess board projects one physical square using adaptive
+   cyan/azure colors.
 
-The following milestone will add experimental individual-square indicators
-and validate dot, circle, outline, fill, and other candidate shapes and colors.
+The first successful hardware run achieved 100% board coverage, 54.2% valid
+dense decoding, 0.821 projector-pixel mapping RMS, and 8.0% maximum validation
+error as a fraction of square width.
+
+Automatic five-point verification of restored calibration, automatic
+orientation confirmation, all-64 automated validation, and operation with
+pieces remain future work.
 
 ## 12. Confirmed Constraints and Open Decisions
 
@@ -680,14 +729,16 @@ The following constraints are confirmed:
 - No added calibration markers are permitted.
 - Initial calibration uses an empty board.
 - Later operation must work with pieces on the board.
-- The board has alternating colors and sits on a plain table.
+- The board has alternating colors. A complicated background is acceptable
+  when the complete board remains detectable.
 - The camera and projector are above the board.
 - The camera and projector may initially be close together but may later be
   separated.
 - Board orientation is initially detected from the light corner and a known
   White-side edge, then later resolved automatically from piece colors.
-- Calibration color and target shape are chosen for detection reliability;
-  red and square targets are not required.
+- Calibration uses intensity 112 Gray-code patterns and filled validation
+  circles. Operational indicators use cyan on dark squares and azure on light
+  squares.
 - The initial camera is a Logitech Webcam C930e 1080p USB camera.
 - The initial projector is an MPR 600 mini projector at 1280x720.
 
@@ -695,6 +746,7 @@ The following choices remain open:
 
 - The initial mounting height and the sequence of harder physical
   configurations.
-- The best calibration target color, geometry, size, and display duration.
 - How often to perform drift checks during a game.
 - The acceptable interruption time for automatic recalibration.
+- Whether operational indicator brightness, inset, and color should become
+  user-configurable.
