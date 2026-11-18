@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, TypeAlias
 
 import cv2
@@ -462,6 +462,86 @@ def square_polygons(
                 )
             )
     return polygons
+
+
+def remap_projector_mapping(
+    mapping: MappingResult,
+    current_camera_grid: FloatArray,
+    projector_size: tuple[int, int],
+) -> MappingResult:
+    if current_camera_grid.shape != (9, 9, 2):
+        raise ValueError("The current camera grid must have shape (9, 9, 2).")
+
+    old_camera_points = mapping.camera_grid.reshape(-1, 2)
+    old_global_points = np.asarray(
+        cv2.perspectiveTransform(
+            old_camera_points.reshape(-1, 1, 2),
+            mapping.camera_to_projector_homography,
+        ),
+        dtype=np.float32,
+    ).reshape(-1, 2)
+    local_corrections = (
+        mapping.projector_grid.reshape(-1, 2) - old_global_points
+    )
+
+    center = np.mean(old_camera_points, axis=0)
+    scale = np.std(old_camera_points, axis=0)
+    if np.any(scale < 1.0):
+        raise CalibrationError(
+            "The saved camera grid is too small to remap reliably."
+        )
+
+    normalized_old = (old_camera_points - center) / scale
+    old_features = _quadratic_features(normalized_old)
+    correction_coefficients, _residuals, _rank, _singular_values = (
+        np.linalg.lstsq(
+            old_features,
+            local_corrections,
+            rcond=None,
+        )
+    )
+
+    current_points = current_camera_grid.reshape(-1, 2)
+    current_global_points = np.asarray(
+        cv2.perspectiveTransform(
+            current_points.reshape(-1, 1, 2),
+            mapping.camera_to_projector_homography,
+        ),
+        dtype=np.float32,
+    ).reshape(-1, 2)
+    normalized_current = (current_points - center) / scale
+    predicted_corrections = (
+        _quadratic_features(normalized_current) @ correction_coefficients
+    )
+    current_projector_grid = np.asarray(
+        current_global_points + predicted_corrections,
+        dtype=np.float32,
+    ).reshape(9, 9, 2)
+    _validate_projector_grid(
+        current_projector_grid,
+        projector_size[0],
+        projector_size[1],
+    )
+    return replace(
+        mapping,
+        camera_grid=current_camera_grid.copy(),
+        projector_grid=current_projector_grid,
+    )
+
+
+def _quadratic_features(points: FloatArray) -> FloatArray:
+    x_values = points[:, 0]
+    y_values = points[:, 1]
+    return np.column_stack(
+        (
+            np.ones(points.shape[0], dtype=np.float32),
+            x_values,
+            y_values,
+            x_values * x_values,
+            x_values * y_values,
+            y_values * y_values,
+        )
+    ).astype(np.float32)
 
 
 def interpolate_grid_point(grid: FloatArray, x: float, y: float) -> FloatArray:

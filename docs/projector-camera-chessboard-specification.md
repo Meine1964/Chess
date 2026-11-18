@@ -1,6 +1,6 @@
 # Projector/Camera Chessboard Calibration Specification
 
-**Version:** 1.0
+**Version:** 1.9
 **Status:** Core camera/projector workflow implemented and hardware validated
 **Initial platform:** Python on Windows  
 **Camera connection:** USB  
@@ -20,8 +20,8 @@ Build a system that:
 The implemented system now includes markerless empty-board detection,
 Gray-code projector calibration, a validated 9x9 projector mesh, saved
 calibration restore, full-board projection tests, and clickable
-individual-square indication. Reliable operation with pieces present, chess
-move recognition, automatic drift checks, and chess rules remain future work.
+individual-square indication. Reliable operation with pieces present, chess move recognition, automatic
+periodic drift checks, and chess rules remain future work.
 
 ## 2. Hardware
 
@@ -149,7 +149,10 @@ not merely resizing and translation.
 The application shall:
 
 - Enumerate connected video cameras.
-- Allow selection of the USB camera.
+- Exclude integrated, built-in, front-facing, and rear-facing cameras.
+- Allow selection only among eligible external USB cameras.
+- Keep the application open in a waiting state when no external camera is
+  connected, and activate an eligible camera when it is hot-plugged.
 - Store the selected camera by stable device identifier and automatically reuse
   it on the next launch when it is still connected.
 - Allow the camera to be changed from the live-preview interface without
@@ -451,6 +454,41 @@ because the camera and projector identifiers and resolutions are unchanged.
 Saved calibration data provides a starting estimate only and must be verified
 against the current physical arrangement.
 
+#### Implemented continuous monitor
+
+The implemented non-disruptive monitor:
+
+- Runs board detection in a background worker up to five times per second.
+- Compares all 81 live grid intersections with the calibrated camera grid.
+- Remaps all 81 projector vertices after approximately 1.5 camera pixels of
+  board movement.
+- Immediately redraws an active projected square at the new board position.
+- Warps the stored black reference with the board motion so projector
+  verification remains meaningful while the board moves.
+- Uses the next optical square measurement to distinguish valid in-plane board
+  movement from camera movement or board depth/tilt changes.
+- Retains the most recent stable projector-black camera frame.
+- While one square is illuminated, measures its projected centroid against the
+  expected physical-square center to detect projector movement.
+- Silently retains the last confirmed board position when detection is
+  temporarily blocked by a hand or piece. Absence of a detection is not
+  evidence that the board moved.
+- After positive movement, immediately follows the board but postpones optical
+  failure counting until five consecutive visible checks show a stable board.
+- Classifies an optical failure following camera-grid remapping as a camera
+  calibration error, and an optical failure with a stable camera grid as a
+  projector calibration error.
+- Requires two consecutive geometric failures before invalidation.
+- Immediately makes the projector black and disables the calibration only
+  after confirmed optical or geometric loss.
+- Pauses during calibration, focus patterns, manual targets, and full-board
+  previews that intentionally obscure normal monitoring evidence.
+
+Projector movement is not physically observable while the projector is
+completely black. In the selected non-disruptive mode it is detected while a
+square is active or immediately after the next square is selected. No periodic
+visible probe is projected.
+
 Recalibration during a game must avoid confusing calibration patterns with
 move indicators. It should occur between moves or during an explicitly visible
 calibration state.
@@ -567,7 +605,14 @@ not be committed to version control.
 
 The current interface contains:
 
-- Named camera selector and **Use selected camera** action.
+- Named external-camera selector that activates a camera immediately when
+  selected. Integrated cameras never appear in the selector.
+- Persistent color-coded camera-calibration and projector-calibration
+  indicators. Green means verified, red identifies the likely failed
+  calibration, and gray means no calibration is active.
+- Alignment errors do not discard the last verified calibration or start
+  recalibration. Temporary board-follow mappings become verified only after
+  optical confirmation; an error restores the previous verified mapping.
 - Live camera preview.
 - **Take snapshot** action.
 - **Resume live camera** action.
@@ -583,23 +628,32 @@ The current interface contains:
 
 - Projector/display selector showing name, manufacturer/model, resolution, and
   desktop position.
-- **Open projector (black)** action.
+- Automatically opened black projector output on the remembered selected
+  display at application startup.
+- **Open projector (black)** action for reopening or moving the output after
+  display changes.
 - One white square with manually adjustable center X, center Y, and size as
   percentages of the projector resolution.
 - **Show square**, **Black**, and **Close projector** actions.
+- **Focus pattern** action showing a native-resolution black/white checkerboard
+  with a central cross for manual optical focus adjustment.
 - Remembered projector display and target settings.
-- Start and cancel calibration actions.
+- **Full projector calibration** and cancel actions.
 - Calibration phase, progress, success, and failure status.
 - **Project 8x8 grid** and **Project all 64 squares** actions.
 - Emergency "projector black" control.
 - Strict restore of the latest saved calibration when camera identifier,
   camera resolution, projector name, and projector resolution match.
+- **Quick verify saved calibration** action using a black reference and five
+  projected square-center targets.
+- Selectable continuous-alignment status showing board drift and active-square
+  projection error.
 - Lichess-colored clickable 8x8 board.
 - Static cyan/azure selected-square projection.
 
-Automatic quick verification before saved-calibration reuse, manual
-correction, alternating checkerboard projection, previous/next stepping, and
-brightness/inset controls remain future enhancements.
+Automatic periodic verification, manual correction, alternating checkerboard
+projection, previous/next stepping, and brightness/inset controls remain
+future enhancements.
 
 The projector window itself should contain no operating-system borders, cursor,
 status text, or controls.
@@ -712,14 +766,19 @@ This milestone is implemented for the stationary empty-board setup:
    matching camera/projector identities and resolutions.
 9. A clickable Lichess board projects one physical square using adaptive
    cyan/azure colors.
+10. A quick verification mode redetects and remaps the current board position,
+    then validates five projected square-center targets against the same 10%
+    error threshold.
+11. A non-disruptive background monitor checks the live board grid up to five
+    times per second, continuously remaps board movement, and verifies any
+    currently projected square.
 
 The first successful hardware run achieved 100% board coverage, 54.2% valid
 dense decoding, 0.821 projector-pixel mapping RMS, and 8.0% maximum validation
 error as a fraction of square width.
 
-Automatic five-point verification of restored calibration, automatic
-orientation confirmation, all-64 automated validation, and operation with
-pieces remain future work.
+Automatic periodic verification, automatic orientation confirmation, all-64
+automated validation, and operation with pieces remain future work.
 
 ## 12. Confirmed Constraints and Open Decisions
 

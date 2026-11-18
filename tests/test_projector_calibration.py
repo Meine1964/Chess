@@ -18,6 +18,7 @@ from src.chess_camera.projector_calibration import (
     interpolate_grid_point,
     locate_validation_target,
     measure_coverage,
+    remap_projector_mapping,
     refine_projector_mesh,
     square_polygons,
     validation_result,
@@ -207,6 +208,45 @@ def test_refinement_applies_local_validation_corrections() -> None:
 
     expected = projector_grid + np.asarray([-15, 6], dtype=np.float32)
     np.testing.assert_allclose(refined, expected, atol=0.01)
+
+
+def test_mapping_remaps_board_motion_with_local_correction() -> None:
+    old_grid = _detection(20, 20, 180, 180).grid_points
+    homography = np.asarray(
+        [[1.5, 0.05, 12], [0.02, 1.2, 8], [0, 0, 1]],
+        dtype=np.float32,
+    )
+    old_projector_grid = cv2.perspectiveTransform(
+        old_grid.reshape(-1, 1, 2),
+        homography,
+    ).reshape(9, 9, 2)
+    local_correction = np.asarray([2, -1], dtype=np.float32)
+    old_projector_grid += local_correction
+    mapping = MappingResult(
+        camera_grid=old_grid,
+        projector_grid=old_projector_grid,
+        camera_to_projector_homography=homography,
+        coverage_ratio=1.0,
+        decoded_ratio=1.0,
+        inlier_ratio=1.0,
+        rms_error=0.0,
+        maximum_error=0.0,
+    )
+    moved_grid = old_grid + np.asarray([6, 4], dtype=np.float32)
+
+    remapped = remap_projector_mapping(
+        mapping,
+        moved_grid,
+        (400, 300),
+    )
+    expected = cv2.perspectiveTransform(
+        moved_grid.reshape(-1, 1, 2),
+        homography,
+    ).reshape(9, 9, 2)
+    expected += local_correction
+
+    np.testing.assert_allclose(remapped.projector_grid, expected, atol=0.01)
+    np.testing.assert_allclose(remapped.camera_grid, moved_grid)
 
 
 def test_validation_target_and_metrics_measure_camera_error() -> None:

@@ -22,6 +22,7 @@ from .projector_calibration import (
     locate_validation_target,
     measure_coverage,
     refine_projector_mesh,
+    remap_projector_mapping,
     validation_result,
 )
 
@@ -95,8 +96,10 @@ class ProjectorCalibrationController(QObject):
         self._validation_index = -1
         self._refinement_iteration = 0
         self._progress_total = 0
+        self._validation_progress_base = 0
         self._capture_token = 0
         self._run_token = 0
+        self._quick_verification = False
 
     @property
     def active(self) -> bool:
@@ -110,6 +113,7 @@ class ProjectorCalibrationController(QObject):
 
         self._active = True
         self._run_token += 1
+        self._quick_verification = False
         self._collecting = False
         self._projector_size = (projector_width, projector_height)
         self._captures.clear()
@@ -130,6 +134,47 @@ class ProjectorCalibrationController(QObject):
         self.status_changed.emit(
             "Starting projector calibration with the projector black."
         )
+        self.progress_changed.emit(0, self._progress_total)
+        self._display_current_step()
+
+    def start_verification(
+        self,
+        result: CalibrationResult,
+        projector_width: int,
+        projector_height: int,
+    ) -> None:
+        if self._active:
+            raise RuntimeError("Projector calibration is already active.")
+        if projector_width <= 1 or projector_height <= 1:
+            raise ValueError("Projector dimensions must be greater than one.")
+
+        self._active = True
+        self._run_token += 1
+        self._quick_verification = True
+        self._collecting = False
+        self._projector_size = (projector_width, projector_height)
+        self._captures.clear()
+        self._detection = result.board_detection
+        self._mapping = result.mapping
+        self._validation_expected.clear()
+        self._validation_measured.clear()
+        self._validation_widths.clear()
+        self._validation_index = -1
+        self._refinement_iteration = 0
+        self._steps = [
+            _CaptureStep(
+                "black",
+                np.zeros(
+                    (projector_height, projector_width),
+                    dtype=np.uint8,
+                ),
+                "Capturing projector-black quick-verification reference",
+            )
+        ]
+        self._step_index = 0
+        self._progress_total = 7
+        self.active_changed.emit(True)
+        self.status_changed.emit("Starting quick calibration verification.")
         self.progress_changed.emit(0, self._progress_total)
         self._display_current_step()
 
@@ -269,7 +314,10 @@ class ProjectorCalibrationController(QObject):
             self._display_current_step()
             return
         try:
-            self._calculate_mapping()
+            if self._quick_verification:
+                self._prepare_quick_verification()
+            else:
+                self._calculate_mapping()
             self._start_validation()
         except (CalibrationError, ValueError, cv2.error) as error:
             self._fail(str(error))
@@ -324,21 +372,51 @@ class ProjectorCalibrationController(QObject):
         self._mapping = mapping
         self._projector.set_projector_grid(mapping.projector_grid)
 
+    def _prepare_quick_verification(self) -> None:
+        if self._mapping is None:
+            raise RuntimeError("Saved calibration mapping is not available.")
+        current_detection = self._detector.detect(self._captures["black"])
+        if current_detection is None:
+            raise CalibrationError(
+                "The empty board was not detected for quick verification."
+            )
+        self._mapping = remap_projector_mapping(
+            self._mapping,
+            current_detection.grid_points,
+            self._projector_size,
+        )
+        self._detection = current_detection
+        self._projector.set_projector_grid(self._mapping.projector_grid)
+
     def _start_validation(self) -> None:
         if self._detection is None or self._mapping is None:
             raise RuntimeError("Calibration mapping is not available.")
         self.status_changed.emit("Mapping complete; refreshing black reference.")
-        self._validation_coordinates = [
-            (0.5, 0.5),
-            (3.5, 0.5),
-            (7.5, 0.5),
-            (0.5, 3.5),
-            (3.5, 3.5),
-            (7.5, 3.5),
-            (0.5, 7.5),
-            (3.5, 7.5),
-            (7.5, 7.5),
-        ]
+        if self._quick_verification:
+            self._validation_coordinates = [
+                (0.5, 0.5),
+                (7.5, 0.5),
+                (3.5, 3.5),
+                (0.5, 7.5),
+                (7.5, 7.5),
+            ]
+        else:
+            self._validation_coordinates = [
+                (0.5, 0.5),
+                (3.5, 0.5),
+                (7.5, 0.5),
+                (0.5, 3.5),
+                (3.5, 3.5),
+                (7.5, 3.5),
+                (0.5, 7.5),
+                (3.5, 7.5),
+                (7.5, 7.5),
+            ]
+        self._validation_progress_base = (
+            self._progress_total
+            - len(self._validation_coordinates)
+            - 1
+        )
         self._validation_index = 0
         self._show_validation_black()
 
@@ -397,7 +475,8 @@ class ProjectorCalibrationController(QObject):
             cv2.LINE_AA,
         )
         self.status_changed.emit(
-            f"Validating target {self._validation_index + 1}/9"
+            f"Validating target {self._validation_index + 1}/"
+            f"{len(self._validation_coordinates)}"
         )
         self._projector.show_pattern(pattern)
         self._schedule(
@@ -414,6 +493,10 @@ class ProjectorCalibrationController(QObject):
     def _accept_validation_capture(self, averaged: GrayImage) -> None:
         if self._validation_index == 0 and "validation_black" not in self._captures:
             self._captures["validation_black"] = averaged
+            self.progress_changed.emit(
+                self._validation_progress_base + 1,
+                self._progress_total,
+            )
             self._show_validation_target_safely()
             return
 
@@ -428,7 +511,9 @@ class ProjectorCalibrationController(QObject):
         self._validation_measured.append(measured)
         self._validation_index += 1
         completed_steps = (
-            self._progress_total - 10 + self._validation_index + 1
+            self._validation_progress_base
+            + self._validation_index
+            + 1
         )
         self.progress_changed.emit(completed_steps, self._progress_total)
         if self._validation_index < len(self._validation_coordinates):
@@ -449,7 +534,8 @@ class ProjectorCalibrationController(QObject):
         validation = validation_result(measured, expected, widths)
         if validation.maximum_square_fraction >= 0.1:
             if (
-                self._refinement_iteration
+                not self._quick_verification
+                and self._refinement_iteration
                 < self._maximum_refinement_iterations
             ):
                 self._refine_and_repeat_validation(measured)
@@ -474,8 +560,9 @@ class ProjectorCalibrationController(QObject):
             self._progress_total,
         )
         self.status_changed.emit(
-            f"Calibration succeeded: {validation.maximum_error:.2f} px "
-            f"maximum validation error."
+            f"{'Quick verification' if self._quick_verification else 'Calibration'} "
+            f"succeeded: {validation.maximum_error:.2f} px maximum "
+            "validation error."
         )
         self.completed.emit(result)
 
@@ -508,6 +595,11 @@ class ProjectorCalibrationController(QObject):
         self._projector.set_projector_grid(refined_grid)
         self._refinement_iteration += 1
         self._progress_total += 10
+        self._validation_progress_base = (
+            self._progress_total
+            - len(self._validation_coordinates)
+            - 1
+        )
         self.progress_changed.emit(
             self._progress_total - 10,
             self._progress_total,

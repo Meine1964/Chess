@@ -3,9 +3,13 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from PySide6.QtMultimedia import QCameraDevice
 
 from src.chess_camera.board_detector import BoardDetector
-from src.chess_camera.camera_app import _resolve_camera_index
+from src.chess_camera.camera_app import (
+    _is_external_camera,
+    _resolve_camera_index,
+)
 from src.chess_camera.diagnostics import DiagnosticStore
 
 
@@ -170,6 +174,17 @@ def test_resolves_camera_by_unique_name_fragment() -> None:
             selector="logitech",
         )
         == 0
+    )
+
+
+def test_external_camera_filter_rejects_integrated_devices() -> None:
+    unspecified = QCameraDevice.Position.UnspecifiedPosition
+
+    assert _is_external_camera("Logitech Webcam C930e", unspecified)
+    assert not _is_external_camera("Integrated Webcam", unspecified)
+    assert not _is_external_camera(
+        "Laptop Camera",
+        QCameraDevice.Position.FrontFace,
     )
 
 

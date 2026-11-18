@@ -1,11 +1,12 @@
 import argparse
 import sys
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QSettings, QTimer, Qt
 from PySide6.QtGui import (
     QCloseEvent,
     QGuiApplication,
@@ -40,6 +41,7 @@ from PySide6.QtWidgets import (
 )
 
 from .board_detector import BoardDetector, ImageArray
+from .alignment_monitor import AlignmentMonitor
 from .calibration_controller import (
     CalibrationResult,
     ProjectorCalibrationController,
@@ -47,7 +49,8 @@ from .calibration_controller import (
 from .calibration_store import CalibrationStore
 from .chessboard_widget import ChessboardWidget
 from .diagnostics import DiagnosticStore
-from .projector import ProjectorWindow
+from .projector import ProjectorWindow, focus_pattern
+from .projector_calibration import MappingResult
 
 _SETTINGS_ORGANIZATION = "ChessProject"
 _SETTINGS_APPLICATION = "ChessboardCamera"
@@ -57,6 +60,28 @@ _PROJECTOR_X_SETTING = "projector/target_x_percent"
 _PROJECTOR_Y_SETTING = "projector/target_y_percent"
 _PROJECTOR_SIZE_SETTING = "projector/target_size_percent"
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_INTEGRATED_CAMERA_TERMS = (
+    "built-in",
+    "builtin",
+    "front camera",
+    "integrated",
+    "internal",
+    "user facing",
+)
+
+
+def _is_external_camera(
+    description: str,
+    position: QCameraDevice.Position,
+) -> bool:
+    normalized_description = description.casefold()
+    return (
+        position == QCameraDevice.Position.UnspecifiedPosition
+        and not any(
+            term in normalized_description
+            for term in _INTEGRATED_CAMERA_TERMS
+        )
+    )
 
 
 def _resolve_camera_index(
@@ -112,20 +137,27 @@ class CameraWindow(QMainWindow):
             _SETTINGS_ORGANIZATION,
             _SETTINGS_APPLICATION,
         )
-        self._devices = list(QMediaDevices.videoInputs())
+        self._media_devices = QMediaDevices(self)
+        self._requested_camera_selector = camera_selector
+        self._devices = self._external_camera_devices()
         device_names = [device.description() for device in self._devices]
         device_keys = [self._device_key(device) for device in self._devices]
         default_key = self._device_key(QMediaDevices.defaultVideoInput())
         saved_key = str(self._settings.value(_CAMERA_SETTING, ""))
-        selected_index = _resolve_camera_index(
-            device_names,
-            device_keys,
-            default_key,
-            saved_key,
-            camera_selector,
+        selected_index = (
+            _resolve_camera_index(
+                device_names,
+                device_keys,
+                default_key,
+                saved_key,
+                camera_selector,
+            )
+            if self._devices
+            else None
         )
 
         self._camera: QCamera | None = None
+        self._active_device_index = -1
         self._projector_window = ProjectorWindow()
         self._calibrator = ProjectorCalibrationController(
             self._projector_window,
@@ -142,8 +174,26 @@ class CameraWindow(QMainWindow):
         )
         self._calibrator.completed.connect(self._projector_calibration_completed)
         self._calibrator.failed.connect(self._projector_calibration_failed)
+        self._alignment_monitor = AlignmentMonitor(
+            self._detector,
+            interval_milliseconds=200,
+        )
+        self._alignment_monitor.status_changed.connect(
+            self._alignment_monitor_status
+        )
+        self._alignment_monitor.calibration_error.connect(
+            self._calibration_error
+        )
+        self._alignment_monitor.mapping_updated.connect(
+            self._alignment_mapping_updated
+        )
+        self._alignment_monitor.mapping_verified.connect(
+            self._alignment_mapping_verified
+        )
         self._calibration_result: CalibrationResult | None = None
+        self._verified_calibration_result: CalibrationResult | None = None
         self._selected_board_square: tuple[int, int] | None = None
+        self._pending_board_square: tuple[int, int] | None = None
         self._latest_frame: ImageArray | None = None
         self._snapshot_visible = False
         self._current_pixmap: QPixmap | None = None
@@ -162,14 +212,13 @@ class CameraWindow(QMainWindow):
 
         self._camera_selector = QComboBox()
         self._camera_selector.addItems(device_names)
-        self._camera_selector.setCurrentIndex(selected_index)
-        self._use_camera_button = QPushButton("Use selected camera")
-        self._use_camera_button.clicked.connect(self._use_selected_camera)
+        if selected_index is not None:
+            self._camera_selector.setCurrentIndex(selected_index)
+        self._camera_selector.setEnabled(bool(self._devices))
 
         camera_layout = QHBoxLayout()
         camera_layout.addWidget(QLabel("Camera:"))
         camera_layout.addWidget(self._camera_selector, stretch=1)
-        camera_layout.addWidget(self._use_camera_button)
 
         self._camera_status = QLabel()
         self._camera_status.setTextInteractionFlags(
@@ -247,7 +296,11 @@ class CameraWindow(QMainWindow):
         self._open_projector_button.clicked.connect(self._open_projector)
         self._show_target_button = QPushButton("Show square")
         self._show_target_button.clicked.connect(
-            self._projector_window.show_target
+            self._show_manual_target
+        )
+        self._focus_pattern_button = QPushButton("Focus pattern")
+        self._focus_pattern_button.clicked.connect(
+            self._show_focus_pattern
         )
         self._black_projector_button = QPushButton("Black")
         self._black_projector_button.clicked.connect(
@@ -274,15 +327,23 @@ class CameraWindow(QMainWindow):
         projector_target_layout.addWidget(QLabel("Size:"))
         projector_target_layout.addWidget(self._target_size)
         projector_target_layout.addWidget(self._show_target_button)
+        projector_target_layout.addWidget(self._focus_pattern_button)
         projector_target_layout.addWidget(self._black_projector_button)
         projector_target_layout.addWidget(self._close_projector_button)
 
         self._start_calibration_button = QPushButton(
-            "Start projector calibration"
+            "Full projector calibration"
         )
         self._start_calibration_button.clicked.connect(
             self._start_projector_calibration
         )
+        self._quick_verify_button = QPushButton(
+            "Quick verify saved calibration"
+        )
+        self._quick_verify_button.clicked.connect(
+            self._start_quick_verification
+        )
+        self._quick_verify_button.setEnabled(False)
         self._cancel_calibration_button = QPushButton("Cancel calibration")
         self._cancel_calibration_button.clicked.connect(self._calibrator.cancel)
         self._cancel_calibration_button.setEnabled(False)
@@ -296,6 +357,7 @@ class CameraWindow(QMainWindow):
         self._show_squares_button.setEnabled(False)
         calibration_layout = QHBoxLayout()
         calibration_layout.addWidget(self._start_calibration_button)
+        calibration_layout.addWidget(self._quick_verify_button)
         calibration_layout.addWidget(self._cancel_calibration_button)
         calibration_layout.addWidget(self._show_grid_button)
         calibration_layout.addWidget(self._show_squares_button)
@@ -305,10 +367,35 @@ class CameraWindow(QMainWindow):
         self._calibration_progress.setValue(0)
         self._calibration_progress.setVisible(False)
 
+        self._camera_calibration_indicator = QLabel()
+        self._projector_calibration_indicator = QLabel()
+        self._set_calibration_indicator(
+            self._camera_calibration_indicator,
+            "Camera calibration",
+            "unknown",
+        )
+        self._set_calibration_indicator(
+            self._projector_calibration_indicator,
+            "Projector calibration",
+            "unknown",
+        )
+        calibration_indicator_layout = QHBoxLayout()
+        calibration_indicator_layout.addWidget(
+            self._camera_calibration_indicator
+        )
+        calibration_indicator_layout.addWidget(
+            self._projector_calibration_indicator
+        )
+        calibration_indicator_layout.addStretch()
+
         self._projector_status = QLabel(
             "Projector closed. Open it black before showing the square."
         )
         self._projector_status.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self._alignment_status = QLabel("Alignment monitor inactive.")
+        self._alignment_status.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
 
@@ -324,9 +411,11 @@ class CameraWindow(QMainWindow):
         layout.addLayout(projector_target_layout)
         layout.addLayout(calibration_layout)
         layout.addWidget(self._calibration_progress)
+        layout.addLayout(calibration_indicator_layout)
         layout.addWidget(self._camera_status)
         layout.addWidget(self._detection_status)
         layout.addWidget(self._projector_status)
+        layout.addWidget(self._alignment_status)
         layout.addWidget(self._instructions)
         container = QWidget()
         container.setLayout(layout)
@@ -337,7 +426,17 @@ class CameraWindow(QMainWindow):
         self._projector_selector.currentIndexChanged.connect(
             self._projector_selection_changed
         )
-        self._start_camera(selected_index)
+        self._camera_selector.currentIndexChanged.connect(
+            self._camera_selection_changed
+        )
+        self._media_devices.videoInputsChanged.connect(
+            self._camera_devices_changed
+        )
+        self._open_projector()
+        if selected_index is None:
+            self._wait_for_external_camera()
+        else:
+            self._start_camera(selected_index)
 
     @staticmethod
     def _percentage_spin_box(
@@ -368,6 +467,17 @@ class CameraWindow(QMainWindow):
     @staticmethod
     def _device_key(device: QCameraDevice) -> str:
         return bytes(device.id().toHex().data()).decode("ascii")
+
+    @staticmethod
+    def _external_camera_devices() -> list[QCameraDevice]:
+        return [
+            device
+            for device in QMediaDevices.videoInputs()
+            if _is_external_camera(
+                device.description(),
+                device.position(),
+            )
+        ]
 
     @staticmethod
     def _preferred_format(device: QCameraDevice) -> QCameraFormat | None:
@@ -409,6 +519,7 @@ class CameraWindow(QMainWindow):
         self._latest_frame = None
         self._snapshot_visible = False
         self._snapshot_button.setEnabled(True)
+        self._start_calibration_button.setEnabled(True)
         self._resume_button.setEnabled(False)
         self._settings.setValue(_CAMERA_SETTING, self._device_key(device))
         self._settings.sync()
@@ -424,12 +535,85 @@ class CameraWindow(QMainWindow):
         )
         self._restore_saved_calibration()
 
-    def _use_selected_camera(self) -> None:
-        selected_index = self._camera_selector.currentIndex()
+    def _camera_selection_changed(self, selected_index: int) -> None:
+        previous_index = self._active_device_index
         try:
             self._start_camera(selected_index)
         except RuntimeError as error:
+            self._camera_selector.blockSignals(True)
+            self._camera_selector.setCurrentIndex(previous_index)
+            self._camera_selector.blockSignals(False)
             QMessageBox.critical(self, "Camera error", str(error))
+
+    def _camera_devices_changed(self) -> None:
+        active_key = (
+            self._device_key(self._devices[self._active_device_index])
+            if 0 <= self._active_device_index < len(self._devices)
+            else ""
+        )
+        devices = self._external_camera_devices()
+        device_keys = [self._device_key(device) for device in devices]
+        self._devices = devices
+
+        self._camera_selector.blockSignals(True)
+        self._camera_selector.clear()
+        self._camera_selector.addItems(
+            [device.description() for device in devices]
+        )
+        self._camera_selector.setEnabled(
+            bool(devices) and not self._calibrator.active
+        )
+
+        if active_key in device_keys:
+            self._active_device_index = device_keys.index(active_key)
+            self._camera_selector.setCurrentIndex(self._active_device_index)
+            self._camera_selector.blockSignals(False)
+            return
+
+        if self._camera is not None:
+            self._camera.stop()
+            self._camera = None
+        self._active_device_index = -1
+        self._latest_frame = None
+        self._current_pixmap = None
+        self._preview.clear()
+        self._invalidate_calibration()
+
+        if not devices:
+            self._camera_selector.blockSignals(False)
+            self._wait_for_external_camera()
+            return
+
+        saved_key = str(self._settings.value(_CAMERA_SETTING, ""))
+        default_key = self._device_key(QMediaDevices.defaultVideoInput())
+        try:
+            selected_index = _resolve_camera_index(
+                [device.description() for device in devices],
+                device_keys,
+                default_key,
+                saved_key,
+                self._requested_camera_selector,
+            )
+        except RuntimeError as error:
+            self._camera_selector.blockSignals(False)
+            self._wait_for_external_camera(str(error))
+            return
+
+        self._camera_selector.setCurrentIndex(selected_index)
+        self._camera_selector.blockSignals(False)
+        self._start_camera(selected_index)
+
+    def _wait_for_external_camera(self, detail: str | None = None) -> None:
+        self._snapshot_button.setEnabled(False)
+        self._resume_button.setEnabled(False)
+        self._start_calibration_button.setEnabled(False)
+        message = "Waiting for an external USB camera."
+        if detail is not None:
+            message = f"{message} {detail}"
+        self._camera_status.setText(message)
+        self._detection_status.setText(
+            "The integrated webcam is not used."
+        )
 
     def _camera_error(
         self,
@@ -511,13 +695,74 @@ class CameraWindow(QMainWindow):
             self._projector_window.show_black()
             QMessageBox.critical(self, "Projector calibration", str(error))
 
+    def _start_quick_verification(self) -> None:
+        result = self._calibration_result
+        if result is None:
+            QMessageBox.warning(
+                self,
+                "Quick calibration verification",
+                "No matching saved calibration is available.",
+            )
+            return
+        if self._latest_frame is None:
+            QMessageBox.warning(
+                self,
+                "Quick calibration verification",
+                "No camera frame is available yet.",
+            )
+            return
+        if not self._open_projector():
+            return
+
+        self._selected_board_square = None
+        self._pending_board_square = None
+        self._board_widget.set_selected_square(None)
+        selected_index = self._projector_selector.currentIndex()
+        screen_geometry = self._screens[selected_index].geometry()
+        try:
+            self._calibrator.start_verification(
+                result,
+                screen_geometry.width(),
+                screen_geometry.height(),
+            )
+        except (RuntimeError, ValueError) as error:
+            self._projector_window.show_black()
+            QMessageBox.critical(
+                self,
+                "Quick calibration verification",
+                str(error),
+            )
+
     def _black_projector(self) -> None:
         if self._calibrator.active:
             self._calibrator.cancel()
         self._projector_window.show_black()
         self._selected_board_square = None
+        self._pending_board_square = None
         self._board_widget.set_selected_square(None)
+        self._alignment_monitor.set_black()
         self._projector_status.setText("Projector is black.")
+
+    def _show_manual_target(self) -> None:
+        self._pending_board_square = None
+        self._projector_window.show_target()
+        self._alignment_monitor.set_paused("manual projector target")
+
+    def _show_focus_pattern(self) -> None:
+        if not self._open_projector():
+            return
+        selected_index = self._projector_selector.currentIndex()
+        geometry = self._screens[selected_index].geometry()
+        self._projector_window.show_pattern(
+            focus_pattern(geometry.width(), geometry.height())
+        )
+        self._selected_board_square = None
+        self._pending_board_square = None
+        self._board_widget.set_selected_square(None)
+        self._alignment_monitor.set_paused("focus pattern")
+        self._projector_status.setText(
+            "Showing the projector focus pattern. Select Black when finished."
+        )
 
     def _close_projector(self) -> None:
         if self._calibrator.active:
@@ -525,7 +770,9 @@ class CameraWindow(QMainWindow):
         self._projector_window.show_black()
         self._projector_window.close()
         self._selected_board_square = None
+        self._pending_board_square = None
         self._board_widget.set_selected_square(None)
+        self._alignment_monitor.set_black()
         self._projector_status.setText("Projector closed.")
 
     def _show_calibrated_grid(self) -> None:
@@ -537,7 +784,9 @@ class CameraWindow(QMainWindow):
             QMessageBox.warning(self, "Projector calibration", str(error))
             return
         self._selected_board_square = None
+        self._pending_board_square = None
         self._board_widget.set_selected_square(None)
+        self._alignment_monitor.set_paused("full-board grid preview")
         self._projector_status.setText(
             "Projecting the calibrated 8x8 board grid."
         )
@@ -551,7 +800,9 @@ class CameraWindow(QMainWindow):
             QMessageBox.warning(self, "Projector calibration", str(error))
             return
         self._selected_board_square = None
+        self._pending_board_square = None
         self._board_widget.set_selected_square(None)
+        self._alignment_monitor.set_paused("all-squares preview")
         self._projector_status.setText(
             "Projecting inset red fills over all 64 squares."
         )
@@ -570,20 +821,28 @@ class CameraWindow(QMainWindow):
     def _projector_calibration_active(self, active: bool) -> None:
         self._calibration_progress.setVisible(active)
         self._start_calibration_button.setEnabled(not active)
+        self._quick_verify_button.setEnabled(
+            not active and self._calibration_result is not None
+        )
         self._cancel_calibration_button.setEnabled(active)
         self._camera_selector.setEnabled(not active)
-        self._use_camera_button.setEnabled(not active)
         self._projector_selector.setEnabled(not active)
         self._open_projector_button.setEnabled(not active)
         self._show_target_button.setEnabled(not active)
+        self._focus_pattern_button.setEnabled(not active)
         self._close_projector_button.setEnabled(not active)
         self._snapshot_button.setEnabled(not active and not self._snapshot_visible)
+        if active:
+            self._alignment_monitor.set_paused("projector calibration")
 
     def _projector_calibration_completed(
         self,
         result: CalibrationResult,
     ) -> None:
         self._activate_calibration_result(result)
+        self._alignment_monitor.set_paused(
+            "calibration grid preview; select Black or a square to resume"
+        )
         self._calibration_progress.setVisible(True)
         if self._latest_frame is None:
             return
@@ -621,6 +880,14 @@ class CameraWindow(QMainWindow):
             )
 
     def _projector_calibration_failed(self, message: str) -> None:
+        self._projector_window.show_black()
+        self._invalidate_calibration()
+        self._set_calibration_indicator(
+            self._projector_calibration_indicator,
+            "Projector calibration",
+            "error",
+            message,
+        )
         QMessageBox.warning(
             self,
             "Projector calibration failed",
@@ -638,14 +905,40 @@ class CameraWindow(QMainWindow):
             return
         if not self._open_projector():
             return
+        self._pending_board_square = (row, column)
+        self._projector_status.setText(
+            "Capturing a black reference before projecting the selected square."
+        )
+        QTimer.singleShot(
+            250,
+            lambda: self._project_board_square_after_black(row, column),
+        )
+
+    def _project_board_square_after_black(
+        self,
+        row: int,
+        column: int,
+    ) -> None:
+        if (
+            self._pending_board_square != (row, column)
+            or self._calibration_result is None
+        ):
+            return
+        if self._latest_frame is not None:
+            self._alignment_monitor.capture_black_reference(
+                self._latest_frame
+            )
         try:
             self._projector_window.show_square(row, column)
         except (RuntimeError, ValueError) as error:
+            self._pending_board_square = None
             QMessageBox.warning(self, "Square projection", str(error))
             return
 
+        self._pending_board_square = None
         self._selected_board_square = (row, column)
         self._board_widget.set_selected_square((row, column))
+        self._alignment_monitor.set_selected_square(row, column)
         square_name = f"{chr(ord('a') + column)}{8 - row}"
         self._projector_status.setText(
             f"Projecting {square_name} (row {row + 1}, column {column + 1})."
@@ -656,7 +949,9 @@ class CameraWindow(QMainWindow):
         result: CalibrationResult,
     ) -> None:
         self._calibration_result = result
+        self._verified_calibration_result = result
         self._selected_board_square = None
+        self._pending_board_square = None
         self._projector_window.set_projector_grid(
             result.mapping.projector_grid
         )
@@ -664,15 +959,129 @@ class CameraWindow(QMainWindow):
         self._board_widget.setEnabled(True)
         self._show_grid_button.setEnabled(True)
         self._show_squares_button.setEnabled(True)
+        self._quick_verify_button.setEnabled(True)
+        selected_screen = self._screens[
+            self._projector_selector.currentIndex()
+        ]
+        geometry = selected_screen.geometry()
+        self._alignment_monitor.configure(
+            result,
+            (geometry.width(), geometry.height()),
+        )
+        self._set_calibration_indicator(
+            self._camera_calibration_indicator,
+            "Camera calibration",
+            "ok",
+        )
+        self._set_calibration_indicator(
+            self._projector_calibration_indicator,
+            "Projector calibration",
+            "ok",
+        )
 
     def _invalidate_calibration(self) -> None:
         self._calibration_result = None
+        self._verified_calibration_result = None
         self._selected_board_square = None
+        self._pending_board_square = None
         self._projector_window.clear_projector_grid()
         self._board_widget.set_selected_square(None)
         self._board_widget.setEnabled(False)
         self._show_grid_button.setEnabled(False)
         self._show_squares_button.setEnabled(False)
+        self._quick_verify_button.setEnabled(False)
+        self._alignment_monitor.clear()
+        self._set_calibration_indicator(
+            self._camera_calibration_indicator,
+            "Camera calibration",
+            "unknown",
+        )
+        self._set_calibration_indicator(
+            self._projector_calibration_indicator,
+            "Projector calibration",
+            "unknown",
+        )
+
+    @staticmethod
+    def _set_calibration_indicator(
+        label: QLabel,
+        title: str,
+        state: str,
+        detail: str = "",
+    ) -> None:
+        appearances = {
+            "ok": ("OK", "#2e7d32"),
+            "error": ("ERROR", "#c62828"),
+            "unknown": ("NOT CALIBRATED", "#616161"),
+        }
+        text, background = appearances[state]
+        label.setText(f"{title}: {text}")
+        label.setStyleSheet(
+            f"background: {background}; color: white; font-weight: bold; "
+            "border-radius: 4px; padding: 5px 9px;"
+        )
+        label.setToolTip(detail)
+
+    def _alignment_monitor_status(self, message: str) -> None:
+        self._alignment_status.setText(message)
+
+    def _alignment_mapping_updated(
+        self,
+        mapping: MappingResult,
+        displacement: float,
+    ) -> None:
+        if self._calibration_result is None:
+            return
+        self._calibration_result = replace(
+            self._calibration_result,
+            mapping=mapping,
+        )
+        self._projector_window.set_projector_grid(mapping.projector_grid)
+        if self._selected_board_square is not None:
+            row, column = self._selected_board_square
+            self._projector_window.show_square(row, column)
+        self._projector_status.setText(
+            f"Board moved {displacement:.1f} camera pixels; projected "
+            "coordinates were updated without full recalibration."
+        )
+
+    def _alignment_mapping_verified(self, _mapping: MappingResult) -> None:
+        if self._calibration_result is None:
+            return
+        self._verified_calibration_result = self._calibration_result
+
+    def _calibration_error(self, source: str, message: str) -> None:
+        self._projector_window.show_black()
+        self._selected_board_square = None
+        self._pending_board_square = None
+        self._board_widget.set_selected_square(None)
+        if self._verified_calibration_result is not None:
+            self._calibration_result = self._verified_calibration_result
+            self._projector_window.set_projector_grid(
+                self._verified_calibration_result.mapping.projector_grid
+            )
+        camera_state = "error" if source == "camera" else "ok"
+        projector_state = "error" if source == "projector" else "ok"
+        self._set_calibration_indicator(
+            self._camera_calibration_indicator,
+            "Camera calibration",
+            camera_state,
+            message if source == "camera" else "",
+        )
+        self._set_calibration_indicator(
+            self._projector_calibration_indicator,
+            "Projector calibration",
+            projector_state,
+            message if source == "projector" else "",
+        )
+        self._alignment_status.setText(
+            f"{source.capitalize()} calibration error: {message} "
+            "The last verified calibration remains active."
+        )
+        self._projector_status.setText(
+            "Projector black; the last verified calibration remains available "
+            "until you choose to recalibrate."
+        )
 
     def _projector_selection_changed(self) -> None:
         if self._calibrator.active:
@@ -751,6 +1160,7 @@ class CameraWindow(QMainWindow):
             dtype=np.uint8,
         )
         self._latest_frame = camera_frame.copy()
+        self._alignment_monitor.accept_frame(self._latest_frame)
         self._calibrator.accept_frame(camera_frame)
         if not self._snapshot_visible:
             self._display_frame(camera_frame)
@@ -861,6 +1271,7 @@ class CameraWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._calibrator.cancel()
+        self._alignment_monitor.clear()
         if self._camera is not None:
             self._camera.stop()
         self._projector_window.close()

@@ -10,6 +10,7 @@ from src.chess_camera.projector import (
     PROJECTED_ON_DARK_SQUARE,
     PROJECTED_ON_LIGHT_SQUARE,
     ProjectorWindow,
+    focus_pattern,
     target_rectangle,
 )
 
@@ -39,6 +40,19 @@ def test_target_rectangle_stays_inside_projector_edges() -> None:
     assert top_left.top() == 0
     assert bottom_right.right() == 1279
     assert bottom_right.bottom() == 719
+
+
+def test_focus_pattern_has_checkerboard_cross_and_border() -> None:
+    pattern = focus_pattern(80, 48, cell_size=8)
+
+    assert pattern.shape == (48, 80)
+    assert pattern.dtype == np.uint8
+    assert pattern[4, 4] == 0
+    assert pattern[4, 12] == 255
+    assert np.all(pattern[0, :] == 255)
+    assert np.all(pattern[:, 0] == 255)
+    assert pattern[24, 20] == 255
+    assert pattern[12, 40] == 255
 
 
 @pytest.mark.parametrize(

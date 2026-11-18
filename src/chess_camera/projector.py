@@ -28,6 +28,38 @@ PROJECTED_ON_LIGHT_SQUARE = QColor("#007fff")
 PROJECTED_ON_DARK_SQUARE = QColor("#00ffff")
 
 
+def focus_pattern(
+    width: int,
+    height: int,
+    *,
+    cell_size: int = 16,
+) -> NDArray[np.uint8]:
+    if width <= 0 or height <= 0:
+        raise ValueError("Focus-pattern dimensions must be positive.")
+    if cell_size < 2:
+        raise ValueError("Focus-pattern cell size must be at least two pixels.")
+
+    y_coordinates, x_coordinates = np.indices((height, width))
+    checkerboard = (
+        (x_coordinates // cell_size + y_coordinates // cell_size) % 2
+    )
+    pattern = (checkerboard * 255).astype(np.uint8)
+
+    center_x = width // 2
+    center_y = height // 2
+    pattern[:, max(0, center_x - 4) : min(width, center_x + 5)] = 0
+    pattern[:, max(0, center_x - 1) : min(width, center_x + 2)] = 255
+    pattern[max(0, center_y - 4) : min(height, center_y + 5), :] = 0
+    pattern[max(0, center_y - 1) : min(height, center_y + 2), :] = 255
+
+    border = min(3, width, height)
+    pattern[:border, :] = 255
+    pattern[-border:, :] = 255
+    pattern[:, :border] = 255
+    pattern[:, -border:] = 255
+    return pattern
+
+
 def target_rectangle(
     width: int,
     height: int,

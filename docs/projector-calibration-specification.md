@@ -1,6 +1,6 @@
 # Projector-to-Chessboard Calibration Specification
 
-**Version:** 0.5  
+**Version:** 0.11
 **Status:** Initial implementation validated on hardware  
 **Platform:** Python on Windows  
 **Camera:** Logitech Webcam C930e at 1920x1080  
@@ -41,6 +41,10 @@ The initial calibration path is implemented with:
   `calibrations/latest.json`.
 - Strict restoration of the saved calibration when camera identifier, camera
   resolution, projector name, and projector resolution all match.
+- Manual quick verification that remaps the current board position and checks
+  five projected square-center targets.
+- Up-to-five-Hz non-disruptive continuous board remapping and active-square
+  projector verification.
 - An interactive 8x8 board using the classic Lichess brown palette.
 - Projection of one inset physical-square polygon when the corresponding
   interface square is clicked.
@@ -62,9 +66,9 @@ The first successful hardware run measured:
 - 3.614 camera pixels maximum independent validation error.
 - 8.0% maximum error as a fraction of local square width.
 
-Automatic quick five-point verification remains future work. The current
-implementation may restore a strictly matching saved calibration and clearly
-warns that recalibration is required if the board plane or hardware moved.
+The current implementation restores a strictly matching saved calibration and
+provides **Quick verify saved calibration**. Automatic periodic verification
+and drift-triggered recalibration remain future work.
 
 ## 2. Scope
 
@@ -77,8 +81,8 @@ The calibration feature shall:
 5. Project full-board and individual-square test patterns.
 6. Measure alignment independently after calibration.
 7. Reject incomplete, unstable, or inaccurate calibrations.
-8. Save successful calibrations and restore only exact hardware/resolution
-   matches. Automatic verification before reuse remains planned.
+8. Save successful calibrations, restore only exact hardware/resolution
+   matches, and provide five-target quick verification.
 
 The first implementation assumes:
 
@@ -466,6 +470,46 @@ converge.
 
 ## 14. Drift Detection and Recalibration
 
+### 14.1 Continuous non-disruptive monitoring
+
+After calibration is completed or restored, the application:
+
+1. Runs empty-board detection in a background worker up to five times per
+   second. A new task is skipped while the previous detection is still running.
+2. Compares all 81 current camera-grid points with the calibrated grid.
+3. Remaps the 9x9 projector grid after approximately 1.5 camera pixels of
+   movement and immediately redraws any active square.
+4. Transfers the calibrated local correction field to the moved board using a
+   smooth quadratic camera-space model.
+5. Geometrically warps the stored black reference with the board motion.
+6. While a selected square is projected, locates its illuminated region and
+   compares its centroid with the expected physical-square center.
+7. Accepts in-plane board movement when the updated square remains aligned.
+8. Requires two consecutive projected-square or remapping failures before
+   invalidation.
+9. Silently retains the last confirmed mapping while a hand, piece, or other
+   temporary obstruction prevents board detection. A missed detection never
+   constitutes evidence of board movement or calibration loss.
+10. After a positive remap, follows the board immediately but waits for five
+   consecutive visible stable-board checks before resuming optical failure
+   counting.
+11. Classifies failure after a camera-grid remap as camera calibration loss and
+    failure with a stable camera grid as projector calibration loss.
+12. Makes the projector black and changes the corresponding persistent UI
+    indicator to red after confirmed calibration loss. The last optically
+    verified mesh remains available and recalibration remains a manual action.
+
+Monitoring pauses for full calibration, focus patterns, manual targets,
+full-board grids, and all-square fills because those modes intentionally
+change or obscure the evidence used by the normal monitor.
+
+A projector emits no measurable signal while completely black. Therefore the
+non-disruptive monitor can detect projector movement only while a square is
+illuminated or when the next square is selected. Periodic visible probes and
+always-on anchor marks are intentionally not used.
+
+### 14.2 Manual quick verification
+
 A quick verification sequence shall project at least five targets:
 
 - Four positions near the board corners.
@@ -473,6 +517,17 @@ A quick verification sequence shall project at least five targets:
 
 The saved calibration may continue to be used only when all targets are
 detected and remain within the configured drift threshold.
+
+The implemented manual quick verification:
+
+1. Captures a current projector-black frame.
+2. Redetects the complete empty board.
+3. Remaps the saved projector mesh to the current camera-grid coordinates.
+4. Projects targets at four corner-square centers and one central square
+   center.
+5. Applies the same maximum 10%-of-local-square-width validation threshold as
+   full calibration.
+6. Requires full Gray-code calibration when any check fails.
 
 A complete calibration is required after:
 
@@ -514,9 +569,9 @@ A successful calibration shall be stored with:
 
 Saved calibration data is treated as invalid if camera identifier, camera
 resolution, projector name, or projector resolution does not match. A matching
-record is currently restored with an explicit warning to recalibrate after any
-hardware or board-plane movement. Automatic quick verification remains
-planned.
+record is restored with an explicit warning to recalibrate after hardware or
+board-plane movement. Manual five-target quick verification is available;
+automatic periodic verification remains planned.
 
 ## 16. Diagnostics
 
@@ -544,9 +599,11 @@ explicitly and shall not be presented as successful diagnostic storage.
 The implemented calibration interface provides:
 
 - Camera and projector selectors.
-- A **Start projector calibration** action.
+- A **Full projector calibration** action.
 - A **Cancel calibration** action.
 - An always-available **Projector black** action.
+- A calibration-independent **Focus pattern** action using a native-resolution
+  black/white checkerboard, border, and central cross.
 - Current phase and progress.
 - Current pattern number and total pattern count.
 - Clear success and failure messages.
@@ -554,10 +611,12 @@ The implemented calibration interface provides:
 - An all-squares fill preview.
 - Automatic save after successful validation.
 - Strict matching-calibration restore.
+- **Quick verify saved calibration** action.
+- Selectable continuous-alignment monitor status.
 - The interactive square-selection board described below.
 
 Coverage/decode detail views, alternating checkerboard projection,
-previous/next stepping, manual save/discard actions, and automatic quick
+previous/next stepping, manual save/discard actions, and automatic periodic
 verification remain planned.
 
 ### 17.1 Interactive square selection
@@ -635,11 +694,11 @@ the user.
 - Reject inaccurate calibration.
 - Add bounded iterative refinement.
 
-### Stage 5: Persistence implemented; quick verification planned
+### Stage 5: Persistence and manual quick verification - implemented
 
 - Save successful calibration records.
 - Reload matching records.
-- Five-point verification before reuse remains planned.
+- Verify board stability and five projected targets on request.
 
 ## 20. Test Requirements
 
@@ -685,6 +744,8 @@ The projector-calibration milestone is complete when:
 6. Calibration failure always returns the projector to black.
 7. Successful calibration can be saved and restored for a strict matching
    hardware/resolution configuration.
+8. A restored calibration can be verified with five projected targets without
+   rerunning the 40-state Gray-code sequence.
 
-Automatic quick verification is a remaining requirement beyond the initial
-implemented milestone.
+Automatic periodic verification remains beyond the initial implemented
+milestone.
