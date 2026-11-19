@@ -1,12 +1,28 @@
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
+from pathlib import Path
 
-from PySide6.QtGui import QColor, QMouseEvent, QPaintEvent, QPainter, QPen
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import (
+    QColor,
+    QMouseEvent,
+    QPaintEvent,
+    QPainter,
+    QPen,
+    QPixmap,
+)
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QSizePolicy, QWidget
+
+from .chess_position import PieceCode, Position, piece_asset_filename
 
 LICHESS_LIGHT = QColor("#f0d9b5")
 LICHESS_DARK = QColor("#b58863")
 LICHESS_SELECTED = QColor("#d7da4f")
+_LAST_MOVE_LIGHTENING = 135
+_PIECE_ASSET_DIRECTORY = (
+    Path(__file__).resolve().parent / "assets" / "pieces" / "cburnett"
+)
+_PIECE_CODES = frozenset("KQRBNPkqrbnp")
 
 
 def rotate_square(
@@ -46,7 +62,11 @@ class ChessboardWidget(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._selected_square: tuple[int, int] | None = None
+        self._last_move: tuple[tuple[int, int], tuple[int, int]] | None = None
         self._occupied_squares: frozenset[tuple[int, int]] = frozenset()
+        self._pieces: Position = {}
+        self._piece_renderers: dict[PieceCode, QSvgRenderer] = {}
+        self._piece_pixmaps: dict[tuple[PieceCode, int, float], QPixmap] = {}
         self.setMinimumSize(320, 320)
         self.setSizePolicy(
             QSizePolicy.Policy.Expanding,
@@ -73,6 +93,27 @@ class ChessboardWidget(QWidget):
         self.update()
 
     @property
+    def last_move(
+        self,
+    ) -> tuple[tuple[int, int], tuple[int, int]] | None:
+        return self._last_move
+
+    def set_last_move(
+        self,
+        move: tuple[tuple[int, int], tuple[int, int]] | None,
+    ) -> None:
+        if move is not None:
+            for row, column in move:
+                if not 0 <= row < 8 or not 0 <= column < 8:
+                    raise ValueError(
+                        "Move squares must be inside the 8x8 board."
+                    )
+        if move == self._last_move:
+            return
+        self._last_move = move
+        self.update()
+
+    @property
     def occupied_squares(self) -> frozenset[tuple[int, int]]:
         return self._occupied_squares
 
@@ -89,6 +130,29 @@ class ChessboardWidget(QWidget):
         if occupied == self._occupied_squares:
             return
         self._occupied_squares = occupied
+        self.update()
+
+    @property
+    def pieces(self) -> Position:
+        return self._pieces.copy()
+
+    def set_pieces(
+        self,
+        pieces: Mapping[tuple[int, int], PieceCode],
+    ) -> None:
+        position: Position = {}
+        for square, piece in pieces.items():
+            row, column = square
+            if not 0 <= row < 8 or not 0 <= column < 8:
+                raise ValueError("Piece squares must be inside the 8x8 board.")
+            if piece not in _PIECE_CODES:
+                raise ValueError(f"Unknown piece code: {piece}")
+            position[(row, column)] = piece
+        for piece in set(position.values()):
+            self._piece_renderer(piece)
+        if position == self._pieces:
+            return
+        self._pieces = position
         self.update()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
@@ -130,13 +194,25 @@ class ChessboardWidget(QWidget):
                     else LICHESS_DARK
                 )
                 painter.fillRect(rectangle, color)
+                if (
+                    self._last_move is not None
+                    and (row, column) in self._last_move
+                ):
+                    painter.fillRect(
+                        rectangle,
+                        color.lighter(_LAST_MOVE_LIGHTENING),
+                    )
                 if self._selected_square == (row, column):
                     painter.fillRect(rectangle, LICHESS_SELECTED)
                     painter.setPen(
                         QPen(QColor("#c62828"), max(2.0, square_size * 0.05))
                     )
                     painter.drawRect(rectangle.adjusted(2, 2, -2, -2))
-                if (row, column) in self._occupied_squares:
+                piece = self._pieces.get((row, column))
+                if (
+                    piece is None
+                    and (row, column) in self._occupied_squares
+                ):
                     diameter = square_size * 0.44
                     center = rectangle.center()
                     painter.setPen(Qt.PenStyle.NoPen)
@@ -148,6 +224,24 @@ class ChessboardWidget(QWidget):
                             diameter,
                             diameter,
                         )
+                    )
+                if piece is not None:
+                    piece_size = max(1, round(square_size * 0.92))
+                    pixmap = self._piece_pixmap(
+                        piece,
+                        piece_size,
+                        self.devicePixelRatioF(),
+                    )
+                    piece_rectangle = QRectF(
+                        rectangle.center().x() - piece_size / 2,
+                        rectangle.center().y() - piece_size / 2,
+                        piece_size,
+                        piece_size,
+                    )
+                    painter.drawPixmap(
+                        piece_rectangle,
+                        pixmap,
+                        QRectF(pixmap.rect()),
                     )
 
                 label_color = (
@@ -188,3 +282,40 @@ class ChessboardWidget(QWidget):
 
         painter.end()
         event.accept()
+
+    def _piece_renderer(self, piece: PieceCode) -> QSvgRenderer:
+        renderer = self._piece_renderers.get(piece)
+        if renderer is not None:
+            return renderer
+        asset_path = _PIECE_ASSET_DIRECTORY / piece_asset_filename(piece)
+        renderer = QSvgRenderer(str(asset_path), self)
+        if not renderer.isValid():
+            raise RuntimeError(
+                f"Chess piece asset could not be loaded: {asset_path}"
+            )
+        self._piece_renderers[piece] = renderer
+        return renderer
+
+    def _piece_pixmap(
+        self,
+        piece: PieceCode,
+        logical_size: int,
+        device_pixel_ratio: float,
+    ) -> QPixmap:
+        cache_key = (piece, logical_size, device_pixel_ratio)
+        cached = self._piece_pixmaps.get(cache_key)
+        if cached is not None:
+            return cached
+        pixel_size = max(1, round(logical_size * device_pixel_ratio))
+        pixmap = QPixmap(pixel_size, pixel_size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        piece_painter = QPainter(pixmap)
+        piece_painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self._piece_renderer(piece).render(
+            piece_painter,
+            QRectF(0, 0, pixel_size, pixel_size),
+        )
+        piece_painter.end()
+        pixmap.setDevicePixelRatio(device_pixel_ratio)
+        self._piece_pixmaps[cache_key] = pixmap
+        return pixmap

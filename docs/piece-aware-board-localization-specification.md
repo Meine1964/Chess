@@ -10,6 +10,7 @@ Milestone 4 partially implemented; Milestones 3 and 5 proposed
 - [Projector calibration](./projector-calibration-specification.md)
 - [Single-shot coded-pattern calibration](./single-shot-coded-pattern-calibration-specification.md)
 - [Chess-square occupancy and UI marking](./chess-square-occupancy-ui-specification.md)
+- [Chess-piece UI rendering and move synchronization](./chess-piece-ui-tracking-specification.md)
 
 ## 1. Purpose
 
@@ -393,6 +394,9 @@ After a stable pre-move and post-move position are available:
 - Ask for user confirmation when evidence is ambiguous.
 - Never silently update game state from a low-confidence candidate.
 
+The initial non-capturing one-piece synchronization contract is specified in
+[Chess-Piece UI Rendering and Move Synchronization](./chess-piece-ui-tracking-specification.md).
+
 ## 14. Diagnostics
 
 Each localization or calibration attempt should be able to save:
@@ -501,7 +505,8 @@ projector remains required.
 
 ### Milestone 4: Stable occupancy
 
-- Detect empty, occupied, and unknown squares. (Implemented experimentally)
+- Detect a complete binary empty/occupied square map. (Implemented
+  experimentally)
 - Wait through hand motion. (Implemented with image-motion gating)
 - Produce pre-move and post-move stable states. (Partially implemented)
 

@@ -94,8 +94,8 @@ class CalibrationStore:
         *,
         camera_id: str,
         camera_resolution: tuple[int, int],
-        projector_name: str,
-        projector_resolution: tuple[int, int],
+        projector_name: str | None,
+        projector_resolution: tuple[int, int] | None,
     ) -> CalibrationResult | None:
         source = self._root / "latest.json"
         if not source.exists():
@@ -115,12 +115,18 @@ class CalibrationStore:
             if (
                 camera["id"] != camera_id
                 or (camera["width"], camera["height"]) != camera_resolution
-                or projector["name"] != projector_name
                 or (
-                    projector["width"],
-                    projector["height"],
+                    projector_name is not None
+                    and projector["name"] != projector_name
                 )
-                != projector_resolution
+                or (
+                    projector_resolution is not None
+                    and (
+                        projector["width"],
+                        projector["height"],
+                    )
+                    != projector_resolution
+                )
             ):
                 return None
 

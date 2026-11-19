@@ -23,6 +23,7 @@ DisplayMode = Literal[
     "grid",
     "squares",
     "selected_square",
+    "move",
 ]
 PROJECTED_ON_LIGHT_SQUARE = QColor("#007fff")
 PROJECTED_ON_DARK_SQUARE = QColor("#00ffff")
@@ -96,8 +97,16 @@ class ProjectorWindow(QWidget):
         self._projector_grid: NDArray[np.float32] | None = None
         self._selected_square: tuple[int, int] | None = None
         self._selected_square_is_light: bool | None = None
+        self._move_squares: tuple[
+            tuple[int, int, bool],
+            tuple[int, int, bool],
+        ] | None = None
         self.setWindowTitle("Chess Projector Output")
         self.setCursor(Qt.CursorShape.BlankCursor)
+
+    @property
+    def output_mode(self) -> DisplayMode:
+        return self._display_mode
 
     def show_on_screen(self, screen: QScreen) -> None:
         self.winId()
@@ -190,6 +199,28 @@ class ProjectorWindow(QWidget):
         self._display_mode = "selected_square"
         self.update()
 
+    def show_move(
+        self,
+        source: tuple[int, int],
+        destination: tuple[int, int],
+        *,
+        source_is_light: bool,
+        destination_is_light: bool,
+    ) -> None:
+        if self._projector_grid is None:
+            raise RuntimeError("No calibrated projector grid is available.")
+        for row, column in (source, destination):
+            if not 0 <= row < 8 or not 0 <= column < 8:
+                raise ValueError(
+                    "Projected move squares must be inside the 8x8 board."
+                )
+        self._move_squares = (
+            (*source, source_is_light),
+            (*destination, destination_is_light),
+        )
+        self._display_mode = "move"
+        self.update()
+
     def paintEvent(self, event: QPaintEvent) -> None:
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor(0, 0, 0))
@@ -244,6 +275,23 @@ class ProjectorWindow(QWidget):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(color)
             painter.drawPolygon(self._polygon(polygon))
+        elif (
+            self._display_mode == "move"
+            and self._projector_grid is not None
+            and self._move_squares is not None
+        ):
+            polygons = square_polygons(self._projector_grid)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(Qt.PenStyle.NoPen)
+            for row, column, is_light in self._move_squares:
+                painter.setBrush(
+                    PROJECTED_ON_LIGHT_SQUARE
+                    if is_light
+                    else PROJECTED_ON_DARK_SQUARE
+                )
+                painter.drawPolygon(
+                    self._polygon(polygons[row * 8 + column])
+                )
         painter.end()
         event.accept()
 

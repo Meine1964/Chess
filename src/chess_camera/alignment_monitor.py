@@ -13,6 +13,7 @@ from .board_detector import (
 from .calibration_controller import CalibrationResult
 from .projector_calibration import (
     CalibrationError,
+    MappingResult,
     bgr_to_gray,
     interpolate_grid_point,
     locate_validation_target,
@@ -60,6 +61,7 @@ class AlignmentMonitor(QObject):
     calibration_error = Signal(str, str)
     mapping_updated = Signal(object, float)
     mapping_verified = Signal(object)
+    camera_grid_checked = Signal()
 
     def __init__(
         self,
@@ -94,6 +96,7 @@ class AlignmentMonitor(QObject):
         self._stable_checks_after_remap = stable_checks_after_remap
         self._result: CalibrationResult | None = None
         self._projector_size = (0, 0)
+        self._camera_only = False
         self._latest_frame: ImageArray | None = None
         self._black_reference: ImageArray | None = None
         self._selected_square: tuple[int, int] | None = None
@@ -108,13 +111,17 @@ class AlignmentMonitor(QObject):
     def configure(
         self,
         result: CalibrationResult,
-        projector_size: tuple[int, int],
+        projector_size: tuple[int, int] | None,
     ) -> None:
-        if projector_size[0] <= 1 or projector_size[1] <= 1:
+        if (
+            projector_size is not None
+            and (projector_size[0] <= 1 or projector_size[1] <= 1)
+        ):
             raise ValueError("Projector dimensions must be greater than one.")
         self._result = result
         self._tracker.reset(result.board_detection)
-        self._projector_size = projector_size
+        self._projector_size = projector_size or (0, 0)
+        self._camera_only = projector_size is None
         self._selected_square = None
         self._output_mode = "black"
         self._black_reference = None
@@ -132,6 +139,7 @@ class AlignmentMonitor(QObject):
 
     def clear(self) -> None:
         self._result = None
+        self._camera_only = False
         self._tracker.reset()
         self._selected_square = None
         self._output_mode = "paused"
@@ -241,15 +249,33 @@ class AlignmentMonitor(QObject):
         displacement = float(np.max(displacements))
         if displacement > self._board_remap_threshold:
             old_camera_grid = self._result.mapping.camera_grid
-            try:
-                updated_mapping = remap_projector_mapping(
-                    self._result.mapping,
-                    detection.grid_points,
-                    self._projector_size,
+            if self._camera_only:
+                previous = self._result.mapping
+                updated_mapping = MappingResult(
+                    camera_grid=np.asarray(
+                        detection.grid_points,
+                        dtype=np.float32,
+                    ).copy(),
+                    projector_grid=previous.projector_grid.copy(),
+                    camera_to_projector_homography=(
+                        previous.camera_to_projector_homography.copy()
+                    ),
+                    coverage_ratio=previous.coverage_ratio,
+                    decoded_ratio=previous.decoded_ratio,
+                    inlier_ratio=previous.inlier_ratio,
+                    rms_error=previous.rms_error,
+                    maximum_error=previous.maximum_error,
                 )
-            except (CalibrationError, ValueError) as error:
-                self._geometry_failed(str(error), "camera")
-                return
+            else:
+                try:
+                    updated_mapping = remap_projector_mapping(
+                        self._result.mapping,
+                        detection.grid_points,
+                        self._projector_size,
+                    )
+                except (CalibrationError, ValueError) as error:
+                    self._geometry_failed(str(error), "camera")
+                    return
             self._result = CalibrationResult(
                 board_detection=detection,
                 mapping=updated_mapping,
@@ -280,6 +306,7 @@ class AlignmentMonitor(QObject):
             self._black_reference = bgr_to_gray(frame)
             self._geometry_failure_count = 0
             self._geometry_failure_source = None
+            self.camera_grid_checked.emit()
             self.status_changed.emit(
                 f"Alignment OK; board drift {displacement:.1f} px. "
                 "Projector drift will be checked on the next selected square."

@@ -9,6 +9,13 @@
 - [Projector/camera chessboard system](./projector-camera-chessboard-specification.md)
 - [Piece-aware board localization](./piece-aware-board-localization-specification.md)
 - [Single-shot coded-pattern calibration](./single-shot-coded-pattern-calibration-specification.md)
+- [Chess-piece UI rendering and move synchronization](./chess-piece-ui-tracking-specification.md)
+- [Reference-image move tracking](./reference-image-move-tracking-specification.md)
+
+Post-initialization move inference is superseded by the reference-image
+specification. The absolute occupancy classifier remains responsible only for
+starting-position initialization, explicit reset verification, and
+diagnostics. It shall not mutate an initialized logical piece position.
 
 ## 1. Purpose
 
@@ -22,7 +29,7 @@ UI square classified as occupied.
 This feature shall:
 
 1. Use the calibrated camera grid to analyze all 64 physical squares.
-2. Distinguish occupied, empty, and unknown squares.
+2. Classify every square as occupied or empty.
 3. Update only from stable, unobstructed camera observations.
 4. Map physical-square observations through the confirmed board orientation.
 5. Render occupancy independently from projector-square selection.
@@ -71,14 +78,13 @@ The selected-square highlight shall be drawn before the occupancy dot so that
 the occupancy state remains visible. The selected-square border shall remain
 visible around the dot.
 
-### 3.2 Empty and unknown squares
+### 3.2 Empty squares
 
 Empty squares shall have no occupancy marker.
 
-Unknown squares shall not be shown as occupied. During development, an
-optional diagnostic mode may draw a ring or other distinct marker for unknown
-squares, but the normal UI shall reserve the filled black dot for confirmed
-occupancy.
+The operational board state shall never contain unknown squares. If the whole
+frame is obstructed or moving, the application shall reject that observation
+and retain the previous complete binary state.
 
 ### 3.3 Status
 
@@ -86,7 +92,6 @@ The application shall report a concise occupancy status containing:
 
 - Number of occupied squares.
 - Number of empty squares.
-- Number of unknown squares.
 - Whether the result is current, stabilizing, frozen by motion, or unavailable.
 
 Examples:
@@ -109,6 +114,15 @@ The occupancy subsystem shall consume:
 
 The subsystem shall not infer board geometry independently. Geometry remains
 owned by the board-localization and calibration subsystems.
+
+The calibrated HDMI display need not remain connected for camera-only
+occupancy and piece synchronization. When the saved camera identity,
+resolution, and camera-space board grid still match, the application shall
+load that camera geometry independently, disable projector-dependent actions,
+and continue occupancy detection. Camera-only occupancy shall remain frozen
+until the alignment monitor has checked and, when necessary, remapped the
+saved camera grid against the live board. It shall not substitute another
+display's projector mapping or automatically open an unrelated screen.
 
 ## 5. Coordinate Systems
 
@@ -223,7 +237,7 @@ After initialization, an empty model may be updated only from squares that:
 - Do not contain strong shadows, glare, or clipping.
 - Agree with the current square-parity model.
 
-Occupied or unknown squares shall never update the empty model.
+Occupied squares shall never update the empty model.
 
 ## 9. Occupancy Features
 
@@ -252,7 +266,6 @@ Each physical square shall be classified as:
 
 - `empty`
 - `occupied`
-- `unknown`
 
 ### 10.1 Adaptive thresholds
 
@@ -275,10 +288,16 @@ A square shall be `empty` only when:
 - Its score remains within the accepted empty distribution.
 - Visibility and image-quality checks pass.
 
-All intermediate, contradictory, shadowed, clipped, or poorly visible cases
-shall be `unknown`.
+Intermediate per-square scores shall be resolved with a conservative binary
+threshold. Weak evidence is empty; sufficiently strong evidence is occupied.
+Motion, large obstruction, or invalid geometry rejects the complete frame
+instead of producing an incomplete square map.
 
-Classification shall not silently force all 64 squares into a binary result.
+Tall pieces may project a silhouette into an orthogonally adjacent square. A
+weak occupied candidate shall be downgraded to `empty` when an adjacent
+occupied square has both strong evidence and at least twice its occupancy
+score. Two adjacent squares with independently strong evidence shall remain
+occupied.
 
 ## 11. Temporal Stabilization
 
@@ -288,11 +307,11 @@ The initial temporal policy shall:
 
 1. Display the first stable observation immediately as provisional.
 2. Collect three stable observations for confirmation.
-3. Require a square to receive the same non-unknown classification in at
-   least two of the three observations.
+3. Require a square to receive the same binary classification in at least two
+   of the three observations.
 4. Freeze the last confirmed occupancy while motion or occlusion is present.
 5. Resume accumulation only after stability returns.
-6. Avoid clearing a confirmed occupied square because of one unknown frame.
+6. Avoid changing a confirmed square because of one disagreeing frame.
 
 A newly stabilized complete result shall replace the previously displayed
 result atomically. Dots shall not appear or disappear one square at a time
@@ -391,7 +410,7 @@ For a requested diagnostic capture, save or expose:
 - Per-square feature values.
 - Per-square occupancy scores.
 - Per-square classification and confidence.
-- Unknown/rejection reasons.
+- Frame rejection and confidence reasons.
 - Physical-to-UI coordinate mapping.
 - Final occupied-square set.
 
@@ -407,7 +426,7 @@ Tests shall cover:
 - Canonical extraction of all 64 square regions.
 - Boundary-margin exclusion.
 - Separate light and dark empty models.
-- Occupied, empty, and unknown threshold behavior.
+- Occupied and empty threshold behavior.
 - Black piece on a dark square.
 - Light piece on a light square.
 - Shadow and glare rejection.
@@ -423,7 +442,7 @@ Tests shall cover:
 - Immediate provisional occupancy from the first stable observation.
 - Two agreeing observations among three.
 - One disagreeing observation among three.
-- Unknown observations.
+- Rejected whole-frame observations.
 - Motion between stable observations.
 - Freeze and resume behavior.
 - Atomic replacement of the displayed set.
@@ -450,12 +469,16 @@ The first occupancy milestone is accepted when:
 3. Removing one piece removes exactly one dot after stabilization.
 4. Moving one piece changes exactly the expected source and destination dots.
 5. No dots change while a hand is moving over the board.
-6. Unknown observations do not erase the last confirmed result.
+6. Rejected observations do not erase the last confirmed result.
 7. All four supported board orientations map physical squares correctly.
 8. Occupancy dots remain visible while square selection still works.
 9. Calibration invalidation clears the dots.
 10. The detector reports an inconclusive state instead of inventing a complete
     occupancy map when evidence is insufficient.
+
+Rendering known piece identities and moving those identities between stable
+occupied squares are specified separately in
+[Chess-Piece UI Rendering and Move Synchronization](./chess-piece-ui-tracking-specification.md).
 
 ## 18. Implementation Milestones
 
@@ -466,11 +489,12 @@ edge density, luminance spread, and center-to-border contrast. The first
 observation is displayed provisionally. Two-observation agreement within a
 three-observation window confirms the result.
 
-On the first recorded C930e starting-position frame, it classified all 32
-piece squares as occupied, 27 middle-rank squares as empty, and five
-middle-rank squares as unknown. It produced no false occupied marks. Further
-live-frame and piece-movement validation remains required. The same frame
-resolved the bright White side to the UI bottom with strong side contrast.
+On recorded C930e frames, it classifies a standard setup as 32 occupied and 32
+empty squares. In the tall-king regression frame, weak silhouette spillover
+is resolved as empty while the square containing the base remains occupied.
+Further live-frame and piece-movement validation remains required. The
+starting-position frame also resolved the bright White side to the UI bottom
+with strong side contrast.
 
 ### Milestone 1: UI rendering
 
@@ -493,7 +517,7 @@ remain pending.
 
 - Build light and dark empty models from the middle four ranks.
 - Compute deterministic occupancy features.
-- Classify empty, occupied, and unknown squares.
+- Classify every square as empty or occupied.
 
 Implemented experimentally.
 
@@ -523,8 +547,7 @@ Direct reuse of the board tracker's state remains pending.
 - Exact canonical resolution.
 - Exact square-boundary exclusion percentage.
 - Occupancy feature weights.
-- Empty, occupied, and unknown thresholds.
-- Whether unknown squares need a normal-mode UI marker.
+- Empty and occupied thresholds.
 - Whether occupancy analysis starts automatically or through an explicit UI
   control.
 - How long a confirmed occupancy result may remain frozen before being marked

@@ -41,7 +41,7 @@ class OccupancyResult:
 
 @dataclass(frozen=True)
 class OccupancyUpdate:
-    state: Literal["stabilizing", "stable", "motion"]
+    state: Literal["stabilizing", "settling", "stable", "motion"]
     observation_count: int
     required_observations: int
     result: OccupancyResult | None
@@ -62,6 +62,7 @@ class SquareOccupancyDetector:
         canonical_size: int = 800,
         required_observations: int = 3,
         required_agreement: int = 2,
+        settling_observations: int = 8,
     ) -> None:
         if canonical_size < 320 or canonical_size % 8 != 0:
             raise ValueError(
@@ -73,9 +74,13 @@ class SquareOccupancyDetector:
             raise ValueError(
                 "Required agreement must fit within the observation window."
             )
+        if settling_observations < 1:
+            raise ValueError("At least one quiet observation is required.")
         self._canonical_size = canonical_size
         self._required_observations = required_observations
         self._required_agreement = required_agreement
+        self._settling_observations = settling_observations
+        self._settling_remaining = 0
         self._models: dict[int, _ParityModel] = {}
         self._history: deque[OccupancyGrid] = deque(
             maxlen=required_observations
@@ -86,6 +91,7 @@ class SquareOccupancyDetector:
         self._models.clear()
         self._history.clear()
         self._previous_motion_image = None
+        self._settling_remaining = 0
 
     def observe(
         self,
@@ -112,6 +118,7 @@ class SquareOccupancyDetector:
             if float(np.mean(difference)) > 6.0 and changed_ratio > 0.04:
                 self._history.clear()
                 self._previous_motion_image = motion_image
+                self._settling_remaining = self._settling_observations
                 return OccupancyUpdate(
                     "motion",
                     0,
@@ -119,11 +126,22 @@ class SquareOccupancyDetector:
                     None,
                 )
         self._previous_motion_image = motion_image
+        if self._settling_remaining:
+            self._history.clear()
+            self._settling_remaining -= 1
+            return OccupancyUpdate(
+                "settling",
+                self._settling_observations - self._settling_remaining,
+                self._settling_observations,
+                None,
+            )
 
         square_regions = extract_square_regions(canonical)
         if not self._models:
             self._models = _build_empty_models(square_regions)
         labels, scores = _classify_squares(square_regions, self._models)
+        labels = suppress_piece_spillover(labels, scores)
+        labels = resolve_binary_occupancy(labels, scores)
         self._history.append(labels)
         observation_count = len(self._history)
         if observation_count < self._required_observations:
@@ -262,6 +280,77 @@ def detect_starting_position_orientation(
             "White and black starting sides do not have enough contrast."
         )
     return candidate if contrast > 0 else opposite
+
+
+def suppress_piece_spillover(
+    labels: OccupancyGrid,
+    scores: FloatArray,
+    *,
+    weak_score_limit: float = 8.0,
+    strong_score_minimum: float = 12.0,
+    minimum_score_ratio: float = 2.0,
+) -> OccupancyGrid:
+    if labels.shape != (8, 8) or scores.shape != (8, 8):
+        raise ValueError("Occupancy labels and scores must be 8x8.")
+    if (
+        weak_score_limit <= 0
+        or strong_score_minimum <= weak_score_limit
+        or minimum_score_ratio <= 1
+    ):
+        raise ValueError("Piece-spillover thresholds are invalid.")
+    filtered = labels.copy()
+    for row in range(8):
+        for column in range(8):
+            if labels[row, column] != "occupied":
+                continue
+            score = float(scores[row, column])
+            if score > weak_score_limit:
+                continue
+            neighbors = (
+                (row - 1, column),
+                (row + 1, column),
+                (row, column - 1),
+                (row, column + 1),
+            )
+            for neighbor_row, neighbor_column in neighbors:
+                if not (
+                    0 <= neighbor_row < 8
+                    and 0 <= neighbor_column < 8
+                    and labels[neighbor_row, neighbor_column] == "occupied"
+                ):
+                    continue
+                neighbor_score = float(
+                    scores[neighbor_row, neighbor_column]
+                )
+                if (
+                    neighbor_score >= strong_score_minimum
+                    and neighbor_score
+                    >= max(score, 0.1) * minimum_score_ratio
+                ):
+                    filtered[row, column] = "empty"
+                    break
+    return filtered
+
+
+def resolve_binary_occupancy(
+    labels: OccupancyGrid,
+    scores: FloatArray,
+    *,
+    uncertain_occupied_threshold: float = 8.0,
+) -> OccupancyGrid:
+    if labels.shape != (8, 8) or scores.shape != (8, 8):
+        raise ValueError("Occupancy labels and scores must be 8x8.")
+    if uncertain_occupied_threshold <= 0:
+        raise ValueError("Uncertain occupied threshold must be positive.")
+    resolved = labels.copy()
+    unresolved = resolved == "unknown"
+    resolved[np.logical_and(unresolved, scores >= uncertain_occupied_threshold)] = (
+        "occupied"
+    )
+    resolved[np.logical_and(unresolved, scores < uncertain_occupied_threshold)] = (
+        "empty"
+    )
+    return resolved
 
 
 def _rotate_square(

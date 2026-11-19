@@ -31,6 +31,11 @@ in
 The initial occupied-square classifier and UI dots are implemented
 experimentally. Hardware tuning, chess move recognition, and chess rules
 remain future work.
+Official SVG piece rendering and initial non-capturing move synchronization
+are specified in
+[Chess-Piece UI Rendering and Move Synchronization](./chess-piece-ui-tracking-specification.md).
+The pinned cburnett assets, standard UI position, and ordinary one-piece move
+synchronization are implemented experimentally.
 
 ## 2. Hardware
 

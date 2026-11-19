@@ -6,6 +6,8 @@ from src.chess_camera.occupancy import (
     detect_starting_position_orientation,
     extract_square_regions,
     rectify_board,
+    resolve_binary_occupancy,
+    suppress_piece_spillover,
 )
 
 
@@ -60,7 +62,7 @@ def _observe_stable(
     image: np.ndarray,
 ) -> object:
     update = None
-    for _index in range(5):
+    for _index in range(15):
         update = detector.observe(image, _camera_grid())
     assert update is not None
     return update
@@ -140,6 +142,30 @@ def test_large_obstruction_freezes_occupancy_accumulation() -> None:
     assert update.result is None
 
 
+def test_motion_requires_quiet_period_before_occupancy_resumes() -> None:
+    detector = SquareOccupancyDetector(
+        required_observations=1,
+        required_agreement=1,
+        settling_observations=3,
+    )
+    starting = _starting_position()
+    detector.observe(starting, _camera_grid())
+    obstructed = starting.copy()
+    cv2.rectangle(obstructed, (150, 100), (650, 700), (240, 30, 180), -1)
+
+    motion = detector.observe(obstructed, _camera_grid())
+    settling = [
+        detector.observe(obstructed, _camera_grid())
+        for _index in range(3)
+    ]
+    resumed = detector.observe(obstructed, _camera_grid())
+
+    assert motion.state == "motion"
+    assert [update.state for update in settling] == ["settling"] * 3
+    assert all(update.result is None for update in settling)
+    assert resumed.state == "stable"
+
+
 def test_piece_colors_put_white_starting_side_at_ui_bottom() -> None:
     starting = _starting_position()
     occupied = frozenset(
@@ -176,3 +202,44 @@ def test_piece_color_orientation_requires_complete_starting_position() -> None:
             frozenset({(0, 0)}),
             0,
         )
+
+
+def test_suppresses_weak_adjacent_tall_piece_spillover() -> None:
+    labels = np.full((8, 8), "empty", dtype="<U8")
+    scores = np.zeros((8, 8), dtype=np.float32)
+    labels[3, 2] = "occupied"
+    scores[3, 2] = 24.4
+    labels[4, 2] = "occupied"
+    scores[4, 2] = 6.2
+
+    filtered = suppress_piece_spillover(labels, scores)
+
+    assert filtered[3, 2] == "occupied"
+    assert filtered[4, 2] == "empty"
+
+
+def test_preserves_adjacent_pieces_with_independent_strong_evidence() -> None:
+    labels = np.full((8, 8), "empty", dtype="<U8")
+    scores = np.zeros((8, 8), dtype=np.float32)
+    labels[3, 2] = "occupied"
+    scores[3, 2] = 24.4
+    labels[4, 2] = "occupied"
+    scores[4, 2] = 13.0
+
+    filtered = suppress_piece_spillover(labels, scores)
+
+    assert filtered[3, 2] == "occupied"
+    assert filtered[4, 2] == "occupied"
+
+
+def test_resolves_every_square_to_binary_occupancy() -> None:
+    labels = np.full((8, 8), "unknown", dtype="<U8")
+    scores = np.zeros((8, 8), dtype=np.float32)
+    scores[2, 3] = 7.9
+    scores[4, 5] = 8.0
+
+    resolved = resolve_binary_occupancy(labels, scores)
+
+    assert resolved[2, 3] == "empty"
+    assert resolved[4, 5] == "occupied"
+    assert not np.any(resolved == "unknown")

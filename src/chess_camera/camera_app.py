@@ -1,8 +1,10 @@
 import argparse
+import json
 import sys
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 import cv2
 import numpy as np
@@ -47,6 +49,12 @@ from .calibration_controller import (
     ProjectorCalibrationController,
 )
 from .calibration_store import CalibrationStore
+from .chess_position import (
+    PieceCode,
+    PiecePositionSynchronizer,
+    Position,
+    starting_occupied_squares,
+)
 from .chessboard_widget import ChessboardWidget, rotate_square
 from .diagnostics import DiagnosticStore
 from .occupancy import (
@@ -60,6 +68,8 @@ from .projector_calibration import (
     bgr_to_gray,
     detect_board_orientation,
 )
+from .reference_move_tracker import ReferenceMoveTracker
+from .reference_store import ReferenceImageStore
 
 _SETTINGS_ORGANIZATION = "ChessProject"
 _SETTINGS_APPLICATION = "ChessboardCamera"
@@ -68,6 +78,7 @@ _PROJECTOR_SETTING = "projector/screen_name"
 _PROJECTOR_X_SETTING = "projector/target_x_percent"
 _PROJECTOR_Y_SETTING = "projector/target_y_percent"
 _PROJECTOR_SIZE_SETTING = "projector/target_size_percent"
+_PIECE_POSITION_SETTING = "pieces/accepted_position"
 _BOARD_ORIENTATION_SETTING = "board/automatic_clockwise_quarter_turns"
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _INTEGRATED_CAMERA_TERMS = (
@@ -159,6 +170,9 @@ class CameraWindow(QMainWindow):
         self._calibration_store = CalibrationStore(
             _PROJECT_ROOT / "calibrations"
         )
+        self._reference_store = ReferenceImageStore(
+            _PROJECT_ROOT / "calibrations" / "move_reference.npz"
+        )
         self._settings = QSettings(
             _SETTINGS_ORGANIZATION,
             _SETTINGS_APPLICATION,
@@ -216,7 +230,18 @@ class CameraWindow(QMainWindow):
         self._alignment_monitor.mapping_verified.connect(
             self._alignment_mapping_verified
         )
+        self._alignment_monitor.camera_grid_checked.connect(
+            self._camera_grid_checked
+        )
         self._occupancy_detector = SquareOccupancyDetector()
+        self._reference_move_tracker = ReferenceMoveTracker()
+        self._piece_synchronizer = PiecePositionSynchronizer()
+        self._latest_stable_occupied_ui: (
+            frozenset[tuple[int, int]] | None
+        ) = None
+        self._reset_to_start_requested = False
+        self._camera_only_calibration = False
+        self._camera_geometry_ready = False
         self._calibration_result: CalibrationResult | None = None
         self._verified_calibration_result: CalibrationResult | None = None
         self._remembered_board_square: tuple[int, int] | None = None
@@ -235,13 +260,18 @@ class CameraWindow(QMainWindow):
         self._preview.setMinimumSize(960, 540)
         self._preview.setStyleSheet("background: #202020;")
         self._board_widget = ChessboardWidget()
+        self._restore_piece_position()
         self._board_widget.setEnabled(False)
         self._board_widget.square_clicked.connect(self._board_square_clicked)
         self._board_quarter_turns = int(
             self._settings.value(_BOARD_ORIENTATION_SETTING, 0)
         ) % 4
-        self._board_orientation_needs_detection = True
-        self._piece_side_orientation_needs_detection = True
+        self._board_orientation_needs_detection = (
+            not self._piece_synchronizer.initialized
+        )
+        self._piece_side_orientation_needs_detection = (
+            not self._piece_synchronizer.initialized
+        )
 
         self._camera_selector = QComboBox()
         self._camera_selector.addItems(device_names)
@@ -264,7 +294,8 @@ class CameraWindow(QMainWindow):
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
         self._instructions = QLabel(
-            "Place the entire empty board on a plain table. Press Esc or Q to exit."
+            "Keep the entire board visible. Move one piece at a time, then "
+            "remove your hand. Press Esc or Q to exit."
         )
 
         self._snapshot_button = QPushButton("Take snapshot")
@@ -274,10 +305,18 @@ class CameraWindow(QMainWindow):
         self._resume_button.setEnabled(False)
         self._save_diagnostics = QCheckBox("Save diagnostic snapshots")
         self._save_diagnostics.setChecked(True)
+        self._reset_pieces_button = QPushButton(
+            "Reset pieces to starting position"
+        )
+        self._reset_pieces_button.clicked.connect(
+            self._reset_pieces_to_start
+        )
+        self._reset_pieces_button.setEnabled(False)
         button_layout = QHBoxLayout()
         button_layout.addWidget(self._snapshot_button)
         button_layout.addWidget(self._resume_button)
         button_layout.addWidget(self._save_diagnostics)
+        button_layout.addWidget(self._reset_pieces_button)
 
         self._screens = list(QGuiApplication.screens())
         self._projector_selector = QComboBox()
@@ -454,6 +493,14 @@ class CameraWindow(QMainWindow):
         self._occupancy_status.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
+        self._piece_status = QLabel(
+            "Piece position restored from the previous session."
+            if self._piece_synchronizer.initialized
+            else "Piece position is not synchronized."
+        )
+        self._piece_status.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
 
         content_layout = QHBoxLayout()
         content_layout.addWidget(self._preview, stretch=3)
@@ -473,6 +520,7 @@ class CameraWindow(QMainWindow):
         layout.addWidget(self._projector_status)
         layout.addWidget(self._alignment_status)
         layout.addWidget(self._occupancy_status)
+        layout.addWidget(self._piece_status)
         layout.addWidget(self._instructions)
         container = QWidget()
         container.setLayout(layout)
@@ -489,9 +537,8 @@ class CameraWindow(QMainWindow):
         self._media_devices.videoInputsChanged.connect(
             self._camera_devices_changed
         )
-        self._open_projector()
         self._occupancy_timer = QTimer(self)
-        self._occupancy_timer.setInterval(200)
+        self._occupancy_timer.setInterval(100)
         self._occupancy_timer.timeout.connect(self._update_occupancy)
         self._occupancy_timer.start()
         if selected_index is None:
@@ -596,6 +643,7 @@ class CameraWindow(QMainWindow):
             "Starting live preview. Take a snapshot to detect the board."
         )
         self._restore_saved_calibration()
+        self._restore_move_reference()
 
     def _camera_selection_changed(self, selected_index: int) -> None:
         previous_index = self._active_device_index
@@ -1062,7 +1110,10 @@ class CameraWindow(QMainWindow):
         )
 
     def _board_square_clicked(self, row: int, column: int) -> None:
-        if self._calibration_result is None:
+        if (
+            self._calibration_result is None
+            or self._camera_only_calibration
+        ):
             self._projector_status.setText(
                 "No matching projector calibration is available."
             )
@@ -1130,10 +1181,16 @@ class CameraWindow(QMainWindow):
         self,
         result: CalibrationResult,
     ) -> None:
+        self._camera_only_calibration = False
+        self._camera_geometry_ready = True
         self._calibration_result = result
         self._verified_calibration_result = result
-        self._board_orientation_needs_detection = True
-        self._piece_side_orientation_needs_detection = True
+        self._board_orientation_needs_detection = (
+            not self._piece_synchronizer.initialized
+        )
+        self._piece_side_orientation_needs_detection = (
+            not self._piece_synchronizer.initialized
+        )
         self._suspend_selected_square()
         self._reset_occupancy(
             "Occupancy stabilizing with the verified calibration."
@@ -1142,6 +1199,7 @@ class CameraWindow(QMainWindow):
             result.mapping.projector_grid
         )
         self._board_widget.setEnabled(True)
+        self._reset_pieces_button.setEnabled(True)
         self._show_grid_button.setEnabled(True)
         self._show_squares_button.setEnabled(True)
         self._quick_verify_button.setEnabled(True)
@@ -1165,7 +1223,48 @@ class CameraWindow(QMainWindow):
             "ok",
         )
 
+    def _activate_camera_only_calibration(
+        self,
+        result: CalibrationResult,
+    ) -> None:
+        self._camera_only_calibration = True
+        self._camera_geometry_ready = False
+        self._calibration_result = result
+        self._verified_calibration_result = None
+        self._board_orientation_needs_detection = (
+            not self._piece_synchronizer.initialized
+        )
+        self._piece_side_orientation_needs_detection = (
+            not self._piece_synchronizer.initialized
+        )
+        self._suspend_selected_square()
+        self._reset_occupancy(
+            "Occupancy stabilizing from saved camera board geometry."
+        )
+        self._projector_window.clear_projector_grid()
+        self._board_widget.setEnabled(True)
+        self._reset_pieces_button.setEnabled(True)
+        self._show_grid_button.setEnabled(False)
+        self._show_squares_button.setEnabled(False)
+        self._quick_verify_button.setEnabled(False)
+        self._validate_calibration_button.setEnabled(False)
+        self._alignment_monitor.configure(result, None)
+        self._set_calibration_indicator(
+            self._camera_calibration_indicator,
+            "Camera calibration",
+            "ok",
+            "Loaded saved camera board geometry.",
+        )
+        self._set_calibration_indicator(
+            self._projector_calibration_indicator,
+            "Projector calibration",
+            "unknown",
+            "The calibrated projector display is unavailable.",
+        )
+
     def _invalidate_calibration(self) -> None:
+        self._camera_only_calibration = False
+        self._camera_geometry_ready = False
         self._calibration_result = None
         self._verified_calibration_result = None
         self._suspend_selected_square()
@@ -1174,6 +1273,7 @@ class CameraWindow(QMainWindow):
         )
         self._projector_window.clear_projector_grid()
         self._board_widget.setEnabled(False)
+        self._reset_pieces_button.setEnabled(False)
         self._show_grid_button.setEnabled(False)
         self._show_squares_button.setEnabled(False)
         self._quick_verify_button.setEnabled(False)
@@ -1227,8 +1327,12 @@ class CameraWindow(QMainWindow):
         self._reset_occupancy(
             "Occupancy stabilizing after board movement."
         )
-        self._projector_window.set_projector_grid(mapping.projector_grid)
-        if self._selected_board_square is not None:
+        if not self._camera_only_calibration:
+            self._projector_window.set_projector_grid(mapping.projector_grid)
+        if (
+            not self._camera_only_calibration
+            and self._selected_board_square is not None
+        ):
             row, column = self._selected_board_square
             physical_row, physical_column = self._physical_board_square(
                 row,
@@ -1239,15 +1343,32 @@ class CameraWindow(QMainWindow):
                 physical_column,
                 light_square=(row + column) % 2 == 0,
             )
-        self._projector_status.setText(
-            f"Board moved {displacement:.1f} camera pixels; projected "
-            "coordinates were updated without full recalibration."
-        )
+        if self._camera_only_calibration:
+            self._projector_status.setText(
+                f"Board moved {displacement:.1f} camera pixels; camera "
+                "coordinates were updated."
+            )
+        else:
+            self._projector_status.setText(
+                f"Board moved {displacement:.1f} camera pixels; projected "
+                "coordinates were updated without full recalibration."
+            )
 
     def _alignment_mapping_verified(self, _mapping: MappingResult) -> None:
         if self._calibration_result is None:
             return
         self._verified_calibration_result = self._calibration_result
+
+    def _camera_grid_checked(self) -> None:
+        if (
+            not self._camera_only_calibration
+            or self._camera_geometry_ready
+        ):
+            return
+        self._camera_geometry_ready = True
+        self._reset_occupancy(
+            "Occupancy stabilizing after camera-grid verification."
+        )
 
     def _suspend_selected_square(self) -> None:
         self._selected_board_square = None
@@ -1258,8 +1379,18 @@ class CameraWindow(QMainWindow):
 
     def _reset_occupancy(self, status: str) -> None:
         self._occupancy_detector.reset()
+        self._reference_move_tracker.reset_activity()
+        self._latest_stable_occupied_ui = None
         self._board_widget.set_occupied_squares(())
         self._occupancy_status.setText(status)
+        if self._piece_synchronizer.initialized:
+            self._piece_status.setText(
+                "Piece position retained while occupancy restabilizes."
+            )
+        else:
+            self._piece_status.setText(
+                "Piece position is not synchronized."
+            )
 
     def _update_occupancy(self) -> None:
         if (
@@ -1268,7 +1399,18 @@ class CameraWindow(QMainWindow):
             or self._calibrator.active
         ):
             return
-        if self._alignment_monitor.output_mode != "black":
+        if (
+            self._camera_only_calibration
+            and not self._camera_geometry_ready
+        ):
+            self._occupancy_status.setText(
+                "Occupancy waiting for camera-grid verification."
+            )
+            return
+        if (
+            not self._camera_only_calibration
+            and self._alignment_monitor.output_mode != "black"
+        ):
             self._occupancy_status.setText(
                 "Occupancy paused until the projector is black."
             )
@@ -1278,6 +1420,12 @@ class CameraWindow(QMainWindow):
             self._occupancy_status.setText(
                 "Occupancy unavailable: board orientation is unresolved."
             )
+            return
+        if (
+            self._reference_move_tracker.initialized
+            and not self._reset_to_start_requested
+        ):
+            self._update_reference_move_tracking()
             return
         try:
             update = self._occupancy_detector.observe(
@@ -1292,6 +1440,13 @@ class CameraWindow(QMainWindow):
         if update.state == "motion":
             self._occupancy_status.setText(
                 "Occupancy frozen while motion or occlusion is present."
+            )
+            return
+        if update.state == "settling":
+            self._occupancy_status.setText(
+                f"Waiting for the hand to leave the board "
+                f"({update.observation_count}/"
+                f"{update.required_observations} quiet observations)."
             )
             return
         if update.result is None:
@@ -1335,21 +1490,188 @@ class CameraWindow(QMainWindow):
                     for row, column in update.result.occupied_squares
                 }
         self._board_widget.set_occupied_squares(occupied_ui)
+        if update.state == "stable":
+            stable_occupied = frozenset(occupied_ui)
+            self._latest_stable_occupied_ui = stable_occupied
+            if self._reset_to_start_requested:
+                self._complete_starting_position_reset(stable_occupied)
+                return
+            position_update = self._piece_synchronizer.observe(
+                stable_occupied,
+            )
+            self._board_widget.set_pieces(position_update.position)
+            self._persist_piece_position(position_update.position)
+            self._piece_status.setText(position_update.message)
+            if (
+                self._piece_synchronizer.initialized
+                and stable_occupied
+                == frozenset(self._piece_synchronizer.position)
+            ):
+                self._reference_move_tracker.set_reference(
+                    self._latest_frame,
+                    self._calibration_result.mapping.camera_grid,
+                    self._board_quarter_turns,
+                )
+                self._persist_move_reference()
+                self._occupancy_status.setText(
+                    "Reference image established; watching for board activity."
+                )
+                self._board_widget.set_occupied_squares(stable_occupied)
+                return
         if update.state == "stabilizing":
             self._occupancy_status.setText(
                 f"Occupancy provisional "
                 f"({update.observation_count}/"
                 f"{update.required_observations}): "
                 f"{update.result.occupied_count} occupied, "
-                f"{update.result.empty_count} empty, "
-                f"{update.result.unknown_count} unknown."
+                f"{update.result.empty_count} empty."
             )
         else:
             self._occupancy_status.setText(
                 f"Occupancy stable: {update.result.occupied_count} occupied, "
-                f"{update.result.empty_count} empty, "
-                f"{update.result.unknown_count} unknown."
+                f"{update.result.empty_count} empty."
             )
+
+    def _update_reference_move_tracking(self) -> None:
+        if self._latest_frame is None or self._calibration_result is None:
+            return
+        try:
+            update = self._reference_move_tracker.observe(
+                self._latest_frame,
+                self._calibration_result.mapping.camera_grid,
+                self._board_quarter_turns,
+                self._piece_synchronizer.position,
+            )
+        except (ValueError, cv2.error) as error:
+            self._occupancy_status.setText(
+                f"Reference tracking unavailable: {error}"
+            )
+            return
+        self._occupancy_status.setText(update.message)
+        if update.state != "accepted" or update.move is None:
+            return
+        source, destination = update.move
+        try:
+            position_update = self._piece_synchronizer.accept_move(
+                source,
+                destination,
+            )
+            self._reference_move_tracker.commit_accepted(update.move)
+        except ValueError as error:
+            self._reference_move_tracker.reset_activity()
+            self._piece_status.setText(
+                f"Reference move rejected: {error}"
+            )
+            return
+        self._board_widget.set_pieces(position_update.position)
+        self._board_widget.set_occupied_squares(position_update.position)
+        self._board_widget.set_last_move(update.move)
+        self._persist_piece_position(position_update.position)
+        self._persist_move_reference()
+        self._piece_status.setText(position_update.message)
+        self._project_accepted_move(update.move)
+
+    def _reset_pieces_to_start(self) -> None:
+        if self._latest_frame is None or self._calibration_result is None:
+            self._piece_status.setText(
+                "Cannot reset pieces until the camera board is calibrated."
+            )
+            return
+        self._reset_to_start_requested = True
+        self._piece_side_orientation_needs_detection = True
+        self._occupancy_detector.reset()
+        self._latest_stable_occupied_ui = None
+        self._piece_status.setText(
+            "Checking the physical board before resetting pieces."
+        )
+        self._occupancy_status.setText(
+            "Reset verification: detecting the starting position."
+        )
+
+    def _complete_starting_position_reset(
+        self,
+        occupied: frozenset[tuple[int, int]],
+    ) -> None:
+        self._reset_to_start_requested = False
+        if occupied != starting_occupied_squares():
+            self._piece_status.setText(
+                "Cannot reset pieces: the physical board is not in the "
+                "standard starting position."
+            )
+            self._occupancy_status.setText(
+                "Reset verification finished without changing the "
+                "logical position."
+            )
+            return
+        self._piece_synchronizer.reset()
+        update = self._piece_synchronizer.observe(
+            occupied,
+        )
+        self._board_widget.set_pieces(update.position)
+        self._persist_piece_position(update.position)
+        self._board_widget.set_last_move(None)
+        self._piece_status.setText(update.message)
+        if self._latest_frame is None or self._calibration_result is None:
+            raise RuntimeError(
+                "Reset verification completed without a calibrated frame."
+            )
+        self._reference_move_tracker.set_reference(
+            self._latest_frame,
+            self._calibration_result.mapping.camera_grid,
+            self._board_quarter_turns,
+        )
+        self._persist_move_reference()
+        self._occupancy_status.setText(
+            "Starting position confirmed; move reference replaced."
+        )
+
+    def _project_accepted_move(
+        self,
+        move: tuple[tuple[int, int], tuple[int, int]],
+    ) -> None:
+        if self._camera_only_calibration:
+            self._projector_status.setText(
+                "Move accepted; physical projection is unavailable."
+            )
+            return
+        if self._calibration_result is None or not self._open_projector():
+            self._projector_status.setText(
+                "Move accepted, but no calibrated projector is available."
+            )
+            return
+        source, destination = move
+        try:
+            physical_source = self._physical_board_square(*source)
+            physical_destination = self._physical_board_square(*destination)
+            self._projector_window.show_move(
+                physical_source,
+                physical_destination,
+                source_is_light=(sum(source) % 2 == 0),
+                destination_is_light=(sum(destination) % 2 == 0),
+            )
+        except (RuntimeError, ValueError) as error:
+            self._projector_status.setText(
+                f"Move accepted, but projection failed: {error}"
+            )
+            return
+        self._alignment_monitor.set_paused("accepted move indication")
+        source_name = f"{chr(ord('a') + source[1])}{8 - source[0]}"
+        destination_name = (
+            f"{chr(ord('a') + destination[1])}{8 - destination[0]}"
+        )
+        self._projector_status.setText(
+            f"Projecting move {source_name}-{destination_name} for 2 seconds."
+        )
+        QTimer.singleShot(2000, self._finish_move_projection)
+
+    def _finish_move_projection(self) -> None:
+        if self._projector_window.output_mode != "move":
+            return
+        self._projector_window.show_black()
+        self._alignment_monitor.set_black()
+        self._projector_status.setText(
+            "Move indication finished; projector returned to black."
+        )
 
     def _physical_board_square(
         self,
@@ -1361,6 +1683,103 @@ class CameraWindow(QMainWindow):
             column,
             self._board_quarter_turns,
         )
+
+    def _restore_piece_position(self) -> None:
+        encoded = str(self._settings.value(_PIECE_POSITION_SETTING, ""))
+        if not encoded:
+            return
+        try:
+            entries = json.loads(encoded)
+            if not isinstance(entries, list):
+                raise ValueError("Saved piece position must be a list.")
+            position: Position = {}
+            for entry in entries:
+                if (
+                    not isinstance(entry, list)
+                    or len(entry) != 3
+                    or not isinstance(entry[0], int)
+                    or not isinstance(entry[1], int)
+                    or not isinstance(entry[2], str)
+                    or entry[2] not in "KQRBNPkqrbnp"
+                ):
+                    raise ValueError("Saved piece position entry is invalid.")
+                position[(entry[0], entry[1])] = cast(PieceCode, entry[2])
+            self._piece_synchronizer.restore(position)
+            self._board_widget.set_pieces(position)
+        except (json.JSONDecodeError, ValueError):
+            self._settings.remove(_PIECE_POSITION_SETTING)
+            self._settings.sync()
+
+    def _persist_piece_position(self, position: Position) -> None:
+        if not position:
+            return
+        encoded = json.dumps(
+            [
+                [row, column, piece]
+                for (row, column), piece in sorted(position.items())
+            ],
+            separators=(",", ":"),
+        )
+        if str(self._settings.value(_PIECE_POSITION_SETTING, "")) == encoded:
+            return
+        self._settings.setValue(_PIECE_POSITION_SETTING, encoded)
+        self._settings.sync()
+
+    def _restore_move_reference(self) -> None:
+        if (
+            self._camera is None
+            or not self._piece_synchronizer.initialized
+            or not 0 <= self._active_device_index < len(self._devices)
+        ):
+            return
+        resolution = self._camera.cameraFormat().resolution()
+        try:
+            reference = self._reference_store.load_matching(
+                camera_id=self._device_key(
+                    self._devices[self._active_device_index]
+                ),
+                camera_resolution=(
+                    resolution.width(),
+                    resolution.height(),
+                ),
+                orientation=self._board_quarter_turns,
+                position=self._piece_synchronizer.position,
+            )
+        except ValueError as error:
+            self._piece_status.setText(str(error))
+            return
+        if reference is None:
+            return
+        self._reference_move_tracker.set_canonical_reference(reference)
+        self._piece_status.setText(
+            "Piece position and move reference restored."
+        )
+
+    def _persist_move_reference(self) -> None:
+        reference = self._reference_move_tracker.reference
+        if (
+            reference is None
+            or self._camera is None
+            or not self._piece_synchronizer.initialized
+            or not 0 <= self._active_device_index < len(self._devices)
+        ):
+            return
+        resolution = self._camera.cameraFormat().resolution()
+        try:
+            self._reference_store.save(
+                reference,
+                camera_id=self._device_key(
+                    self._devices[self._active_device_index]
+                ),
+                camera_resolution=(
+                    resolution.width(),
+                    resolution.height(),
+                ),
+                orientation=self._board_quarter_turns,
+                position=self._piece_synchronizer.position,
+            )
+        except OSError as error:
+            self._piece_status.setText(str(error))
 
     def _detect_current_board_orientation(self) -> None:
         if (
@@ -1473,7 +1892,32 @@ class CameraWindow(QMainWindow):
             )
             return
         if result is None:
-            self._invalidate_calibration()
+            try:
+                result = self._calibration_store.load_matching(
+                    camera_id=self._device_key(active_device),
+                    camera_resolution=(
+                        camera_resolution.width(),
+                        camera_resolution.height(),
+                    ),
+                    projector_name=None,
+                    projector_resolution=None,
+                )
+            except (OSError, ValueError) as error:
+                self._invalidate_calibration()
+                QMessageBox.warning(
+                    self,
+                    "Saved calibration",
+                    str(error),
+                )
+                return
+            if result is None:
+                self._invalidate_calibration()
+                return
+            self._activate_camera_only_calibration(result)
+            self._projector_status.setText(
+                "Loaded saved camera board geometry. Physical projection "
+                "is unavailable until the calibrated display returns."
+            )
             return
 
         self._activate_calibration_result(result)

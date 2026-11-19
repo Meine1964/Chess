@@ -87,6 +87,33 @@ def test_monitor_remaps_after_board_movement() -> None:
     )
 
 
+def test_camera_only_monitor_updates_camera_grid_without_projector() -> None:
+    monitor = AlignmentMonitor(BoardDetector())
+    updated_mappings: list[object] = []
+    checked: list[bool] = []
+    monitor.mapping_updated.connect(
+        lambda mapping, _displacement: updated_mappings.append(mapping)
+    )
+    monitor.camera_grid_checked.connect(lambda: checked.append(True))
+    result = _result()
+    monitor.configure(result, None)
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    moved = _detection(offset_x=8)
+
+    monitor._check_completed(monitor._generation, moved, frame)
+
+    assert len(updated_mappings) == 1
+    assert checked == [True]
+    np.testing.assert_allclose(
+        updated_mappings[0].camera_grid,
+        moved.grid_points,
+    )
+    np.testing.assert_allclose(
+        updated_mappings[0].projector_grid,
+        result.mapping.projector_grid,
+    )
+
+
 def test_monitor_ignores_temporary_board_occlusion() -> None:
     monitor = AlignmentMonitor(BoardDetector())
     lost_messages: list[str] = []

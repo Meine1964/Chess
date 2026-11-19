@@ -128,4 +128,16 @@ def test_projector_renders_patterns_and_calibrated_squares(
         light_square_image.pixelColor(115, 64)
         == PROJECTED_ON_LIGHT_SQUARE
     )
+
+    window.show_move(
+        (2, 2),
+        (4, 5),
+        source_is_light=True,
+        destination_is_light=False,
+    )
+    application.processEvents()
+    move_image = window.grab().toImage()
+    assert move_image.pixelColor(115, 64) == PROJECTED_ON_LIGHT_SQUARE
+    assert move_image.pixelColor(205, 99) == PROJECTED_ON_DARK_SQUARE
+    assert move_image.pixelColor(145, 64).red() == 0
     window.close()

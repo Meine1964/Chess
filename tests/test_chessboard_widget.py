@@ -14,6 +14,7 @@ from src.chess_camera.chessboard_widget import (
     rotate_square,
     square_at_position,
 )
+from src.chess_camera.chess_position import standard_position
 
 
 @pytest.fixture(scope="module")
@@ -73,4 +74,50 @@ def test_widget_renders_black_dot_at_occupied_square_center(
 
     assert QColor(image.pixel(20, 20)).name() == "#111111"
     assert QColor(image.pixel(60, 20)).name() != "#111111"
+    widget.close()
+
+
+def test_widget_renders_standard_cburnett_position(
+    application: QApplication,
+) -> None:
+    widget = ChessboardWidget()
+    widget.resize(320, 320)
+    widget.set_occupied_squares({(6, 0)})
+    widget.set_pieces(standard_position())
+    widget.show()
+    application.processEvents()
+
+    image = widget.grab().toImage()
+
+    assert len(widget.pieces) == 32
+    assert QColor(image.pixel(20, 260)).name() != "#111111"
+    widget.close()
+
+
+def test_widget_persists_last_move_source_and_destination_highlight(
+    application: QApplication,
+) -> None:
+    widget = ChessboardWidget()
+    widget.resize(320, 320)
+    widget.set_last_move(((4, 4), (5, 4)))
+    widget.show()
+    application.processEvents()
+
+    image = widget.grab().toImage()
+
+    assert widget.last_move == ((4, 4), (5, 4))
+    assert QColor(image.pixel(180, 180)).name() == LICHESS_LIGHT.lighter(
+        135
+    ).name()
+    assert QColor(image.pixel(180, 220)).name() == LICHESS_DARK.lighter(
+        135
+    ).name()
+    assert QColor(image.pixel(220, 180)).name() == LICHESS_DARK.name()
+
+    widget.set_last_move(((3, 0), (2, 0)))
+    assert widget.last_move == ((3, 0), (2, 0))
+    widget.set_last_move(None)
+    assert widget.last_move is None
+    with pytest.raises(ValueError, match="inside the 8x8 board"):
+        widget.set_last_move(((4, 4), (8, 4)))
     widget.close()

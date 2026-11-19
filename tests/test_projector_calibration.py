@@ -860,6 +860,17 @@ def test_calibration_store_persists_mesh_and_validation(tmp_path) -> None:
         loaded.mapping.projector_grid,
         detection.grid_points,
     )
+    camera_only = CalibrationStore(tmp_path).load_matching(
+        camera_id="camera-id",
+        camera_resolution=(1920, 1080),
+        projector_name=None,
+        projector_resolution=None,
+    )
+    assert camera_only is not None
+    np.testing.assert_allclose(
+        camera_only.mapping.camera_grid,
+        detection.grid_points,
+    )
     assert (
         CalibrationStore(tmp_path).load_matching(
             camera_id="different-camera",
