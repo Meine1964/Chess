@@ -374,7 +374,12 @@ class BoardDetector:
                             color_frame,
                             corners,
                         )
-                        score, separation = self._alternating_color_score(
+                        (
+                            corners,
+                            score,
+                            separation,
+                            edge_consistency,
+                        ) = self._best_grid_hypothesis(
                             color_frame,
                             corners,
                         )
@@ -382,6 +387,7 @@ class BoardDetector:
                             corners,
                             score,
                             separation,
+                            edge_consistency,
                             grid_alignment,
                             gray.shape,
                         )
@@ -395,10 +401,15 @@ class BoardDetector:
         corners: FloatArray,
         score: float,
         separation: float,
+        edge_consistency: float,
         grid_alignment: float,
         image_shape: tuple[int, int],
     ) -> BoardDetection | None:
-        if score < 1.5 or separation < 15.0:
+        if (
+            score < 1.5
+            or separation < 15.0
+            or edge_consistency < 0.85
+        ):
             return None
 
         model_corners = np.array(
@@ -658,7 +669,7 @@ class BoardDetector:
     def _alternating_color_score(
         frame: ImageArray,
         corners: FloatArray,
-    ) -> tuple[float, float]:
+    ) -> tuple[float, float, float]:
         target_size = 512
         target_corners = np.array(
             [
@@ -732,7 +743,109 @@ class BoardDetector:
             )
             / 2
         )
-        return separation / (within_class_spread + 1.0), separation
+        distances = np.stack(
+            [
+                np.linalg.norm(means - first_center, axis=1),
+                np.linalg.norm(means - second_center, axis=1),
+            ],
+            axis=1,
+        )
+        parity_matches = (
+            np.argmin(distances, axis=1) == parity
+        ).reshape(8, 8)
+        edge_matches = np.concatenate(
+            [
+                parity_matches[0, :],
+                parity_matches[-1, :],
+                parity_matches[1:-1, 0],
+                parity_matches[1:-1, -1],
+            ]
+        )
+        edge_consistency = float(np.mean(edge_matches))
+        return (
+            separation / (within_class_spread + 1.0),
+            separation,
+            edge_consistency,
+        )
+
+    @classmethod
+    def _best_grid_hypothesis(
+        cls,
+        frame: ImageArray,
+        corners: FloatArray,
+    ) -> tuple[FloatArray, float, float, float]:
+        target_size = 512
+        target_corners = np.asarray(
+            [
+                [0, 0],
+                [target_size - 1, 0],
+                [target_size - 1, target_size - 1],
+                [0, target_size - 1],
+            ],
+            dtype=np.float32,
+        )
+        inverse_transform = np.linalg.inv(
+            cv2.getPerspectiveTransform(corners, target_corners)
+        ).astype(np.float32)
+        score, separation, edge_consistency = cls._alternating_color_score(
+            frame,
+            corners,
+        )
+        base_hypothesis = (
+            corners,
+            score,
+            separation,
+            edge_consistency,
+        )
+        if edge_consistency >= 0.9:
+            return base_hypothesis
+
+        cell_size = target_size / 8
+        hypotheses = [base_hypothesis]
+        for row_shift in (-1, 0, 1):
+            for column_shift in (-1, 0, 1):
+                if row_shift == 0 and column_shift == 0:
+                    continue
+                left = column_shift * cell_size
+                top = row_shift * cell_size
+                shifted_corners = np.asarray(
+                    [
+                        [left, top],
+                        [left + target_size - 1, top],
+                        [
+                            left + target_size - 1,
+                            top + target_size - 1,
+                        ],
+                        [left, top + target_size - 1],
+                    ],
+                    dtype=np.float32,
+                )
+                camera_corners = np.asarray(
+                    cv2.perspectiveTransform(
+                        shifted_corners.reshape(-1, 1, 2),
+                        inverse_transform,
+                    ),
+                    dtype=np.float32,
+                ).reshape(4, 2)
+                score, separation, edge_consistency = (
+                    cls._alternating_color_score(frame, camera_corners)
+                )
+                hypotheses.append(
+                    (
+                        camera_corners,
+                        score,
+                        separation,
+                        edge_consistency,
+                    )
+                )
+        return max(
+            hypotheses,
+            key=lambda hypothesis: (
+                hypothesis[3],
+                hypothesis[1],
+                hypothesis[2],
+            ),
+        )
 
     @staticmethod
     def draw_overlay(frame: ImageArray, detection: BoardDetection) -> ImageArray:

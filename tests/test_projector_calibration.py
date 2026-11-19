@@ -15,9 +15,13 @@ from src.chess_camera.projector_calibration import (
     CalibrationError,
     MappingResult,
     ValidationResult,
+    coded_marker_pattern,
     decode_gray_code,
+    detect_coded_marker_correspondences,
     detect_board_orientation,
+    fit_coded_pattern_mapping,
     fit_projector_mapping,
+    fit_visible_middle_lattice,
     gray_code_bit_count,
     gray_code_pattern,
     interpolate_grid_point,
@@ -47,6 +51,131 @@ def _detection(
         reprojection_error=0.0,
         method="test",
         grid_alignment=1.0,
+    )
+
+
+def test_coded_marker_pattern_decodes_absolute_projector_coordinates() -> None:
+    pattern = coded_marker_pattern(1280, 720)
+
+    camera_points, projector_points, marker_ids = (
+        detect_coded_marker_correspondences(
+            np.zeros_like(pattern.image),
+            pattern.image,
+            pattern,
+        )
+    )
+
+    assert pattern.image.shape == (720, 1280)
+    assert len(pattern.marker_corners) == 72
+    assert len(np.unique(marker_ids)) == 72
+    assert np.max(np.abs(camera_points - projector_points)) < 0.5
+
+
+def test_coded_mapping_uses_measured_visible_lattice() -> None:
+    width = 1280
+    height = 720
+    canonical = np.full((800, 800), 105, dtype=np.uint8)
+    for row in range(6):
+        for column in range(8):
+            canonical[
+                row * 100 : (row + 1) * 100,
+                column * 100 : (column + 1) * 100,
+            ] = 30 if (row + column) % 2 else 180
+    canonical_corners = np.asarray(
+        [[0, 0], [799, 0], [799, 799], [0, 799]],
+        dtype=np.float32,
+    )
+    camera_corners = np.asarray(
+        [[260, 45], [1010, 70], [1080, 680], [210, 650]],
+        dtype=np.float32,
+    )
+    board_homography = cv2.getPerspectiveTransform(
+        canonical_corners,
+        camera_corners,
+    )
+    black = cv2.warpPerspective(
+        canonical,
+        board_homography,
+        (width, height),
+        borderValue=5,
+    )
+    model_grid = np.asarray(
+        [
+            (column * 100, row * 100)
+            for row in range(9)
+            for column in range(9)
+        ],
+        dtype=np.float32,
+    )
+    expected_grid = cv2.perspectiveTransform(
+        model_grid.reshape(-1, 1, 2),
+        board_homography,
+    ).reshape(9, 9, 2)
+    rough_detection = BoardDetection(
+        grid_points=expected_grid
+        + np.asarray([3.0, -2.0], dtype=np.float32),
+        confidence=0.9,
+        reprojection_error=1.0,
+        method="rough test raster",
+        grid_alignment=0.9,
+    )
+    pattern = coded_marker_pattern(width, height)
+    illuminated = np.clip(
+        black.astype(np.int16) + pattern.image.astype(np.int16),
+        0,
+        255,
+    ).astype(np.uint8)
+
+    detection, mapping = fit_coded_pattern_mapping(
+        black,
+        illuminated,
+        rough_detection,
+        pattern,
+        (width, height),
+    )
+
+    assert detection.method == "visible 7x5 middle lattice"
+    assert detection.reprojection_error is not None
+    assert detection.reprojection_error < 0.1
+    assert mapping.inlier_ratio == pytest.approx(1.0)
+    assert mapping.rms_error < 1.0
+    assert (
+        np.max(
+            np.linalg.norm(
+                mapping.projector_grid - expected_grid,
+                axis=2,
+            )
+        )
+        < 1.5
+    )
+
+    shifted_grid = expected_grid.copy()
+    shifted_grid[[0, 0, 8, 8], [0, 8, 8, 0]] += np.asarray(
+        [[-80, -80], [80, -80], [80, 80], [-80, 80]],
+        dtype=np.float32,
+    )
+    shifted_outer_detection = BoardDetection(
+        grid_points=shifted_grid,
+        confidence=0.9,
+        reprojection_error=1.0,
+        method="decorative-border test raster",
+        grid_alignment=0.9,
+    )
+
+    unanchored = fit_visible_middle_lattice(
+        black,
+        shifted_outer_detection,
+    )
+
+    assert unanchored.method == "visible 7x5 middle lattice"
+    assert (
+        np.max(
+            np.linalg.norm(
+                unanchored.grid_points - expected_grid,
+                axis=2,
+            )
+        )
+        < 1.5
     )
 
 
@@ -95,7 +224,7 @@ def test_gray_code_patterns_decode_projector_coordinates() -> None:
     assert np.all(coarse_valid)
 
 
-def test_coverage_requires_response_on_every_square() -> None:
+def test_coverage_allows_obstructed_square_but_requires_every_quadrant() -> None:
     detection = _detection()
     black = np.full((100, 100), 20, dtype=np.uint8)
     illuminated = np.full((100, 100), 100, dtype=np.uint8)
@@ -104,7 +233,12 @@ def test_coverage_requires_response_on_every_square() -> None:
 
     assert result.coverage_ratio == pytest.approx(1.0)
     illuminated[10:20, 10:20] = black[10:20, 10:20]
-    with pytest.raises(CalibrationError, match="board square"):
+    obstructed = measure_coverage(black, illuminated, detection)
+    assert obstructed.coverage_ratio < 1.0
+
+    illuminated = np.full((100, 100), 100, dtype=np.uint8)
+    illuminated[10:50, 10:50] = black[10:50, 10:50]
+    with pytest.raises(CalibrationError, match="quadrant 1"):
         measure_coverage(black, illuminated, detection)
 
 
@@ -175,6 +309,56 @@ def test_mapping_recovers_projector_grid_from_dense_measurements() -> None:
     assert result.inlier_ratio > 0.99
     assert result.rms_error < 0.6
     assert np.max(np.abs(result.projector_grid - expected_grid)) < 0.6
+
+
+def test_mapping_accepts_sparse_distributed_board_plane_support() -> None:
+    detection = _detection(20, 20, 180, 180)
+    height = 200
+    width = 200
+    camera_y, camera_x = np.indices((height, width), dtype=np.float32)
+    projector_x = np.rint(camera_x * 1.5 + 12).astype(np.int32)
+    projector_y = np.rint(camera_y * 1.2 + 8).astype(np.int32)
+    board = np.zeros((height, width), dtype=np.uint8)
+    cv2.fillConvexPoly(
+        board,
+        np.rint(detection.outer_corners).astype(np.int32),
+        1,
+    )
+    random_values = np.random.default_rng(7).random((height, width))
+    valid = np.logical_and(board > 0, random_values < 0.11)
+
+    result = fit_projector_mapping(
+        detection,
+        projector_x,
+        projector_y,
+        valid,
+        (400, 300),
+        coverage_ratio=0.8,
+    )
+
+    assert result.decoded_ratio == pytest.approx(0.11, abs=0.015)
+    assert result.inlier_ratio > 0.99
+
+
+def test_mapping_rejects_concentrated_board_plane_support() -> None:
+    detection = _detection(20, 20, 180, 180)
+    height = 200
+    width = 200
+    camera_y, camera_x = np.indices((height, width), dtype=np.float32)
+    projector_x = np.rint(camera_x * 1.5 + 12).astype(np.int32)
+    projector_y = np.rint(camera_y * 1.2 + 8).astype(np.int32)
+    valid = np.zeros((height, width), dtype=bool)
+    valid[20:180, 20:45] = True
+
+    with pytest.raises(CalibrationError, match="too concentrated"):
+        fit_projector_mapping(
+            detection,
+            projector_x,
+            projector_y,
+            valid,
+            (400, 300),
+            coverage_ratio=0.8,
+        )
 
 
 def test_square_polygons_build_64_inset_quadrilaterals() -> None:
@@ -374,10 +558,10 @@ def test_quick_realign_uses_independent_validation_phase() -> None:
     projector = FakeProjector()
     controller = ProjectorCalibrationController(projector, object())
     fitting_coordinates = [
-        (1.0, 1.0),
-        (7.0, 1.0),
-        (1.0, 7.0),
-        (7.0, 7.0),
+        (1.0, 2.0),
+        (7.0, 2.0),
+        (1.0, 6.0),
+        (7.0, 6.0),
         (4.0, 4.0),
     ]
     measured = [
@@ -404,9 +588,9 @@ def test_quick_realign_uses_independent_validation_phase() -> None:
 
     assert controller._quick_phase == "validate"
     assert controller._validation_coordinates == [
-        (4.0, 1.0),
+        (4.0, 2.0),
         (7.0, 4.0),
-        (4.0, 7.0),
+        (4.0, 6.0),
         (1.0, 4.0),
     ]
     assert controller._validation_index == 0
@@ -533,6 +717,9 @@ def test_validation_only_reuses_mapping_without_refinement() -> None:
     assert projector.grid is not None
     np.testing.assert_array_equal(projector.grid, mapping.projector_grid)
 
+    controller._validation_coordinates = [
+        candidates[-1] for candidates in controller._validation_candidates
+    ]
     controller._validation_expected = [
         np.asarray([20.0, 20.0], dtype=np.float32)
     ] * 9
@@ -546,6 +733,54 @@ def test_validation_only_reuses_mapping_without_refinement() -> None:
 
     assert controller._refinement_iteration == 0
     assert controller._mapping is mapping
+
+
+def test_excessive_validation_error_tries_nearby_candidate() -> None:
+    detection = _detection()
+    mapping = MappingResult(
+        camera_grid=detection.grid_points,
+        projector_grid=detection.grid_points,
+        camera_to_projector_homography=np.eye(3, dtype=np.float32),
+        coverage_ratio=1.0,
+        decoded_ratio=1.0,
+        inlier_ratio=1.0,
+        rms_error=0.0,
+        maximum_error=0.0,
+    )
+    controller = ProjectorCalibrationController(
+        object(),
+        object(),
+        maximum_refinement_iterations=0,
+    )
+    controller._mapping = mapping
+    controller._detection = detection
+    controller._validation_candidates = [
+        [(1.0, 1.0), (1.25, 1.0)]
+    ] + [[(float(index), 4.0)] for index in range(2, 10)]
+    controller._validation_coordinates = [
+        candidates[0] for candidates in controller._validation_candidates
+    ]
+    controller._validation_expected = [
+        np.asarray([20.0, 20.0], dtype=np.float32)
+    ] * 9
+    controller._validation_measured = [
+        np.asarray([24.0, 20.0], dtype=np.float32)
+    ] + [
+        np.asarray([20.0, 20.0], dtype=np.float32)
+    ] * 8
+    controller._validation_widths = [20.0] * 9
+    scheduled: list[Callable[[], None]] = []
+    controller._schedule = lambda _delay, callback: scheduled.append(
+        callback
+    )
+
+    controller._finish_validation()
+
+    assert controller._validation_coordinates[0] == (1.25, 1.0)
+    assert controller._validation_expected == []
+    assert controller._validation_measured == []
+    assert controller._validation_widths == []
+    assert len(scheduled) == 1
 
 
 def test_validation_target_and_metrics_measure_camera_error() -> None:

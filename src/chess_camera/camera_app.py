@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .board_detector import BoardDetector, ImageArray
+from .board_detector import BoardDetection, BoardDetector, ImageArray
 from .alignment_monitor import AlignmentMonitor
 from .calibration_controller import (
     CalibrationResult,
@@ -126,6 +126,22 @@ def _resolve_camera_index(
     if default_key in device_keys:
         return device_keys.index(default_key)
     return 0
+
+
+def _snapshot_board_detection(
+    detector: BoardDetector,
+    snapshot: ImageArray,
+    calibration_result: CalibrationResult | None,
+) -> BoardDetection | None:
+    detection = detector.detect(snapshot)
+    if detection is not None or calibration_result is None:
+        return detection
+    return replace(
+        calibration_result.board_detection,
+        grid_points=calibration_result.mapping.camera_grid.copy(),
+        reprojection_error=None,
+        method="verified calibrated camera grid",
+    )
 
 
 class CameraWindow(QMainWindow):
@@ -348,6 +364,12 @@ class CameraWindow(QMainWindow):
         self._start_calibration_button.clicked.connect(
             self._start_projector_calibration
         )
+        self._coded_calibration_button = QPushButton(
+            "Full calibration - coded pattern"
+        )
+        self._coded_calibration_button.clicked.connect(
+            self._start_coded_projector_calibration
+        )
         self._quick_verify_button = QPushButton(
             "Quick realign / assess"
         )
@@ -377,6 +399,7 @@ class CameraWindow(QMainWindow):
         self._show_squares_button.setEnabled(False)
         calibration_layout = QHBoxLayout()
         calibration_layout.addWidget(self._start_calibration_button)
+        calibration_layout.addWidget(self._coded_calibration_button)
         calibration_layout.addWidget(self._validate_calibration_button)
         calibration_layout.addWidget(self._quick_verify_button)
         calibration_layout.addWidget(self._cancel_calibration_button)
@@ -541,6 +564,7 @@ class CameraWindow(QMainWindow):
         self._snapshot_visible = False
         self._snapshot_button.setEnabled(True)
         self._start_calibration_button.setEnabled(True)
+        self._coded_calibration_button.setEnabled(True)
         self._resume_button.setEnabled(False)
         self._settings.setValue(_CAMERA_SETTING, self._device_key(device))
         self._settings.sync()
@@ -628,6 +652,7 @@ class CameraWindow(QMainWindow):
         self._snapshot_button.setEnabled(False)
         self._resume_button.setEnabled(False)
         self._start_calibration_button.setEnabled(False)
+        self._coded_calibration_button.setEnabled(False)
         message = "Waiting for an external USB camera."
         if detail is not None:
             message = f"{message} {detail}"
@@ -715,6 +740,33 @@ class CameraWindow(QMainWindow):
         except (RuntimeError, ValueError) as error:
             self._projector_window.show_black()
             QMessageBox.critical(self, "Projector calibration", str(error))
+
+    def _start_coded_projector_calibration(self) -> None:
+        if self._latest_frame is None:
+            QMessageBox.warning(
+                self,
+                "Coded-pattern calibration",
+                "No camera frame is available yet.",
+            )
+            return
+        if not self._open_projector():
+            return
+
+        self._suspend_selected_square()
+        selected_index = self._projector_selector.currentIndex()
+        screen_geometry = self._screens[selected_index].geometry()
+        try:
+            self._calibrator.start_coded_pattern(
+                screen_geometry.width(),
+                screen_geometry.height(),
+            )
+        except (RuntimeError, ValueError) as error:
+            self._projector_window.show_black()
+            QMessageBox.critical(
+                self,
+                "Coded-pattern calibration",
+                str(error),
+            )
 
     def _start_quick_verification(self) -> None:
         result = self._calibration_result
@@ -868,6 +920,7 @@ class CameraWindow(QMainWindow):
     def _projector_calibration_active(self, active: bool) -> None:
         self._calibration_progress.setVisible(active)
         self._start_calibration_button.setEnabled(not active)
+        self._coded_calibration_button.setEnabled(not active)
         self._quick_verify_button.setEnabled(
             not active and self._calibration_result is not None
         )
@@ -940,6 +993,7 @@ class CameraWindow(QMainWindow):
             (
                 self._calibrator.quick_verification
                 or self._calibrator.validation_only
+                or self._calibrator.coded_pattern_mode
             )
             and self._calibration_result is not None
         ):
@@ -959,7 +1013,11 @@ class CameraWindow(QMainWindow):
             operation = (
                 "Quick realignment"
                 if self._calibrator.quick_verification
-                else "Validation"
+                else (
+                    "Validation"
+                    if self._calibrator.validation_only
+                    else "Coded-pattern calibration"
+                )
             )
             self._projector_status.setText(
                 f"{operation} failed: {message} The previous verified "
@@ -1348,7 +1406,11 @@ class CameraWindow(QMainWindow):
             return
 
         snapshot = self._latest_frame.copy()
-        detection = self._detector.detect(snapshot)
+        detection = _snapshot_board_detection(
+            self._detector,
+            snapshot,
+            self._calibration_result,
+        )
         overlay: ImageArray | None = None
         if detection is not None:
             overlay = self._detector.draw_overlay(

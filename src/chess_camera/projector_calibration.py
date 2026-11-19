@@ -48,10 +48,454 @@ class ValidationResult:
     maximum_square_fraction: float
 
 
+@dataclass(frozen=True)
+class CodedPattern:
+    image: GrayImage
+    marker_corners: dict[int, FloatArray]
+
+
 def gray_code_bit_count(length: int) -> int:
     if length <= 1:
         raise ValueError("Gray-code dimension must be greater than one.")
     return (length - 1).bit_length()
+
+
+def coded_marker_pattern(
+    width: int,
+    height: int,
+    *,
+    intensity: int = 112,
+) -> CodedPattern:
+    if width <= 1 or height <= 1:
+        raise ValueError("Coded-pattern dimensions must be greater than one.")
+    if not 1 <= intensity <= 255:
+        raise ValueError("Intensity must be between 1 and 255.")
+
+    marker_size = max(40, min(width // 16, height // 9))
+    quiet_zone = max(6, marker_size // 6)
+    pitch = marker_size + 2 * quiet_zone
+    columns = width // pitch
+    rows = height // pitch
+    if columns < 4 or rows < 3 or columns * rows > 100:
+        raise ValueError(
+            "Projector resolution cannot hold enough uniquely coded markers."
+        )
+
+    pattern = np.zeros((height, width), dtype=np.uint8)
+    marker_corners: dict[int, FloatArray] = {}
+    dictionary = cv2.aruco.getPredefinedDictionary(
+        cv2.aruco.DICT_4X4_100
+    )
+    start_x = (width - columns * pitch) // 2
+    start_y = (height - rows * pitch) // 2
+    marker_id = 0
+    for row in range(rows):
+        for column in range(columns):
+            tile_left = start_x + column * pitch
+            tile_top = start_y + row * pitch
+            marker_left = tile_left + quiet_zone
+            marker_top = tile_top + quiet_zone
+            pattern[
+                tile_top : tile_top + pitch,
+                tile_left : tile_left + pitch,
+            ] = intensity
+            marker = cv2.aruco.generateImageMarker(
+                dictionary,
+                marker_id,
+                marker_size,
+            )
+            marker_slice = pattern[
+                marker_top : marker_top + marker_size,
+                marker_left : marker_left + marker_size,
+            ]
+            marker_slice[marker == 0] = 0
+            marker_corners[marker_id] = np.asarray(
+                [
+                    [marker_left, marker_top],
+                    [marker_left + marker_size - 1, marker_top],
+                    [
+                        marker_left + marker_size - 1,
+                        marker_top + marker_size - 1,
+                    ],
+                    [marker_left, marker_top + marker_size - 1],
+                ],
+                dtype=np.float32,
+            )
+            marker_id += 1
+    return CodedPattern(pattern, marker_corners)
+
+
+def detect_coded_marker_correspondences(
+    black: GrayImage,
+    illuminated: GrayImage,
+    pattern: CodedPattern,
+) -> tuple[FloatArray, FloatArray, IntArray]:
+    if black.shape != illuminated.shape or black.ndim != 2:
+        raise ValueError(
+            "Coded-pattern captures must be equally sized grayscale images."
+        )
+    difference = np.maximum(
+        illuminated.astype(np.int16) - black.astype(np.int16),
+        0,
+    ).astype(np.float32)
+    response = float(np.percentile(difference, 99))
+    if response < 8:
+        raise CalibrationError(
+            "The coded pattern produced insufficient camera response."
+        )
+    normalized = np.clip(
+        np.rint(difference * (255.0 / response)),
+        0,
+        255,
+    ).astype(np.uint8)
+    parameters = cv2.aruco.DetectorParameters()
+    parameters.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+    detector = cv2.aruco.ArucoDetector(
+        cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_100),
+        parameters,
+    )
+    detected_corners, detected_ids, _rejected = detector.detectMarkers(
+        normalized
+    )
+    if detected_ids is None:
+        raise CalibrationError("No uniquely coded projector markers were detected.")
+
+    camera_points: list[FloatArray] = []
+    projector_points: list[FloatArray] = []
+    marker_ids: list[int] = []
+    for corners, marker_id_value in zip(
+        detected_corners,
+        detected_ids.reshape(-1),
+        strict=True,
+    ):
+        marker_id = int(marker_id_value)
+        expected_corners = pattern.marker_corners.get(marker_id)
+        if expected_corners is None:
+            continue
+        camera_points.append(
+            np.asarray(corners, dtype=np.float32).reshape(4, 2)
+        )
+        projector_points.append(expected_corners)
+        marker_ids.append(marker_id)
+    if len(camera_points) < 4:
+        raise CalibrationError(
+            f"Only {len(camera_points)} coded markers were detected; "
+            "at least four are required."
+        )
+    return (
+        np.concatenate(camera_points, axis=0),
+        np.concatenate(projector_points, axis=0),
+        np.asarray(marker_ids, dtype=np.int32),
+    )
+
+
+def fit_visible_middle_lattice(
+    black: GrayImage,
+    rough_detection: BoardDetection,
+) -> BoardDetection:
+    if black.ndim != 2:
+        raise ValueError("The board reference must be a grayscale image.")
+    flags = (
+        cv2.CALIB_CB_EXHAUSTIVE
+        | cv2.CALIB_CB_ACCURACY
+        | cv2.CALIB_CB_NORMALIZE_IMAGE
+    )
+    observed_options: list[FloatArray] = []
+    found, corners = cv2.findChessboardCornersSB(black, (7, 5), flags=flags)
+    if found and corners is not None:
+        observed_options.append(
+            np.asarray(corners, dtype=np.float32).reshape(5, 7, 2)
+        )
+    found, corners = cv2.findChessboardCornersSB(black, (5, 7), flags=flags)
+    if found and corners is not None:
+        observed_options.append(
+            np.asarray(corners, dtype=np.float32)
+            .reshape(7, 5, 2)
+            .transpose(1, 0, 2)
+        )
+    if not observed_options:
+        raise CalibrationError(
+            "The visible 7x5 middle-board intersections were not detected."
+        )
+
+    best_observed: FloatArray | None = None
+    best_expected: FloatArray | None = None
+    best_row_start = 0
+    best_error = float("inf")
+    for observed in observed_options:
+        for row_start in range(1, 4):
+            expected = rough_detection.grid_points[
+                row_start : row_start + 5,
+                1:8,
+            ]
+            for row_flip in (False, True):
+                for column_flip in (False, True):
+                    candidate = observed
+                    if row_flip:
+                        candidate = candidate[::-1, :, :]
+                    if column_flip:
+                        candidate = candidate[:, ::-1, :]
+                    error = float(
+                        np.sqrt(np.mean(np.square(candidate - expected)))
+                    )
+                    if error < best_error:
+                        best_error = error
+                        best_observed = candidate.copy()
+                        best_expected = expected.copy()
+                        best_row_start = row_start
+    if best_observed is None or best_expected is None:
+        raise CalibrationError("Could not orient the visible middle lattice.")
+    rough_square_width = float(
+        np.median(
+            np.linalg.norm(
+                np.diff(rough_detection.grid_points, axis=1),
+                axis=2,
+            )
+        )
+    )
+    if best_error > rough_square_width * 0.6:
+        raise CalibrationError(
+            "The detected middle lattice does not agree with the rough "
+            "board location."
+        )
+
+    model_points = np.asarray(
+        [
+            (column, row)
+            for row in range(best_row_start, best_row_start + 5)
+            for column in range(1, 8)
+        ],
+        dtype=np.float32,
+    )
+    camera_points = best_observed.reshape(-1, 2)
+    homography, _mask = cv2.findHomography(
+        model_points,
+        camera_points,
+        method=0,
+    )
+    if homography is None:
+        raise CalibrationError("Could not fit the visible middle lattice.")
+    outer_model = np.asarray(
+        [[0, 0], [8, 0], [8, 8], [0, 8]],
+        dtype=np.float32,
+    )
+    extrapolated_outer = cv2.perspectiveTransform(
+        outer_model.reshape(-1, 1, 2),
+        homography,
+    ).reshape(-1, 2)
+    outer_residuals = np.linalg.norm(
+        extrapolated_outer - rough_detection.outer_corners,
+        axis=1,
+    )
+    consistent_outer = outer_residuals <= rough_square_width * 0.2
+    used_outer_anchors = int(np.count_nonzero(consistent_outer))
+    interior_bias = float(
+        np.linalg.norm(
+            np.mean(
+                best_observed - best_expected,
+                axis=(0, 1),
+            )
+        )
+    )
+    if (
+        used_outer_anchors >= 2
+        and interior_bias <= rough_square_width * 0.02
+    ):
+        anchored_model = np.concatenate(
+            [model_points, outer_model[consistent_outer]],
+            axis=0,
+        )
+        anchored_camera = np.concatenate(
+            [
+                camera_points,
+                rough_detection.outer_corners[consistent_outer],
+            ],
+            axis=0,
+        )
+        anchored_homography, _mask = cv2.findHomography(
+            anchored_model,
+            anchored_camera,
+            method=0,
+        )
+        if anchored_homography is not None:
+            homography = anchored_homography
+        else:
+            used_outer_anchors = 0
+    else:
+        used_outer_anchors = 0
+    projected = cv2.perspectiveTransform(
+        model_points.reshape(-1, 1, 2),
+        homography,
+    ).reshape(-1, 2)
+    residual = float(
+        np.sqrt(np.mean(np.square(projected - camera_points)))
+    )
+    if residual > 2.0:
+        raise CalibrationError(
+            f"The visible middle lattice fit has {residual:.2f} camera-pixel "
+            "RMS error."
+        )
+    grid_model = np.asarray(
+        [(column, row) for row in range(9) for column in range(9)],
+        dtype=np.float32,
+    )
+    grid = np.asarray(
+        cv2.perspectiveTransform(
+            grid_model.reshape(-1, 1, 2),
+            homography,
+        ),
+        dtype=np.float32,
+    ).reshape(9, 9, 2)
+    return BoardDetection(
+        grid_points=grid,
+        confidence=min(0.99, max(0.0, 1.0 - residual / 10.0)),
+        reprojection_error=residual,
+        method=(
+            "visible 7x5 middle lattice"
+            if used_outer_anchors < 2
+            else "visible 7x5 middle lattice with bounded outer anchors"
+        ),
+        grid_alignment=rough_detection.grid_alignment,
+    )
+
+
+def fit_coded_pattern_mapping(
+    black: GrayImage,
+    illuminated: GrayImage,
+    rough_detection: BoardDetection,
+    pattern: CodedPattern,
+    projector_size: tuple[int, int],
+) -> tuple[BoardDetection, MappingResult]:
+    refined_detection = fit_visible_middle_lattice(
+        black,
+        rough_detection,
+    )
+    camera_points, projector_points, marker_ids = (
+        detect_coded_marker_correspondences(
+            black,
+            illuminated,
+            pattern,
+        )
+    )
+    board_polygon = np.ascontiguousarray(
+        refined_detection.outer_corners,
+        dtype=np.float32,
+    )
+    marker_count = marker_ids.size
+    marker_camera_points = camera_points.reshape(marker_count, 4, 2)
+    inside_markers = np.asarray(
+        [
+            cv2.pointPolygonTest(
+                board_polygon,
+                tuple(np.mean(corners, axis=0)),
+                False,
+            )
+            >= 0
+            for corners in marker_camera_points
+        ],
+        dtype=bool,
+    )
+    camera_points = marker_camera_points[inside_markers].reshape(-1, 2)
+    projector_points = projector_points.reshape(marker_count, 4, 2)[
+        inside_markers
+    ].reshape(-1, 2)
+    inside_marker_count = int(np.count_nonzero(inside_markers))
+    if inside_marker_count < 4:
+        raise CalibrationError(
+            f"Only {inside_marker_count} coded markers were visible on the "
+            "rough board plane."
+        )
+
+    homography, inlier_mask = cv2.findHomography(
+        camera_points,
+        projector_points,
+        cv2.RANSAC,
+        3.0,
+    )
+    if homography is None or inlier_mask is None:
+        raise CalibrationError(
+            "Could not fit the coded camera-to-projector plane."
+        )
+    inliers = np.asarray(inlier_mask, dtype=bool).reshape(-1)
+    inlier_ratio = float(np.mean(inliers))
+    if np.count_nonzero(inliers) < 16 or inlier_ratio < 0.6:
+        raise CalibrationError(
+            f"Coded-pattern plane support is unreliable: "
+            f"{np.count_nonzero(inliers)} corners, "
+            f"{inlier_ratio:.0%} inliers."
+        )
+
+    predicted = cv2.perspectiveTransform(
+        camera_points.reshape(-1, 1, 2),
+        homography,
+    ).reshape(-1, 2)
+    residuals = np.linalg.norm(predicted - projector_points, axis=1)
+    inlier_residuals = residuals[inliers]
+    rms_error = float(np.sqrt(np.mean(np.square(inlier_residuals))))
+    maximum_error = float(np.max(inlier_residuals))
+    if rms_error > 2.5:
+        raise CalibrationError(
+            f"Coded-pattern plane fit has {rms_error:.2f} projector-pixel "
+            "RMS error."
+        )
+
+    camera_to_board = cv2.getPerspectiveTransform(
+        refined_detection.outer_corners.astype(np.float32),
+        np.asarray([[0, 0], [8, 0], [8, 8], [0, 8]], dtype=np.float32),
+    )
+    inlier_camera_points = camera_points[inliers]
+    board_points = cv2.perspectiveTransform(
+        inlier_camera_points.reshape(-1, 1, 2),
+        camera_to_board,
+    ).reshape(-1, 2)
+    quadrant_counts = [
+        int(
+            np.count_nonzero(
+                np.logical_and(
+                    board_points[:, 0] < 4
+                    if column == 0
+                    else board_points[:, 0] >= 4,
+                    board_points[:, 1] < 4
+                    if row == 0
+                    else board_points[:, 1] >= 4,
+                )
+            )
+        )
+        for row in range(2)
+        for column in range(2)
+    ]
+    if min(quadrant_counts) < 2:
+        raise CalibrationError(
+            "Coded-pattern plane support does not cover every board quadrant."
+        )
+
+    typed_homography = np.asarray(homography, dtype=np.float32)
+    projector_grid = np.asarray(
+        cv2.perspectiveTransform(
+            refined_detection.grid_points.reshape(-1, 1, 2),
+            typed_homography,
+        ),
+        dtype=np.float32,
+    ).reshape(9, 9, 2)
+    _validate_projector_grid(
+        projector_grid,
+        projector_size[0],
+        projector_size[1],
+    )
+    mapping = MappingResult(
+        camera_grid=refined_detection.grid_points.copy(),
+        projector_grid=projector_grid,
+        camera_to_projector_homography=typed_homography,
+        coverage_ratio=inside_marker_count / max(marker_count, 1),
+        decoded_ratio=inside_marker_count / max(
+            len(pattern.marker_corners),
+            1,
+        ),
+        inlier_ratio=inlier_ratio,
+        rms_error=rms_error,
+        maximum_error=maximum_error,
+    )
+    return refined_detection, mapping
 
 
 def gray_code_pattern(
@@ -149,6 +593,7 @@ def measure_coverage(
             f"{saturation_ratio:.0%} of the board is saturated."
         )
 
+    square_coverages = np.empty((8, 8), dtype=np.float32)
     for row in range(8):
         for column in range(8):
             polygon = np.ascontiguousarray(
@@ -174,11 +619,20 @@ def measure_coverage(
                 )
                 / count
             )
-            if square_coverage < 0.45:
-                raise CalibrationError(
-                    f"Projector response is insufficient on board square "
-                    f"({column}, {row}): {square_coverage:.0%} coverage."
-                )
+            square_coverages[row, column] = square_coverage
+
+    quadrant_coverages = [
+        float(np.mean(square_coverages[row : row + 4, column : column + 4]))
+        for row in (0, 4)
+        for column in (0, 4)
+    ]
+    if min(quadrant_coverages) < 0.35:
+        weakest_quadrant = int(np.argmin(quadrant_coverages)) + 1
+        raise CalibrationError(
+            f"Projector response is insufficient in board quadrant "
+            f"{weakest_quadrant}: "
+            f"{min(quadrant_coverages):.0%} average coverage."
+        )
 
     return CoverageResult(
         board_mask=mask,
@@ -263,10 +717,10 @@ def fit_projector_mapping(
     )
     valid_count = int(np.count_nonzero(valid))
     decoded_ratio = valid_count / max(board_area, 1.0)
-    if valid_count < 500 or decoded_ratio < 0.25:
+    if valid_count < 500:
         raise CalibrationError(
-            f"Only {decoded_ratio:.0%} of the board produced valid "
-            "projector coordinates."
+            f"Only {valid_count} camera pixels produced valid projector "
+            "coordinates."
         )
 
     camera_y, camera_x = np.nonzero(valid)
@@ -301,14 +755,35 @@ def fit_projector_mapping(
     if inlier_residuals.size == 0:
         raise CalibrationError("The projector mapping has no geometric inliers.")
 
-    inlier_ratio = float(np.mean(inliers))
     rms_error = float(np.sqrt(np.mean(np.square(inlier_residuals))))
     maximum_error = float(np.max(inlier_residuals))
+
+    all_camera_points = np.column_stack((camera_x, camera_y)).astype(
+        np.float32
+    )
+    all_projector_points = np.column_stack(
+        (
+            projector_x[camera_y, camera_x],
+            projector_y[camera_y, camera_x],
+        )
+    ).astype(np.float32)
+    all_predicted = cv2.perspectiveTransform(
+        all_camera_points.reshape(-1, 1, 2),
+        homography,
+    ).reshape(-1, 2)
+    plane_inliers = (
+        np.linalg.norm(all_predicted - all_projector_points, axis=1) <= 2.5
+    )
+    plane_valid = np.zeros_like(valid)
+    plane_valid[camera_y[plane_inliers], camera_x[plane_inliers]] = True
+    plane_inlier_count = int(np.count_nonzero(plane_inliers))
+    inlier_ratio = plane_inlier_count / valid_count
     if inlier_ratio < 0.7 or rms_error > 2.0:
         raise CalibrationError(
             f"Projector mapping is unreliable: {inlier_ratio:.0%} inliers, "
             f"{rms_error:.2f} px RMS error."
         )
+    _validate_distributed_plane_support(detection, plane_valid)
 
     typed_homography = np.asarray(homography, dtype=np.float32)
     global_grid = np.asarray(
@@ -323,7 +798,7 @@ def fit_projector_mapping(
         global_grid,
         projector_x,
         projector_y,
-        valid,
+        plane_valid,
         typed_homography,
     )
     _validate_projector_grid(
@@ -342,6 +817,87 @@ def fit_projector_mapping(
         rms_error=rms_error,
         maximum_error=maximum_error,
     )
+
+
+def _validate_distributed_plane_support(
+    detection: BoardDetection,
+    plane_valid: BoolArray,
+) -> None:
+    camera_y, camera_x = np.nonzero(plane_valid)
+    count = camera_x.size
+    if count < 500:
+        raise CalibrationError(
+            "Fewer than 500 decoded pixels are consistent with the board "
+            "plane."
+        )
+
+    camera_points = np.column_stack((camera_x, camera_y)).astype(np.float32)
+    board_corners = np.asarray(
+        [[0, 0], [8, 0], [8, 8], [0, 8]],
+        dtype=np.float32,
+    )
+    camera_to_board = cv2.getPerspectiveTransform(
+        detection.outer_corners.astype(np.float32),
+        board_corners,
+    )
+    board_points = cv2.perspectiveTransform(
+        camera_points.reshape(-1, 1, 2),
+        camera_to_board,
+    ).reshape(-1, 2)
+    board_x = board_points[:, 0]
+    board_y = board_points[:, 1]
+    inside = np.logical_and.reduce(
+        (
+            board_x >= 0,
+            board_x <= 8,
+            board_y >= 0,
+            board_y <= 8,
+        )
+    )
+    board_points = board_points[inside]
+    if board_points.shape[0] < 500:
+        raise CalibrationError(
+            "Insufficient decoded board-plane support lies inside the board."
+        )
+
+    board_x = board_points[:, 0]
+    board_y = board_points[:, 1]
+    minimum_quadrant_count = max(20, round(board_points.shape[0] * 0.03))
+    quadrant_counts = [
+        int(
+            np.count_nonzero(
+                np.logical_and(
+                    board_x < 4 if column == 0 else board_x >= 4,
+                    board_y < 4 if row == 0 else board_y >= 4,
+                )
+            )
+        )
+        for row in range(2)
+        for column in range(2)
+    ]
+    horizontal_span = float(
+        np.percentile(board_x, 99) - np.percentile(board_x, 1)
+    )
+    vertical_span = float(
+        np.percentile(board_y, 99) - np.percentile(board_y, 1)
+    )
+    hull_area = abs(
+        float(
+            cv2.contourArea(
+                cv2.convexHull(board_points.astype(np.float32))
+            )
+        )
+    )
+    if (
+        min(quadrant_counts) < minimum_quadrant_count
+        or horizontal_span < 3.5
+        or vertical_span < 3.5
+        or hull_area < 12.0
+    ):
+        raise CalibrationError(
+            "Decoded board-plane support is too concentrated for safe "
+            "extrapolation."
+        )
 
 
 def _apply_local_grid_corrections(

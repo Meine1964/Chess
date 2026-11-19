@@ -18,6 +18,12 @@ This document refines the projector-calibration requirements in
 shall use Gray-code structured light for measurement and independently
 projected targets for validation.
 
+The proposed
+[Single-Shot Coded-Pattern Chessboard Calibration](./single-shot-coded-pattern-calibration-specification.md)
+defines an alternative that fits the chess lattice directly in projector
+space. This document and the implemented Gray-code path remain the preserved
+fallback until that alternative passes hardware acceptance.
+
 ### 1.1 Implementation status
 
 The initial calibration path is implemented with:
@@ -447,7 +453,10 @@ Validation shall report:
 A calibration may succeed only when:
 
 - All nine initial validation targets are detected unambiguously.
-- All 64 squares have usable decoded coverage.
+- Projector illumination covers at least 70% of the detected playing surface.
+- Every board quadrant has at least 35% average illumination response;
+  individual piece-obstructed squares may have lower response.
+- Decoded board-plane support passes the distributed inlier requirements.
 - Every projected target lands in its intended physical square.
 - Maximum validation error is less than 10% of local square width.
 - No projected square substantially overlaps an adjacent square.
@@ -525,7 +534,12 @@ The targets shall remain on the top playing plane while avoiding both the
 physical board edge and the centers occupied by pieces in the standard
 starting position. Their projected radius shall be limited to 14% of local
 square width. If a target is not detected, the validator shall try one nearby
-piece-clear location in the same board region before failing.
+piece-clear location in the same board region before failing. After available
+mesh refinement, a detected target with excessive residual error shall also
+be retried at its nearby location to reject shifted reflections from pieces.
+The outer validation rows shall use board coordinates 2 and 6, bordering the
+unobstructed middle half rather than the narrow gaps between the pawn and back
+ranks.
 
 The fitting targets shall calculate a candidate camera-to-projector homography
 without changing the active verified calibration. The saved local correction

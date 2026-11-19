@@ -1,12 +1,14 @@
 # Piece-Aware Board Localization and Calibration Specification
 
 **Version:** 0.2  
-**Status:** Milestone 1 implemented; Milestones 2-5 proposed  
+**Status:** Milestone 1 implemented; Milestone 2 partially implemented;
+Milestones 3-5 proposed
 **Platform:** Python on Windows  
 **Related specifications:**
 
 - [Projector/camera chessboard system](./projector-camera-chessboard-specification.md)
 - [Projector calibration](./projector-calibration-specification.md)
+- [Single-shot coded-pattern calibration](./single-shot-coded-pattern-calibration-specification.md)
 
 ## 1. Purpose
 
@@ -258,6 +260,11 @@ The calibration algorithm shall:
 5. Refit using distributed board-plane inliers.
 6. Verify that support covers the board rather than one local region.
 
+The initial illumination check shall allow individual piece-obstructed squares
+to respond weakly. It shall require at least 70% overall response and at least
+35% average response in each board quadrant instead of requiring a fixed
+minimum response in every square.
+
 This robust fit breaks the dependency between knowing the piece mask and
 knowing the board-plane mapping.
 
@@ -302,8 +309,10 @@ internal corner-region grid intersections, four internal edge-region grid
 intersections, and the board center. Quick realignment uses the corner-region
 patches and center for fitting, then reserves the edge-region patches for
 independent validation. This layout avoids the physical board edge and piece
-centers while retaining full-board distribution. A missing target is retried
-once at a nearby piece-clear location in the same region.
+centers while retaining broad board distribution. The outer target rows lie
+at coordinates 2 and 6, bordering the unobstructed middle half rather than the
+piece-filled gap between pawns and back-rank pieces. A missing target is
+retried once at a nearby piece-clear location in the same region.
 
 The validator shall:
 
@@ -470,10 +479,11 @@ projector remains required.
 
 ### Milestone 2: Piece-aware structured-light plane
 
-- Decode with pieces present.
-- Fit robust planar correspondences.
-- Produce board-plane and non-planar masks.
-- Measure distributed support.
+- Decode with pieces present. (Implemented)
+- Fit robust planar correspondences. (Implemented)
+- Produce an internal board-plane mask for local correction. (Implemented;
+  persistence and diagnostics remain proposed)
+- Measure distributed support before extrapolation. (Implemented)
 
 ### Milestone 3: Confidence-aware correction and validation
 

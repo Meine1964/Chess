@@ -10,11 +10,14 @@ from .board_detector import BoardDetection, BoardDetector, FloatArray, ImageArra
 from .projector import ProjectorWindow
 from .projector_calibration import (
     CalibrationError,
+    CodedPattern,
     GrayImage,
     MappingResult,
     ValidationResult,
     bgr_to_gray,
+    coded_marker_pattern,
     decode_gray_code,
+    fit_coded_pattern_mapping,
     fit_projector_mapping,
     gray_code_bit_count,
     gray_code_pattern,
@@ -43,15 +46,15 @@ class _CaptureStep:
 
 
 _STARTING_POSITION_CORNER_TARGETS = [
-    [(1.0, 1.0), (1.25, 1.0)],
-    [(7.0, 1.0), (6.75, 1.0)],
-    [(1.0, 7.0), (1.25, 7.0)],
-    [(7.0, 7.0), (6.75, 7.0)],
+    [(1.0, 2.0), (1.25, 2.0)],
+    [(7.0, 2.0), (6.75, 2.0)],
+    [(1.0, 6.0), (1.25, 6.0)],
+    [(7.0, 6.0), (6.75, 6.0)],
 ]
 _STARTING_POSITION_EDGE_TARGETS = [
-    [(4.0, 1.0), (4.25, 1.0)],
+    [(4.0, 2.0), (4.25, 2.0)],
     [(7.0, 4.0), (7.0, 4.25)],
-    [(4.0, 7.0), (3.75, 7.0)],
+    [(4.0, 6.0), (3.75, 6.0)],
     [(1.0, 4.0), (1.0, 3.75)],
 ]
 _STARTING_POSITION_CENTER_TARGET = [(4.0, 4.0), (4.25, 4.0)]
@@ -119,6 +122,8 @@ class ProjectorCalibrationController(QObject):
         self._run_token = 0
         self._quick_verification = False
         self._validation_only = False
+        self._coded_pattern_mode = False
+        self._coded_pattern: CodedPattern | None = None
         self._quick_phase = ""
 
     @property
@@ -133,6 +138,10 @@ class ProjectorCalibrationController(QObject):
     def validation_only(self) -> bool:
         return self._validation_only
 
+    @property
+    def coded_pattern_mode(self) -> bool:
+        return self._coded_pattern_mode
+
     def start(self, projector_width: int, projector_height: int) -> None:
         if self._active:
             raise RuntimeError("Projector calibration is already active.")
@@ -143,6 +152,8 @@ class ProjectorCalibrationController(QObject):
         self._run_token += 1
         self._quick_verification = False
         self._validation_only = False
+        self._coded_pattern_mode = False
+        self._coded_pattern = None
         self._quick_phase = ""
         self._collecting = False
         self._projector_size = (projector_width, projector_height)
@@ -169,6 +180,64 @@ class ProjectorCalibrationController(QObject):
         self.progress_changed.emit(0, self._progress_total)
         self._display_current_step()
 
+    def start_coded_pattern(
+        self,
+        projector_width: int,
+        projector_height: int,
+    ) -> None:
+        if self._active:
+            raise RuntimeError("Projector calibration is already active.")
+        if projector_width <= 1 or projector_height <= 1:
+            raise ValueError("Projector dimensions must be greater than one.")
+
+        pattern = coded_marker_pattern(
+            projector_width,
+            projector_height,
+            intensity=self._intensity,
+        )
+        self._active = True
+        self._run_token += 1
+        self._quick_verification = False
+        self._validation_only = False
+        self._coded_pattern_mode = True
+        self._coded_pattern = pattern
+        self._quick_phase = ""
+        self._collecting = False
+        self._projector_size = (projector_width, projector_height)
+        self._captures.clear()
+        self._detection = None
+        self._mapping = None
+        self._validation_expected.clear()
+        self._validation_measured.clear()
+        self._validation_widths.clear()
+        self._validation_candidates.clear()
+        self._validation_candidate_index = 0
+        self._validation_index = -1
+        self._refinement_iteration = 0
+        self._steps = [
+            _CaptureStep(
+                "black",
+                np.zeros(
+                    (projector_height, projector_width),
+                    dtype=np.uint8,
+                ),
+                "Capturing populated-board black reference",
+            ),
+            _CaptureStep(
+                "coded",
+                pattern.image,
+                "Capturing uniquely coded projector pattern",
+            ),
+        ]
+        self._step_index = 0
+        self._progress_total = len(self._steps) + 10
+        self.active_changed.emit(True)
+        self.status_changed.emit(
+            "Starting single-shot coded-pattern calibration."
+        )
+        self.progress_changed.emit(0, self._progress_total)
+        self._display_current_step()
+
     def start_verification(
         self,
         result: CalibrationResult,
@@ -184,6 +253,8 @@ class ProjectorCalibrationController(QObject):
         self._run_token += 1
         self._quick_verification = True
         self._validation_only = False
+        self._coded_pattern_mode = False
+        self._coded_pattern = None
         self._quick_phase = "fit"
         self._collecting = False
         self._projector_size = (projector_width, projector_height)
@@ -229,6 +300,8 @@ class ProjectorCalibrationController(QObject):
         self._run_token += 1
         self._quick_verification = False
         self._validation_only = True
+        self._coded_pattern_mode = False
+        self._coded_pattern = None
         self._quick_phase = ""
         self._collecting = False
         self._projector_size = (projector_width, projector_height)
@@ -390,6 +463,8 @@ class ProjectorCalibrationController(QObject):
         try:
             if self._quick_verification:
                 self._prepare_quick_verification()
+            elif self._coded_pattern_mode:
+                self._calculate_coded_mapping()
             else:
                 self._calculate_mapping()
             self._start_validation()
@@ -441,6 +516,27 @@ class ProjectorCalibrationController(QObject):
             valid,
             self._projector_size,
             coverage.coverage_ratio,
+        )
+        self._detection = detection
+        self._mapping = mapping
+        self._projector.set_projector_grid(mapping.projector_grid)
+
+    def _calculate_coded_mapping(self) -> None:
+        pattern = self._coded_pattern
+        if pattern is None:
+            raise RuntimeError("Coded projector pattern is not available.")
+        black = self._captures["black"]
+        rough_detection = self._detector.detect(black)
+        if rough_detection is None:
+            raise CalibrationError(
+                "The populated board was not located with the projector black."
+            )
+        detection, mapping = fit_coded_pattern_mapping(
+            black,
+            self._captures["coded"],
+            rough_detection,
+            pattern,
+            self._projector_size,
         )
         self._detection = detection
         self._mapping = mapping
@@ -591,7 +687,11 @@ class ProjectorCalibrationController(QObject):
             candidates = self._validation_candidates[
                 self._validation_index
             ]
-            next_candidate = self._validation_candidate_index + 1
+            current_coordinate = self._validation_coordinates[
+                self._validation_index
+            ]
+            current_candidate = candidates.index(current_coordinate)
+            next_candidate = current_candidate + 1
             if next_candidate >= len(candidates):
                 raise
             self._validation_expected.pop()
@@ -667,10 +767,17 @@ class ProjectorCalibrationController(QObject):
             ):
                 self._refine_and_repeat_validation(measured)
                 return
+            if self._retry_worst_validation_target(validation, widths):
+                return
+            fractions = validation.errors / widths
+            worst_index = int(np.argmax(fractions))
+            worst_coordinate = self._validation_coordinates[worst_index]
             raise CalibrationError(
-                f"Validation error is "
-                f"{validation.maximum_square_fraction:.1%} of a square; "
-                "the maximum allowed is 10%."
+                f"Validation target {worst_index + 1} at "
+                f"({worst_coordinate[0]:.2f}, "
+                f"{worst_coordinate[1]:.2f}) has "
+                f"{fractions[worst_index]:.1%} square error; the maximum "
+                "allowed is 10%."
             )
 
         result = CalibrationResult(
@@ -698,6 +805,48 @@ class ProjectorCalibrationController(QObject):
             "maximum validation error."
         )
         self.completed.emit(result)
+
+    def _retry_worst_validation_target(
+        self,
+        validation: ValidationResult,
+        widths: FloatArray,
+    ) -> bool:
+        if len(self._validation_candidates) != len(
+            self._validation_coordinates
+        ):
+            return False
+        fractions = validation.errors / widths
+        worst_index = int(np.argmax(fractions))
+        candidates = self._validation_candidates[worst_index]
+        current_coordinate = self._validation_coordinates[worst_index]
+        current_candidate = candidates.index(current_coordinate)
+        next_candidate = current_candidate + 1
+        if next_candidate >= len(candidates):
+            return False
+
+        self._validation_coordinates[worst_index] = candidates[next_candidate]
+        self._captures.pop("validation_black", None)
+        self._validation_expected.clear()
+        self._validation_measured.clear()
+        self._validation_widths.clear()
+        self._validation_candidate_index = 0
+        self._validation_index = 0
+        self._progress_total += len(self._validation_coordinates) + 1
+        self._validation_progress_base = (
+            self._progress_total
+            - len(self._validation_coordinates)
+            - 1
+        )
+        self.progress_changed.emit(
+            self._validation_progress_base,
+            self._progress_total,
+        )
+        self.status_changed.emit(
+            f"Validation target {worst_index + 1} had excessive error; "
+            "retrying at a nearby location."
+        )
+        self._schedule(0, self._show_validation_black)
+        return True
 
     def _refine_and_repeat_validation(
         self,

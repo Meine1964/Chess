@@ -1,6 +1,7 @@
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -10,6 +11,7 @@ from src.chess_camera.board_detector import BoardDetector, StableBoardTracker
 from src.chess_camera.camera_app import (
     _is_external_camera,
     _resolve_camera_index,
+    _snapshot_board_detection,
 )
 from src.chess_camera.diagnostics import DiagnosticStore
 
@@ -151,6 +153,31 @@ def test_returns_none_when_no_board_is_present() -> None:
     assert BoardDetector().detect(image) is None
 
 
+def test_snapshot_uses_verified_grid_when_detection_is_inconclusive() -> None:
+    image, _expected_corners = _perspective_board()
+    calibrated = BoardDetector().detect(image)
+    assert calibrated is not None
+    remapped_grid = calibrated.grid_points + np.asarray(
+        [12.0, -4.0],
+        dtype=np.float32,
+    )
+    detector = SimpleNamespace(detect=lambda _frame: None)
+    result = SimpleNamespace(
+        board_detection=calibrated,
+        mapping=SimpleNamespace(camera_grid=remapped_grid),
+    )
+
+    detection = _snapshot_board_detection(
+        detector,
+        np.zeros((100, 100, 3), dtype=np.uint8),
+        result,
+    )
+
+    assert detection is not None
+    assert detection.method == "verified calibrated camera grid"
+    np.testing.assert_array_equal(detection.grid_points, remapped_grid)
+
+
 def test_uses_alternating_color_fallback_when_corners_are_unavailable(
     monkeypatch,
 ) -> None:
@@ -172,6 +199,36 @@ def test_uses_alternating_color_fallback_when_corners_are_unavailable(
         axis=1,
     )
     assert float(np.max(corner_error)) < 12.0
+
+
+def test_corrects_one_square_shifted_raster_hypothesis() -> None:
+    image, expected_corners = _perspective_board_with_starting_pieces()
+    target_corners = np.asarray(
+        [[0, 0], [511, 0], [511, 511], [0, 511]],
+        dtype=np.float32,
+    )
+    inverse_transform = np.linalg.inv(
+        cv2.getPerspectiveTransform(expected_corners, target_corners)
+    ).astype(np.float32)
+    shifted_model = np.asarray(
+        [[-64, -64], [447, -64], [447, 447], [-64, 447]],
+        dtype=np.float32,
+    )
+    shifted_corners = np.asarray(
+        cv2.perspectiveTransform(
+            shifted_model.reshape(-1, 1, 2),
+            inverse_transform,
+        ),
+        dtype=np.float32,
+    ).reshape(4, 2)
+
+    corrected, _score, _separation, edge_consistency = (
+        BoardDetector._best_grid_hypothesis(image, shifted_corners)
+    )
+
+    corner_error = np.linalg.norm(corrected - expected_corners, axis=1)
+    assert float(np.max(corner_error)) < 2.0
+    assert edge_consistency == 1.0
 
 
 def test_detects_playing_surface_with_starting_pieces(

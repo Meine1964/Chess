@@ -23,8 +23,10 @@ calibration restore, full-board projection tests, and clickable
 individual-square indication. Piece-aware board localization and calibration
 without an empty-board prerequisite are specified in
 [Piece-Aware Board Localization and Calibration](./piece-aware-board-localization-specification.md).
-Their implementation, chess move recognition, and chess rules remain future
-work.
+An alternative direct projector-space approach is specified in
+[Single-Shot Coded-Pattern Chessboard Calibration](./single-shot-coded-pattern-calibration-specification.md).
+Further piece-aware milestones, the coded-pattern implementation, chess move
+recognition, and chess rules remain future work.
 
 ## 2. Hardware
 
@@ -667,6 +669,8 @@ The current interface contains:
   the existing mapping with nine distributed targets.
 - Selectable continuous-alignment status showing board drift and active-square
   projection error.
+- Camera Snapshot falls back to the current verified and camera-remapped grid
+  when a fresh piece-obstructed board detection is inconclusive.
 - Lichess-colored clickable 8x8 board.
 - Static cyan/azure selected-square projection.
 
