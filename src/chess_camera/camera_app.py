@@ -49,6 +49,10 @@ from .calibration_controller import (
 from .calibration_store import CalibrationStore
 from .chessboard_widget import ChessboardWidget, rotate_square
 from .diagnostics import DiagnosticStore
+from .occupancy import (
+    SquareOccupancyDetector,
+    detect_starting_position_orientation,
+)
 from .projector import ProjectorWindow, focus_pattern
 from .projector_calibration import (
     CalibrationError,
@@ -212,6 +216,7 @@ class CameraWindow(QMainWindow):
         self._alignment_monitor.mapping_verified.connect(
             self._alignment_mapping_verified
         )
+        self._occupancy_detector = SquareOccupancyDetector()
         self._calibration_result: CalibrationResult | None = None
         self._verified_calibration_result: CalibrationResult | None = None
         self._remembered_board_square: tuple[int, int] | None = None
@@ -234,8 +239,9 @@ class CameraWindow(QMainWindow):
         self._board_widget.square_clicked.connect(self._board_square_clicked)
         self._board_quarter_turns = int(
             self._settings.value(_BOARD_ORIENTATION_SETTING, 0)
-        ) % 2
+        ) % 4
         self._board_orientation_needs_detection = True
+        self._piece_side_orientation_needs_detection = True
 
         self._camera_selector = QComboBox()
         self._camera_selector.addItems(device_names)
@@ -442,6 +448,12 @@ class CameraWindow(QMainWindow):
         self._alignment_status.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
+        self._occupancy_status = QLabel(
+            "Occupancy unavailable: projector/camera calibration is not verified."
+        )
+        self._occupancy_status.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
 
         content_layout = QHBoxLayout()
         content_layout.addWidget(self._preview, stretch=3)
@@ -460,6 +472,7 @@ class CameraWindow(QMainWindow):
         layout.addWidget(self._detection_status)
         layout.addWidget(self._projector_status)
         layout.addWidget(self._alignment_status)
+        layout.addWidget(self._occupancy_status)
         layout.addWidget(self._instructions)
         container = QWidget()
         container.setLayout(layout)
@@ -477,6 +490,10 @@ class CameraWindow(QMainWindow):
             self._camera_devices_changed
         )
         self._open_projector()
+        self._occupancy_timer = QTimer(self)
+        self._occupancy_timer.setInterval(200)
+        self._occupancy_timer.timeout.connect(self._update_occupancy)
+        self._occupancy_timer.start()
         if selected_index is None:
             self._wait_for_external_camera()
         else:
@@ -1116,7 +1133,11 @@ class CameraWindow(QMainWindow):
         self._calibration_result = result
         self._verified_calibration_result = result
         self._board_orientation_needs_detection = True
+        self._piece_side_orientation_needs_detection = True
         self._suspend_selected_square()
+        self._reset_occupancy(
+            "Occupancy stabilizing with the verified calibration."
+        )
         self._projector_window.set_projector_grid(
             result.mapping.projector_grid
         )
@@ -1148,6 +1169,9 @@ class CameraWindow(QMainWindow):
         self._calibration_result = None
         self._verified_calibration_result = None
         self._suspend_selected_square()
+        self._reset_occupancy(
+            "Occupancy unavailable: projector/camera calibration is not verified."
+        )
         self._projector_window.clear_projector_grid()
         self._board_widget.setEnabled(False)
         self._show_grid_button.setEnabled(False)
@@ -1200,6 +1224,9 @@ class CameraWindow(QMainWindow):
             self._calibration_result,
             mapping=mapping,
         )
+        self._reset_occupancy(
+            "Occupancy stabilizing after board movement."
+        )
         self._projector_window.set_projector_grid(mapping.projector_grid)
         if self._selected_board_square is not None:
             row, column = self._selected_board_square
@@ -1228,6 +1255,101 @@ class CameraWindow(QMainWindow):
         self._board_widget.set_selected_square(
             self._remembered_board_square
         )
+
+    def _reset_occupancy(self, status: str) -> None:
+        self._occupancy_detector.reset()
+        self._board_widget.set_occupied_squares(())
+        self._occupancy_status.setText(status)
+
+    def _update_occupancy(self) -> None:
+        if (
+            self._latest_frame is None
+            or self._calibration_result is None
+            or self._calibrator.active
+        ):
+            return
+        if self._alignment_monitor.output_mode != "black":
+            self._occupancy_status.setText(
+                "Occupancy paused until the projector is black."
+            )
+            return
+        self._detect_current_board_orientation()
+        if self._board_orientation_needs_detection:
+            self._occupancy_status.setText(
+                "Occupancy unavailable: board orientation is unresolved."
+            )
+            return
+        try:
+            update = self._occupancy_detector.observe(
+                self._latest_frame,
+                self._calibration_result.mapping.camera_grid,
+            )
+        except (ValueError, cv2.error) as error:
+            self._occupancy_status.setText(
+                f"Occupancy unavailable: {error}"
+            )
+            return
+        if update.state == "motion":
+            self._occupancy_status.setText(
+                "Occupancy frozen while motion or occlusion is present."
+            )
+            return
+        if update.result is None:
+            self._occupancy_status.setText(
+                f"Occupancy stabilizing: {update.observation_count}/"
+                f"{update.required_observations} observations."
+            )
+            return
+        occupied_ui = {
+            rotate_square(row, column, -self._board_quarter_turns)
+            for row, column in update.result.occupied_squares
+        }
+        if (
+            update.state == "stable"
+            and self._piece_side_orientation_needs_detection
+        ):
+            try:
+                self._board_quarter_turns = (
+                    detect_starting_position_orientation(
+                        self._latest_frame,
+                        self._calibration_result.mapping.camera_grid,
+                        update.result.occupied_squares,
+                        self._board_quarter_turns,
+                    )
+                )
+            except ValueError:
+                pass
+            else:
+                self._piece_side_orientation_needs_detection = False
+                self._settings.setValue(
+                    _BOARD_ORIENTATION_SETTING,
+                    self._board_quarter_turns,
+                )
+                self._settings.sync()
+                occupied_ui = {
+                    rotate_square(
+                        row,
+                        column,
+                        -self._board_quarter_turns,
+                    )
+                    for row, column in update.result.occupied_squares
+                }
+        self._board_widget.set_occupied_squares(occupied_ui)
+        if update.state == "stabilizing":
+            self._occupancy_status.setText(
+                f"Occupancy provisional "
+                f"({update.observation_count}/"
+                f"{update.required_observations}): "
+                f"{update.result.occupied_count} occupied, "
+                f"{update.result.empty_count} empty, "
+                f"{update.result.unknown_count} unknown."
+            )
+        else:
+            self._occupancy_status.setText(
+                f"Occupancy stable: {update.result.occupied_count} occupied, "
+                f"{update.result.empty_count} empty, "
+                f"{update.result.unknown_count} unknown."
+            )
 
     def _physical_board_square(
         self,

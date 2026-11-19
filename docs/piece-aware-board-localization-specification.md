@@ -1,14 +1,15 @@
 # Piece-Aware Board Localization and Calibration Specification
 
-**Version:** 0.2  
+**Version:** 0.3
 **Status:** Milestone 1 implemented; Milestone 2 partially implemented;
-Milestones 3-5 proposed
+Milestone 4 partially implemented; Milestones 3 and 5 proposed
 **Platform:** Python on Windows  
 **Related specifications:**
 
 - [Projector/camera chessboard system](./projector-camera-chessboard-specification.md)
 - [Projector calibration](./projector-calibration-specification.md)
 - [Single-shot coded-pattern calibration](./single-shot-coded-pattern-calibration-specification.md)
+- [Chess-square occupancy and UI marking](./chess-square-occupancy-ui-specification.md)
 
 ## 1. Purpose
 
@@ -82,8 +83,10 @@ rectification, never directly in the perspective-distorted image.
   White's side.
 - Square-color parity resolves odd 90-degree orientation errors.
 - Square colors alone cannot distinguish 0 from 180 degrees.
-- White-side identity shall later be resolved from known starting placement,
-  piece colors, printed board evidence, or explicit user confirmation.
+- For a complete detected starting position, White-side identity is resolved
+  from aggregate piece luminance and placed at the bottom of the UI.
+- Arbitrary non-starting positions may later use printed board evidence,
+  tracked game state, or explicit user confirmation.
 
 ## 4. Coordinate Model
 
@@ -375,6 +378,10 @@ The first piece-analysis milestone shall classify each square as:
 
 Piece identity recognition is not required for this milestone.
 
+The occupancy classification contract, temporal policy, and UI representation
+are specified in
+[Chess-Square Occupancy and UI Marking](./chess-square-occupancy-ui-specification.md).
+
 ## 13. Move-Detection Foundation
 
 After a stable pre-move and post-move position are available:
@@ -494,9 +501,9 @@ projector remains required.
 
 ### Milestone 4: Stable occupancy
 
-- Detect empty, occupied, and unknown squares.
-- Wait through hand motion.
-- Produce pre-move and post-move stable states.
+- Detect empty, occupied, and unknown squares. (Implemented experimentally)
+- Wait through hand motion. (Implemented with image-motion gating)
+- Produce pre-move and post-move stable states. (Partially implemented)
 
 ### Milestone 5: Legal move inference
 

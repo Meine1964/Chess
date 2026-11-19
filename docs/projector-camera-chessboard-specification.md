@@ -25,8 +25,12 @@ without an empty-board prerequisite are specified in
 [Piece-Aware Board Localization and Calibration](./piece-aware-board-localization-specification.md).
 An alternative direct projector-space approach is specified in
 [Single-Shot Coded-Pattern Chessboard Calibration](./single-shot-coded-pattern-calibration-specification.md).
-Further piece-aware milestones, the coded-pattern implementation, chess move
-recognition, and chess rules remain future work.
+Camera-derived occupied-square marking on the digital chessboard is specified
+in
+[Chess-Square Occupancy and UI Marking](./chess-square-occupancy-ui-specification.md).
+The initial occupied-square classifier and UI dots are implemented
+experimentally. Hardware tuning, chess move recognition, and chess rules
+remain future work.
 
 ## 2. Hardware
 
@@ -629,7 +633,10 @@ The current interface contains:
   inset brightness over all 64 physical squares. Standard orientation requires
   the bottom-right square to be white; when the detected color parity is
   reversed, logical coordinates are rotated by 90 degrees. The result is
-  remembered for starts where pieces obscure the board. Projection and optical
+  remembered for starts where pieces obscure the board. When occupancy matches
+  a complete starting position, aggregate piece luminance distinguishes the
+  two sides and rotates the brighter White side to the bottom of the UI.
+  Projection and optical
   monitoring use the same transformed coordinates, while adaptive indicator
   color follows the logical square color.
 - Live camera preview.

@@ -1,4 +1,6 @@
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from collections.abc import Collection
+
 from PySide6.QtGui import QColor, QMouseEvent, QPaintEvent, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
@@ -44,6 +46,7 @@ class ChessboardWidget(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._selected_square: tuple[int, int] | None = None
+        self._occupied_squares: frozenset[tuple[int, int]] = frozenset()
         self.setMinimumSize(320, 320)
         self.setSizePolicy(
             QSizePolicy.Policy.Expanding,
@@ -67,6 +70,25 @@ class ChessboardWidget(QWidget):
             if not 0 <= row < 8 or not 0 <= column < 8:
                 raise ValueError("Selected square must be inside the 8x8 board.")
         self._selected_square = square
+        self.update()
+
+    @property
+    def occupied_squares(self) -> frozenset[tuple[int, int]]:
+        return self._occupied_squares
+
+    def set_occupied_squares(
+        self,
+        squares: Collection[tuple[int, int]],
+    ) -> None:
+        occupied = frozenset(squares)
+        for row, column in occupied:
+            if not 0 <= row < 8 or not 0 <= column < 8:
+                raise ValueError(
+                    "Occupied squares must be inside the 8x8 board."
+                )
+        if occupied == self._occupied_squares:
+            return
+        self._occupied_squares = occupied
         self.update()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
@@ -114,6 +136,19 @@ class ChessboardWidget(QWidget):
                         QPen(QColor("#c62828"), max(2.0, square_size * 0.05))
                     )
                     painter.drawRect(rectangle.adjusted(2, 2, -2, -2))
+                if (row, column) in self._occupied_squares:
+                    diameter = square_size * 0.44
+                    center = rectangle.center()
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(QColor("#111111"))
+                    painter.drawEllipse(
+                        QRectF(
+                            center.x() - diameter / 2,
+                            center.y() - diameter / 2,
+                            diameter,
+                            diameter,
+                        )
+                    )
 
                 label_color = (
                     LICHESS_DARK

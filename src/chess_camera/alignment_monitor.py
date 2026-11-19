@@ -144,6 +144,10 @@ class AlignmentMonitor(QObject):
     def accept_frame(self, frame: ImageArray) -> None:
         self._latest_frame = frame
 
+    @property
+    def output_mode(self) -> OutputMode:
+        return self._output_mode
+
     def capture_black_reference(self, frame: ImageArray) -> None:
         if self._result is not None:
             self._black_reference = bgr_to_gray(frame)
