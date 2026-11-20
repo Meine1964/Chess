@@ -26,6 +26,7 @@ DisplayMode = Literal[
     "move",
     "illegal",
     "correction",
+    "reconciliation",
 ]
 PROJECTED_ON_LIGHT_SQUARE = QColor("#007fff")
 PROJECTED_ON_DARK_SQUARE = QColor("#00ffff")
@@ -105,6 +106,7 @@ class ProjectorWindow(QWidget):
             tuple[int, int],
             tuple[int, int],
         ] | None = None
+        self._reconciliation_squares: tuple[tuple[int, int], ...] = ()
         self._move_squares: tuple[
             tuple[int, int, bool],
             tuple[int, int, bool],
@@ -258,6 +260,23 @@ class ProjectorWindow(QWidget):
         self._display_mode = "correction"
         self.update()
 
+    def show_reconciliation(
+        self,
+        squares: tuple[tuple[int, int], ...],
+    ) -> None:
+        if self._projector_grid is None:
+            raise RuntimeError("No calibrated projector grid is available.")
+        if not squares:
+            raise ValueError("At least one reconciliation square is required.")
+        for row, column in squares:
+            if not 0 <= row < 8 or not 0 <= column < 8:
+                raise ValueError(
+                    "Projected reconciliation squares must be inside the board."
+                )
+        self._reconciliation_squares = tuple(dict.fromkeys(squares))
+        self._display_mode = "reconciliation"
+        self.update()
+
     def paintEvent(self, event: QPaintEvent) -> None:
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor(0, 0, 0))
@@ -351,6 +370,19 @@ class ProjectorWindow(QWidget):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(PROJECTED_ILLEGAL_MOVE)
             for row, column in (source, destination):
+                painter.drawPolygon(
+                    self._polygon(polygons[row * 8 + column])
+                )
+        elif (
+            self._display_mode == "reconciliation"
+            and self._projector_grid is not None
+            and self._reconciliation_squares
+        ):
+            polygons = square_polygons(self._projector_grid)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(PROJECTED_ILLEGAL_MOVE)
+            for row, column in self._reconciliation_squares:
                 painter.drawPolygon(
                     self._polygon(polygons[row * 8 + column])
                 )

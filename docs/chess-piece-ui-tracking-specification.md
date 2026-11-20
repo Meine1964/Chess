@@ -507,6 +507,14 @@ acceptance. Reference-relative physical piece-color classification has also
 passed live acceptance for white and black captures and wrong-color rejection;
 arbitrary-position setup remains future work.
 
+Physical-board reconciliation shall be an explicit, non-authoritative workflow.
+Stable absolute occupancy shall be compared with the accepted legal position,
+and the UI shall list missing expected pieces and unexpected occupied squares.
+All mismatches shall be projected red before the projector returns to black for
+the next verification. Reconciliation shall never change the FEN, turn, or
+piece identities, and shall replace the accepted camera reference only after
+occupancy matches exactly.
+
 ### Milestone 1: Asset import
 
 - Download the twelve SVG files from the pinned Lichess revision.

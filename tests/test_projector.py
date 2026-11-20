@@ -154,4 +154,11 @@ def test_projector_renders_patterns_and_calibrated_squares(
     assert correction_image.pixelColor(145, 64) == PROJECTED_ILLEGAL_MOVE
     assert correction_image.pixelColor(205, 99) == PROJECTED_ILLEGAL_MOVE
     assert correction_image.pixelColor(175, 64).red() == 0
+
+    window.show_reconciliation(((2, 3), (4, 5)))
+    application.processEvents()
+    reconciliation_image = window.grab().toImage()
+    assert reconciliation_image.pixelColor(145, 64) == PROJECTED_ILLEGAL_MOVE
+    assert reconciliation_image.pixelColor(205, 99) == PROJECTED_ILLEGAL_MOVE
+    assert reconciliation_image.pixelColor(175, 64).red() == 0
     window.close()

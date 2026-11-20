@@ -1,7 +1,7 @@
 # Lichess Physical-Board Integration Roadmap
 
 **Version:** 0.5
-**Status:** Phase 2 and Phase 3 live-accepted; Phase 4 first slice implemented
+**Status:** Phases 2-3 live-accepted; Phase 4-5 first slices implemented
 **Platform:** Python on Windows  
 
 **Related specifications:**
@@ -439,6 +439,31 @@ The UI shall identify the expected pieces and squares.
 Occupancy cannot detect two pieces exchanged between occupied squares. Piece
 color may detect opposite-color swaps, but exact piece identity remains
 dependent on accepted move history and the legal position.
+
+### 8.1 First reconciliation slice
+
+The first implementation shall be explicitly started by the user. It shall:
+
+- Preserve the authoritative FEN, turn, and piece identities throughout.
+- Compare stable absolute physical occupancy with the authoritative position.
+- Report each expected occupied square that is physically empty, including the
+  expected piece color and type.
+- Report each expected empty square that is physically occupied.
+- Project every mismatching square in red for two seconds, then return the
+  projector to black before collecting the next occupancy observation.
+- Allow reconciliation to be cancelled without changing accepted state.
+- Replace the accepted camera reference only after physical occupancy matches
+  the authoritative position exactly.
+
+The first slice shall not claim to detect same-occupancy piece swaps. Color
+evidence and exact piece-identity reconciliation remain later Phase 5 work.
+
+**Implementation status:** The explicit occupancy-reconciliation workflow,
+structured discrepancy guidance, cancellation, repeated red mismatch
+projection, and reference replacement after an exact match are implemented and
+live-accepted. A physical missing/extra-square mismatch was identified,
+projected, corrected, reverified with the projector black, and completed without
+changing the authoritative game.
 
 ## 9. Phase 6: Read-Only Lichess Connectivity
 

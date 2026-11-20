@@ -70,6 +70,7 @@ from .projector_calibration import (
     bgr_to_gray,
     detect_board_orientation,
 )
+from .reconciliation import compare_physical_occupancy
 from .reference_move_tracker import (
     ReferenceMoveTracker,
     ReferenceTrackerUpdate,
@@ -323,6 +324,7 @@ class CameraWindow(QMainWindow):
             frozenset[tuple[int, int]] | None
         ) = None
         self._reset_to_start_requested = False
+        self._reconciliation_requested = False
         self._last_rejected_move: (
             tuple[tuple[int, int], tuple[int, int]] | None
         ) = None
@@ -415,11 +417,17 @@ class CameraWindow(QMainWindow):
             self._reset_pieces_to_start
         )
         self._reset_pieces_button.setEnabled(False)
+        self._reconcile_button = QPushButton("Reconcile physical board")
+        self._reconcile_button.clicked.connect(
+            self._toggle_physical_reconciliation
+        )
+        self._reconcile_button.setEnabled(False)
         button_layout = QHBoxLayout()
         button_layout.addWidget(self._snapshot_button)
         button_layout.addWidget(self._resume_button)
         button_layout.addWidget(self._save_diagnostics)
         button_layout.addWidget(self._reset_pieces_button)
+        button_layout.addWidget(self._reconcile_button)
 
         self._screens = list(QGuiApplication.screens())
         self._projector_selector = QComboBox()
@@ -1377,6 +1385,9 @@ class CameraWindow(QMainWindow):
         )
         self._board_widget.setEnabled(True)
         self._reset_pieces_button.setEnabled(True)
+        self._reconcile_button.setEnabled(
+            self._piece_synchronizer.initialized
+        )
         self._show_grid_button.setEnabled(True)
         self._show_squares_button.setEnabled(True)
         self._quick_verify_button.setEnabled(True)
@@ -1421,6 +1432,9 @@ class CameraWindow(QMainWindow):
         self._projector_window.clear_projector_grid()
         self._board_widget.setEnabled(True)
         self._reset_pieces_button.setEnabled(True)
+        self._reconcile_button.setEnabled(
+            self._piece_synchronizer.initialized
+        )
         self._show_grid_button.setEnabled(False)
         self._show_squares_button.setEnabled(False)
         self._quick_verify_button.setEnabled(False)
@@ -1451,6 +1465,9 @@ class CameraWindow(QMainWindow):
         self._projector_window.clear_projector_grid()
         self._board_widget.setEnabled(False)
         self._reset_pieces_button.setEnabled(False)
+        self._reconciliation_requested = False
+        self._reconcile_button.setText("Reconcile physical board")
+        self._reconcile_button.setEnabled(False)
         self._show_grid_button.setEnabled(False)
         self._show_squares_button.setEnabled(False)
         self._quick_verify_button.setEnabled(False)
@@ -1609,6 +1626,7 @@ class CameraWindow(QMainWindow):
         if (
             self._reference_move_tracker.initialized
             and not self._reset_to_start_requested
+            and not self._reconciliation_requested
         ):
             self._update_reference_move_tracking()
             return
@@ -1681,11 +1699,17 @@ class CameraWindow(QMainWindow):
             if self._reset_to_start_requested:
                 self._complete_starting_position_reset(stable_occupied)
                 return
+            if self._reconciliation_requested:
+                self._update_physical_reconciliation(stable_occupied)
+                return
             position_update = self._piece_synchronizer.observe(
                 stable_occupied,
             )
             self._board_widget.set_pieces(position_update.position)
             self._persist_piece_position(position_update.position)
+            self._reconcile_button.setEnabled(
+                self._piece_synchronizer.initialized
+            )
             self._piece_status.setText(position_update.message)
             if (
                 self._piece_synchronizer.initialized
@@ -1992,6 +2016,115 @@ class CameraWindow(QMainWindow):
         self._alignment_monitor.set_black()
         self._projector_status.setText(
             "Illegal-move indication finished; projector returned to black."
+        )
+
+    def _toggle_physical_reconciliation(self) -> None:
+        if self._reconciliation_requested:
+            self._reconciliation_requested = False
+            self._reconcile_button.setText("Reconcile physical board")
+            self._black_projector()
+            self._occupancy_detector.reset()
+            self._reference_move_tracker.reset_activity()
+            self._occupancy_status.setText(
+                "Physical-board reconciliation cancelled."
+            )
+            return
+        if (
+            self._calibration_result is None
+            or not self._piece_synchronizer.initialized
+        ):
+            QMessageBox.warning(
+                self,
+                "Physical-board reconciliation",
+                "A calibrated board and accepted position are required.",
+            )
+            return
+        self._reconciliation_requested = True
+        self._reconcile_button.setText("Cancel reconciliation")
+        self._board_widget.set_illegal_source(None)
+        self._last_rejected_move = None
+        self._black_projector()
+        self._occupancy_detector.reset()
+        self._reference_move_tracker.reset_activity()
+        self._occupancy_status.setText(
+            "Reconciliation started; checking stable physical occupancy."
+        )
+        self._piece_status.setText(
+            "Keep the board clear while mismatching squares are checked."
+        )
+
+    def _update_physical_reconciliation(
+        self,
+        physically_occupied: frozenset[tuple[int, int]],
+    ) -> None:
+        result = compare_physical_occupancy(
+            self._piece_synchronizer.position,
+            physically_occupied,
+        )
+        self._board_widget.set_occupied_squares(physically_occupied)
+        self._piece_status.setText(result.message)
+        if result.matches:
+            if self._latest_frame is None or self._calibration_result is None:
+                raise RuntimeError(
+                    "Reconciliation matched without a calibrated frame."
+                )
+            self._reference_move_tracker.set_reference(
+                self._latest_frame,
+                self._calibration_result.mapping.camera_grid,
+                self._board_quarter_turns,
+            )
+            self._persist_move_reference()
+            self._reconciliation_requested = False
+            self._reconcile_button.setText("Reconcile physical board")
+            self._occupancy_status.setText(
+                "Reconciliation complete; accepted reference replaced."
+            )
+            self._piece_status.setText(
+                _accepted_position_message(self._legal_game)
+                if self._game_mode == "offline-game"
+                else "Physical and UI piece positions are synchronized."
+            )
+            return
+        self._occupancy_status.setText(
+            "Reconciliation found mismatching physical squares."
+        )
+        if self._camera_only_calibration:
+            self._projector_status.setText(
+                "Reconciliation mismatches are listed in the UI; physical "
+                "projection is unavailable."
+            )
+            return
+        if self._calibration_result is None or not self._open_projector():
+            self._projector_status.setText(
+                "Reconciliation mismatches are listed in the UI, but no "
+                "calibrated projector is available."
+            )
+            return
+        physical_squares = tuple(
+            self._physical_board_square(*square)
+            for square in result.mismatch_squares
+        )
+        try:
+            self._projector_window.show_reconciliation(physical_squares)
+        except (RuntimeError, ValueError) as error:
+            self._projector_status.setText(
+                f"Reconciliation projection failed: {error}"
+            )
+            return
+        self._alignment_monitor.set_paused("physical-board reconciliation")
+        self._projector_status.setText(
+            "Projecting all occupancy mismatches in red for 2 seconds."
+        )
+        QTimer.singleShot(2000, self._finish_reconciliation_projection)
+
+    def _finish_reconciliation_projection(self) -> None:
+        if self._projector_window.output_mode != "reconciliation":
+            return
+        self._projector_window.show_black()
+        self._alignment_monitor.set_black()
+        self._occupancy_detector.reset()
+        self._projector_status.setText(
+            "Reconciliation projection finished; checking occupancy again."
         )
 
     def _physical_board_square(
