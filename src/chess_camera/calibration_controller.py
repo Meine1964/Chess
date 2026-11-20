@@ -73,9 +73,9 @@ class ProjectorCalibrationController(QObject):
         projector: ProjectorWindow,
         detector: BoardDetector,
         *,
-        settle_milliseconds: int = 250,
+        settle_milliseconds: int = 1000,
         frames_per_state: int = 3,
-        intensity: int = 112,
+        intensity: int = 255,
         maximum_refinement_iterations: int = 2,
         capture_timeout_milliseconds: int = 3000,
     ) -> None:
@@ -141,6 +141,14 @@ class ProjectorCalibrationController(QObject):
     @property
     def coded_pattern_mode(self) -> bool:
         return self._coded_pattern_mode
+
+    @property
+    def diagnostic_captures(self) -> dict[str, GrayImage]:
+        return {
+            name: image.copy()
+            for name, image in self._captures.items()
+            if name in {"black", "white", "coded"}
+        }
 
     def start(self, projector_width: int, projector_height: int) -> None:
         if self._active:

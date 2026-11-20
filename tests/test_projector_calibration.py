@@ -71,6 +71,20 @@ def test_coded_marker_pattern_decodes_absolute_projector_coordinates() -> None:
     assert np.max(np.abs(camera_points - projector_points)) < 0.5
 
 
+def test_coded_marker_error_reports_measured_response() -> None:
+    pattern = coded_marker_pattern(1280, 720)
+
+    with pytest.raises(
+        CalibrationError,
+        match=r"insufficient camera response \(0\.0 grayscale levels",
+    ):
+        detect_coded_marker_correspondences(
+            np.zeros_like(pattern.image),
+            np.zeros_like(pattern.image),
+            pattern,
+        )
+
+
 def test_coded_mapping_uses_measured_visible_lattice() -> None:
     width = 1280
     height = 720
@@ -177,6 +191,76 @@ def test_coded_mapping_uses_measured_visible_lattice() -> None:
         )
         < 1.5
     )
+
+
+def test_middle_lattice_accepts_verified_internal_corners_on_populated_board(
+) -> None:
+    image = np.full((1080, 1920), 125, dtype=np.uint8)
+    canonical = np.empty((800, 800), dtype=np.uint8)
+    for row in range(8):
+        for column in range(8):
+            canonical[
+                row * 100 : (row + 1) * 100,
+                column * 100 : (column + 1) * 100,
+            ] = 190 if (row + column) % 2 == 0 else 45
+    for row in (0, 1, 6, 7):
+        for column in range(8):
+            cv2.circle(
+                canonical,
+                (column * 100 + 50, row * 100 + 50),
+                28,
+                90 if row < 2 else 15,
+                -1,
+            )
+
+    canonical_outer = np.asarray(
+        [[0, 0], [799, 0], [799, 799], [0, 799]],
+        dtype=np.float32,
+    )
+    camera_outer = np.asarray(
+        [[625, 306], [1039, 310], [1063, 679], [559, 675]],
+        dtype=np.float32,
+    )
+    homography = cv2.getPerspectiveTransform(
+        canonical_outer,
+        camera_outer,
+    )
+    board = cv2.warpPerspective(
+        canonical,
+        homography,
+        (1920, 1080),
+        borderValue=125,
+    )
+    board_mask = cv2.warpPerspective(
+        np.full((800, 800), 255, dtype=np.uint8),
+        homography,
+        (1920, 1080),
+    )
+    image[board_mask > 0] = board[board_mask > 0]
+    model_grid = np.asarray(
+        [
+            (column * 100, row * 100)
+            for row in range(9)
+            for column in range(9)
+        ],
+        dtype=np.float32,
+    )
+    expected_grid = cv2.perspectiveTransform(
+        model_grid.reshape(-1, 1, 2),
+        homography,
+    ).reshape(9, 9, 2)
+    rough_detection = BoardDetection(
+        grid_points=expected_grid,
+        confidence=0.909,
+        reprojection_error=0.47,
+        method="internal corners",
+        grid_alignment=1.0,
+    )
+
+    refined = fit_visible_middle_lattice(image, rough_detection)
+
+    assert refined.method == "verified internal corners"
+    np.testing.assert_allclose(refined.grid_points, expected_grid)
 
 
 def test_gray_code_patterns_decode_projector_coordinates() -> None:

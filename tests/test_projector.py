@@ -12,7 +12,6 @@ from src.chess_camera.projector import (
     PROJECTED_ON_LIGHT_SQUARE,
     ProjectorWindow,
     focus_pattern,
-    target_rectangle,
 )
 
 
@@ -22,25 +21,6 @@ def application() -> QApplication:
     if isinstance(existing, QApplication):
         return existing
     return QApplication([])
-
-
-def test_target_rectangle_is_centered_and_square() -> None:
-    rectangle = target_rectangle(1280, 720, 50, 50, 10)
-
-    assert rectangle.width() == 72
-    assert rectangle.height() == 72
-    assert rectangle.center().x() in (639, 640)
-    assert rectangle.center().y() in (359, 360)
-
-
-def test_target_rectangle_stays_inside_projector_edges() -> None:
-    top_left = target_rectangle(1280, 720, 0, 0, 20)
-    bottom_right = target_rectangle(1280, 720, 100, 100, 20)
-
-    assert top_left.left() == 0
-    assert top_left.top() == 0
-    assert bottom_right.right() == 1279
-    assert bottom_right.bottom() == 719
 
 
 def test_focus_pattern_has_checkerboard_cross_and_border() -> None:
@@ -54,27 +34,6 @@ def test_focus_pattern_has_checkerboard_cross_and_border() -> None:
     assert np.all(pattern[:, 0] == 255)
     assert pattern[24, 20] == 255
     assert pattern[12, 40] == 255
-
-
-@pytest.mark.parametrize(
-    ("width", "height", "x", "y", "size"),
-    [
-        (0, 720, 50, 50, 10),
-        (1280, 0, 50, 50, 10),
-        (1280, 720, -1, 50, 10),
-        (1280, 720, 50, 101, 10),
-        (1280, 720, 50, 50, 0),
-    ],
-)
-def test_target_rectangle_rejects_invalid_values(
-    width: int,
-    height: int,
-    x: int,
-    y: int,
-    size: int,
-) -> None:
-    with pytest.raises(ValueError):
-        target_rectangle(width, height, x, y, size)
 
 
 def test_projector_renders_patterns_and_calibrated_squares(

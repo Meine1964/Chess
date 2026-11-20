@@ -141,7 +141,8 @@ def detect_coded_marker_correspondences(
     response = float(np.percentile(difference, 99))
     if response < 8:
         raise CalibrationError(
-            "The coded pattern produced insufficient camera response."
+            "The coded pattern produced insufficient camera response "
+            f"({response:.1f} grayscale levels at the 99th percentile)."
         )
     normalized = np.clip(
         np.rint(difference * (255.0 / response)),
@@ -214,6 +215,11 @@ def fit_visible_middle_lattice(
             .transpose(1, 0, 2)
         )
     if not observed_options:
+        if _is_verified_internal_corner_detection(rough_detection):
+            return replace(
+                rough_detection,
+                method="verified internal corners",
+            )
         raise CalibrationError(
             "The visible 7x5 middle-board intersections were not detected."
         )
@@ -254,6 +260,11 @@ def fit_visible_middle_lattice(
         )
     )
     if best_error > rough_square_width * 0.6:
+        if _is_verified_internal_corner_detection(rough_detection):
+            return replace(
+                rough_detection,
+                method="verified internal corners",
+            )
         raise CalibrationError(
             "The detected middle lattice does not agree with the rough "
             "board location."
@@ -356,6 +367,18 @@ def fit_visible_middle_lattice(
             else "visible 7x5 middle lattice with bounded outer anchors"
         ),
         grid_alignment=rough_detection.grid_alignment,
+    )
+
+
+def _is_verified_internal_corner_detection(
+    detection: BoardDetection,
+) -> bool:
+    return (
+        detection.method == "internal corners"
+        and detection.confidence >= 0.85
+        and detection.reprojection_error is not None
+        and detection.reprojection_error <= 1.0
+        and detection.grid_alignment >= 0.8
     )
 
 

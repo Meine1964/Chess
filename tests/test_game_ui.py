@@ -5,6 +5,7 @@ from src.chess_camera.camera_app import (
     _lichess_board_state,
     _lichess_game_state_message,
     _lichess_polling_snapshot_message,
+    _lichess_turn_indicator_state,
     _reference_tracking_status_message,
     _turn_indicator_state,
 )
@@ -43,6 +44,31 @@ def test_lichess_game_state_message_reports_clocks_and_result() -> None:
     assert _lichess_game_state_message(state) == (
         "Lichess: Black to move; White 1:05, Black 0:09; "
         "status started; result *."
+    )
+
+    assert _lichess_turn_indicator_state(state) == (
+        "#000000",
+        "Black to move (Lichess)",
+    )
+
+
+def test_lichess_turn_indicator_reports_completed_game() -> None:
+    state = LichessGameState(
+        (),
+        "unused",
+        "white",
+        0,
+        0,
+        0,
+        0,
+        "mate",
+        "black",
+        "0-1",
+    )
+
+    assert _lichess_turn_indicator_state(state) == (
+        "#808080",
+        "Lichess game over: 0-1",
     )
 
 

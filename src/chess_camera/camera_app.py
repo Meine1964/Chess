@@ -31,14 +31,15 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
     QProgressBar,
     QPushButton,
-    QSpinBox,
-    QTabWidget,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -58,7 +59,7 @@ from .chess_position import (
     starting_occupied_squares,
 )
 from .chessboard_widget import ChessboardWidget, rotate_square
-from .diagnostics import DiagnosticStore
+from .diagnostics import DiagnosticStore, RuntimeDiagnosticLog
 from .legal_game import GameMode, LegalGame, LegalMoveResult
 from .lichess_client import (
     AccountGameEvent,
@@ -67,7 +68,9 @@ from .lichess_client import (
     LichessGameState,
     LichessPollingSnapshot,
     LichessReadOnlyClient,
+    PlayerColor,
 )
+from .lichess_game_controller import LichessGameController
 from .lichess_worker import LichessConnectionWorker
 from .occupancy import (
     SquareOccupancyDetector,
@@ -91,9 +94,6 @@ _SETTINGS_ORGANIZATION = "ChessProject"
 _SETTINGS_APPLICATION = "ChessboardCamera"
 _CAMERA_SETTING = "camera/device_id"
 _PROJECTOR_SETTING = "projector/screen_name"
-_PROJECTOR_X_SETTING = "projector/target_x_percent"
-_PROJECTOR_Y_SETTING = "projector/target_y_percent"
-_PROJECTOR_SIZE_SETTING = "projector/target_size_percent"
 _PIECE_POSITION_SETTING = "pieces/accepted_position"
 _GAME_MODE_SETTING = "game/mode"
 _LEGAL_GAME_FEN_SETTING = "game/offline_fen"
@@ -198,6 +198,16 @@ def _lichess_game_state_message(state: LichessGameState) -> str:
     )
 
 
+def _lichess_turn_indicator_state(
+    state: LichessGameState,
+) -> tuple[str, str]:
+    if state.result != "*":
+        return "#808080", f"Lichess game over: {state.result}"
+    if state.turn == "white":
+        return "#ffffff", "White to move (Lichess)"
+    return "#000000", "Black to move (Lichess)"
+
+
 def _lichess_polling_snapshot_message(
     snapshot: LichessPollingSnapshot,
 ) -> str:
@@ -244,6 +254,13 @@ def _ui_square_from_name(name: str) -> tuple[int, int]:
     ):
         raise ValueError(f"Invalid chess square: {name}")
     return 8 - int(name[1]), ord(name[0]) - ord("a")
+
+
+def _diagnostic_position(position: Position) -> dict[str, PieceCode]:
+    return {
+        square_name(square): piece
+        for square, piece in sorted(position.items())
+    }
 
 
 def _is_external_camera(
@@ -322,6 +339,9 @@ class CameraWindow(QMainWindow):
             _PROJECT_ROOT / "diagnostics",
             max_captures=100,
         )
+        self._runtime_diagnostics = RuntimeDiagnosticLog(
+            _PROJECT_ROOT / "diagnostics"
+        )
         self._calibration_store = CalibrationStore(
             _PROJECT_ROOT / "calibrations"
         )
@@ -397,6 +417,14 @@ class CameraWindow(QMainWindow):
         self._lichess_worker: LichessConnectionWorker | None = None
         self._lichess_disconnect_requested = False
         self._close_pending = False
+        self._lichess_game_id: str | None = None
+        self._lichess_player_color: PlayerColor | None = None
+        self._lichess_opponent_name = ""
+        self._lichess_game_controller: LichessGameController | None = None
+        self._last_projected_lichess_uci: str | None = None
+        self._latest_lichess_state: LichessGameState | None = None
+        self._last_runtime_tracker_state: str | None = None
+        self._runtime_diagnostics_error: str | None = None
         self._latest_stable_occupied_ui: (
             frozenset[tuple[int, int]] | None
         ) = None
@@ -422,17 +450,13 @@ class CameraWindow(QMainWindow):
         self._capture_session.setVideoSink(self._video_sink)
 
         self._preview = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
-        self._preview.setMinimumSize(960, 540)
+        self._preview.setMinimumSize(480, 240)
         self._preview.setStyleSheet("background: #202020;")
         self._board_widget = ChessboardWidget()
+        self._board_widget.setMinimumSize(240, 240)
         self._lichess_board_widget = ChessboardWidget()
+        self._lichess_board_widget.setMinimumSize(280, 280)
         self._lichess_board_widget.setEnabled(False)
-        self._board_tabs = QTabWidget()
-        self._board_tabs.addTab(self._board_widget, "Physical position")
-        self._board_tabs.addTab(
-            self._lichess_board_widget,
-            "Lichess position",
-        )
         self._restore_piece_position()
         self._restore_game_mode()
         self._board_widget.setEnabled(False)
@@ -448,11 +472,13 @@ class CameraWindow(QMainWindow):
         )
 
         self._camera_selector = QComboBox()
+        self._camera_selector.setMaximumWidth(260)
         self._camera_selector.addItems(device_names)
         if selected_index is not None:
             self._camera_selector.setCurrentIndex(selected_index)
         self._camera_selector.setEnabled(bool(self._devices))
         self._game_mode_selector = QComboBox()
+        self._game_mode_selector.setMaximumWidth(260)
         self._game_mode_selector.addItem("Diagnostic movement", "diagnostic")
         self._game_mode_selector.addItem("Offline legal game", "offline-game")
         self._game_mode_selector.setCurrentIndex(
@@ -463,14 +489,17 @@ class CameraWindow(QMainWindow):
         )
         self._turn_indicator = QLabel()
         self._turn_indicator.setFixedSize(22, 22)
+        self._turn_text = QLabel()
 
         camera_layout = QHBoxLayout()
         camera_layout.addWidget(QLabel("Camera:"))
-        camera_layout.addWidget(self._camera_selector, stretch=1)
-        camera_layout.addWidget(QLabel("Move rules:"))
+        camera_layout.addWidget(self._camera_selector)
+        camera_layout.addWidget(QLabel("Rules:"))
         camera_layout.addWidget(self._game_mode_selector)
         camera_layout.addWidget(QLabel("Turn:"))
         camera_layout.addWidget(self._turn_indicator)
+        camera_layout.addWidget(self._turn_text)
+        camera_layout.addStretch(1)
         self._update_turn_indicator()
 
         self._camera_status = QLabel()
@@ -511,16 +540,17 @@ class CameraWindow(QMainWindow):
         self._lichess_button.clicked.connect(
             self._toggle_lichess_connection
         )
-        button_layout = QHBoxLayout()
-        button_layout.addWidget(self._snapshot_button)
-        button_layout.addWidget(self._resume_button)
-        button_layout.addWidget(self._save_diagnostics)
-        button_layout.addWidget(self._reset_pieces_button)
-        button_layout.addWidget(self._reconcile_button)
-        button_layout.addWidget(self._lichess_button)
+        button_layout = QGridLayout()
+        button_layout.addWidget(self._snapshot_button, 0, 0)
+        button_layout.addWidget(self._resume_button, 0, 1)
+        button_layout.addWidget(self._save_diagnostics, 0, 2)
+        button_layout.addWidget(self._reset_pieces_button, 1, 0)
+        button_layout.addWidget(self._reconcile_button, 1, 1)
+        button_layout.addWidget(self._lichess_button, 1, 2)
 
         self._screens = list(QGuiApplication.screens())
         self._projector_selector = QComboBox()
+        self._projector_selector.setMaximumWidth(360)
         primary_screen = QGuiApplication.primaryScreen()
         for screen in self._screens:
             self._projector_selector.addItem(
@@ -539,27 +569,8 @@ class CameraWindow(QMainWindow):
         )
         self._projector_selector.setCurrentIndex(projector_index)
 
-        self._target_x = self._percentage_spin_box(
-            int(self._settings.value(_PROJECTOR_X_SETTING, 50))
-        )
-        self._target_y = self._percentage_spin_box(
-            int(self._settings.value(_PROJECTOR_Y_SETTING, 50))
-        )
-        self._target_size = self._percentage_spin_box(
-            int(self._settings.value(_PROJECTOR_SIZE_SETTING, 10)),
-            minimum=1,
-            maximum=50,
-        )
-        self._target_x.valueChanged.connect(self._update_projector_target)
-        self._target_y.valueChanged.connect(self._update_projector_target)
-        self._target_size.valueChanged.connect(self._update_projector_target)
-
         self._open_projector_button = QPushButton("Open projector (black)")
         self._open_projector_button.clicked.connect(self._open_projector)
-        self._show_target_button = QPushButton("Show square")
-        self._show_target_button.clicked.connect(
-            self._show_manual_target
-        )
         self._focus_pattern_button = QPushButton("Focus pattern")
         self._focus_pattern_button.clicked.connect(
             self._show_focus_pattern
@@ -581,26 +592,39 @@ class CameraWindow(QMainWindow):
         )
         projector_display_layout.addWidget(self._open_projector_button)
 
-        projector_target_layout = QHBoxLayout()
-        projector_target_layout.addWidget(QLabel("Square center X:"))
-        projector_target_layout.addWidget(self._target_x)
-        projector_target_layout.addWidget(QLabel("Y:"))
-        projector_target_layout.addWidget(self._target_y)
-        projector_target_layout.addWidget(QLabel("Size:"))
-        projector_target_layout.addWidget(self._target_size)
-        projector_target_layout.addWidget(self._show_target_button)
-        projector_target_layout.addWidget(self._focus_pattern_button)
-        projector_target_layout.addWidget(self._black_projector_button)
-        projector_target_layout.addWidget(self._close_projector_button)
+        projector_actions_layout = QGridLayout()
+        projector_actions_layout.addWidget(
+            self._focus_pattern_button,
+            0,
+            0,
+        )
+        projector_actions_layout.addWidget(
+            self._black_projector_button,
+            0,
+            1,
+        )
+        projector_actions_layout.addWidget(
+            self._close_projector_button,
+            0,
+            2,
+        )
 
         self._start_calibration_button = QPushButton(
-            "Full projector calibration"
+            "Full calibration (empty board)"
+        )
+        self._start_calibration_button.setToolTip(
+            "Remove all pieces before running the accepted Gray-code "
+            "calibration."
         )
         self._start_calibration_button.clicked.connect(
             self._start_projector_calibration
         )
         self._coded_calibration_button = QPushButton(
-            "Full calibration - coded pattern"
+            "Populated calibration (experimental)"
+        )
+        self._coded_calibration_button.setToolTip(
+            "Experimental hardware path for recalibration without removing "
+            "the pieces. A failure retains the previous verified calibration."
         )
         self._coded_calibration_button.clicked.connect(
             self._start_coded_projector_calibration
@@ -632,14 +656,43 @@ class CameraWindow(QMainWindow):
             self._show_calibrated_squares
         )
         self._show_squares_button.setEnabled(False)
-        calibration_layout = QHBoxLayout()
-        calibration_layout.addWidget(self._start_calibration_button)
-        calibration_layout.addWidget(self._coded_calibration_button)
-        calibration_layout.addWidget(self._validate_calibration_button)
-        calibration_layout.addWidget(self._quick_verify_button)
-        calibration_layout.addWidget(self._cancel_calibration_button)
-        calibration_layout.addWidget(self._show_grid_button)
-        calibration_layout.addWidget(self._show_squares_button)
+        calibration_layout = QGridLayout()
+        calibration_layout.addWidget(self._start_calibration_button, 0, 0)
+        calibration_layout.addWidget(self._coded_calibration_button, 0, 1)
+        calibration_layout.addWidget(
+            self._validate_calibration_button,
+            0,
+            2,
+        )
+        calibration_layout.addWidget(self._quick_verify_button, 0, 3)
+        calibration_layout.addWidget(self._cancel_calibration_button, 1, 0)
+        calibration_layout.addWidget(self._show_grid_button, 1, 1)
+        calibration_layout.addWidget(
+            self._show_squares_button,
+            1,
+            2,
+            1,
+            2,
+        )
+        for button in (
+            self._snapshot_button,
+            self._resume_button,
+            self._reset_pieces_button,
+            self._reconcile_button,
+            self._lichess_button,
+            self._open_projector_button,
+            self._focus_pattern_button,
+            self._black_projector_button,
+            self._close_projector_button,
+            self._start_calibration_button,
+            self._coded_calibration_button,
+            self._validate_calibration_button,
+            self._quick_verify_button,
+            self._cancel_calibration_button,
+            self._show_grid_button,
+            self._show_squares_button,
+        ):
+            button.setMaximumWidth(220)
 
         self._calibration_progress = QProgressBar()
         self._calibration_progress.setRange(0, 1)
@@ -697,34 +750,87 @@ class CameraWindow(QMainWindow):
         self._lichess_status.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
+        self._lichess_sync_status = QLabel(
+            "Lichess physical synchronization is inactive."
+        )
+        self._lichess_sync_status.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        for status_label in (
+            self._camera_status,
+            self._detection_status,
+            self._projector_status,
+            self._alignment_status,
+            self._occupancy_status,
+            self._piece_status,
+            self._lichess_status,
+            self._lichess_sync_status,
+            self._instructions,
+        ):
+            status_label.setWordWrap(True)
 
-        content_layout = QHBoxLayout()
-        content_layout.addWidget(self._preview, stretch=3)
-        content_layout.addWidget(self._board_tabs, stretch=2)
+        camera_panel = QGroupBox("Camera")
+        camera_panel_layout = QVBoxLayout()
+        camera_panel_layout.addWidget(self._preview)
+        camera_panel.setLayout(camera_panel_layout)
+
+        physical_panel = QGroupBox("Physical position")
+        physical_panel_layout = QVBoxLayout()
+        physical_panel_layout.addWidget(self._board_widget)
+        physical_panel.setLayout(physical_panel_layout)
+
+        lichess_panel = QGroupBox("Lichess position")
+        lichess_panel_layout = QVBoxLayout()
+        lichess_panel_layout.addWidget(self._lichess_board_widget)
+        lichess_panel.setLayout(lichess_panel_layout)
+
+        interaction_content = QWidget()
+        interaction_layout = QVBoxLayout()
+        interaction_layout.addLayout(camera_layout)
+        interaction_layout.addLayout(button_layout)
+        interaction_layout.addLayout(projector_display_layout)
+        interaction_layout.addLayout(projector_actions_layout)
+        interaction_layout.addLayout(calibration_layout)
+        interaction_layout.addWidget(self._calibration_progress)
+        interaction_layout.addLayout(calibration_indicator_layout)
+        interaction_layout.addWidget(self._camera_status)
+        interaction_layout.addWidget(self._detection_status)
+        interaction_layout.addWidget(self._projector_status)
+        interaction_layout.addWidget(self._alignment_status)
+        interaction_layout.addWidget(self._occupancy_status)
+        interaction_layout.addWidget(self._piece_status)
+        interaction_layout.addWidget(self._lichess_status)
+        interaction_layout.addWidget(self._lichess_sync_status)
+        interaction_layout.addWidget(self._instructions)
+        interaction_layout.addStretch(1)
+        interaction_content.setLayout(interaction_layout)
+
+        interaction_scroll = QScrollArea()
+        interaction_scroll.setWidgetResizable(True)
+        interaction_scroll.setWidget(interaction_content)
+        interaction_panel = QGroupBox("Interaction")
+        interaction_panel_layout = QVBoxLayout()
+        interaction_panel_layout.addWidget(interaction_scroll)
+        interaction_panel.setLayout(interaction_panel_layout)
+
+        quadrant_layout = QGridLayout()
+        quadrant_layout.addWidget(camera_panel, 0, 0)
+        quadrant_layout.addWidget(physical_panel, 0, 1)
+        quadrant_layout.addWidget(interaction_panel, 1, 0)
+        quadrant_layout.addWidget(lichess_panel, 1, 1)
+        quadrant_layout.setColumnStretch(0, 3)
+        quadrant_layout.setColumnStretch(1, 2)
+        quadrant_layout.setRowStretch(0, 2)
+        quadrant_layout.setRowStretch(1, 3)
 
         layout = QVBoxLayout()
-        layout.addLayout(content_layout, stretch=1)
-        layout.addLayout(camera_layout)
-        layout.addLayout(button_layout)
-        layout.addLayout(projector_display_layout)
-        layout.addLayout(projector_target_layout)
-        layout.addLayout(calibration_layout)
-        layout.addWidget(self._calibration_progress)
-        layout.addLayout(calibration_indicator_layout)
-        layout.addWidget(self._camera_status)
-        layout.addWidget(self._detection_status)
-        layout.addWidget(self._projector_status)
-        layout.addWidget(self._alignment_status)
-        layout.addWidget(self._occupancy_status)
-        layout.addWidget(self._piece_status)
-        layout.addWidget(self._lichess_status)
-        layout.addWidget(self._instructions)
+        layout.addLayout(quadrant_layout)
         container = QWidget()
         container.setLayout(layout)
         self.setCentralWidget(container)
 
         self.setWindowTitle("Chessboard Camera Detection")
-        self.resize(1450, 900)
+        self.resize(1500, 900)
         self._projector_selector.currentIndexChanged.connect(
             self._projector_selection_changed
         )
@@ -750,18 +856,10 @@ class CameraWindow(QMainWindow):
             self._wait_for_external_camera()
         else:
             self._start_camera(selected_index)
-
-    @staticmethod
-    def _percentage_spin_box(
-        value: int,
-        minimum: int = 0,
-        maximum: int = 100,
-    ) -> QSpinBox:
-        spin_box = QSpinBox()
-        spin_box.setRange(minimum, maximum)
-        spin_box.setSuffix("%")
-        spin_box.setValue(min(max(value, minimum), maximum))
-        return spin_box
+        self._record_runtime_diagnostic(
+            "application-started",
+            "Chessboard camera application started.",
+        )
 
     @staticmethod
     def _default_projector_index(
@@ -926,6 +1024,15 @@ class CameraWindow(QMainWindow):
         )
         self._restore_saved_calibration()
         self._restore_move_reference()
+        self._record_runtime_diagnostic(
+            "camera-started",
+            f"Camera started: {device.description()}.",
+            details={
+                "selected_index": device_index,
+                "resolution": [resolution.width(), resolution.height()],
+                "maximum_fps": active_format.maxFrameRate(),
+            },
+        )
 
     def _camera_selection_changed(self, selected_index: int) -> None:
         previous_index = self._active_device_index
@@ -935,6 +1042,11 @@ class CameraWindow(QMainWindow):
             self._camera_selector.blockSignals(True)
             self._camera_selector.setCurrentIndex(previous_index)
             self._camera_selector.blockSignals(False)
+            self._record_runtime_diagnostic(
+                "camera-selection-failed",
+                str(error),
+                details={"requested_index": selected_index},
+            )
             QMessageBox.critical(self, "Camera error", str(error))
 
     def _camera_devices_changed(self) -> None:
@@ -1016,10 +1128,21 @@ class CameraWindow(QMainWindow):
         self._detection_status.setText(
             f"Camera error ({error.name}): {error_string}"
         )
+        self._record_runtime_diagnostic(
+            "camera-error",
+            error_string,
+            details={"error": error.name},
+            include_images=True,
+        )
 
     def _open_projector(self) -> bool:
         selected_index = self._projector_selector.currentIndex()
         if not 0 <= selected_index < len(self._screens):
+            self._record_runtime_diagnostic(
+                "projector-open-failed",
+                "The selected projector display is no longer available.",
+                details={"selected_index": selected_index},
+            )
             QMessageBox.critical(
                 self,
                 "Projector error",
@@ -1029,10 +1152,14 @@ class CameraWindow(QMainWindow):
 
         screen = self._screens[selected_index]
         self._projector_window.show_black()
-        self._update_projector_target()
         try:
             self._projector_window.show_on_screen(screen)
         except RuntimeError as error:
+            self._record_runtime_diagnostic(
+                "projector-open-failed",
+                str(error),
+                details={"screen": screen.name()},
+            )
             QMessageBox.critical(self, "Projector error", str(error))
             return False
 
@@ -1043,27 +1170,12 @@ class CameraWindow(QMainWindow):
             f"Projector open black on {screen.name()} at "
             f"{geometry.width()}x{geometry.height()}."
         )
+        self._record_runtime_diagnostic(
+            "projector-opened",
+            self._projector_status.text(),
+            details={"screen": screen.name()},
+        )
         return True
-
-    def _update_projector_target(self) -> None:
-        self._projector_window.set_target(
-            self._target_x.value(),
-            self._target_y.value(),
-            self._target_size.value(),
-        )
-        self._settings.setValue(
-            _PROJECTOR_X_SETTING,
-            self._target_x.value(),
-        )
-        self._settings.setValue(
-            _PROJECTOR_Y_SETTING,
-            self._target_y.value(),
-        )
-        self._settings.setValue(
-            _PROJECTOR_SIZE_SETTING,
-            self._target_size.value(),
-        )
-        self._settings.sync()
 
     def _start_projector_calibration(self) -> None:
         if self._latest_frame is None:
@@ -1078,7 +1190,19 @@ class CameraWindow(QMainWindow):
 
         selected_index = self._projector_selector.currentIndex()
         screen_geometry = self._screens[selected_index].geometry()
-        self._invalidate_calibration()
+        previous_calibration_available = self._calibration_result is not None
+        self._record_runtime_diagnostic(
+            "calibration-start-requested",
+            "Full projector calibration requested.",
+            details={
+                "operation": "full",
+                "previous_calibration_available": (
+                    previous_calibration_available
+                ),
+            },
+            include_images=True,
+        )
+        self._suspend_selected_square()
         try:
             self._calibrator.start(
                 screen_geometry.width(),
@@ -1102,6 +1226,17 @@ class CameraWindow(QMainWindow):
         self._suspend_selected_square()
         selected_index = self._projector_selector.currentIndex()
         screen_geometry = self._screens[selected_index].geometry()
+        self._record_runtime_diagnostic(
+            "calibration-start-requested",
+            "Coded-pattern calibration requested.",
+            details={
+                "operation": "coded-pattern",
+                "previous_calibration_available": (
+                    self._calibration_result is not None
+                ),
+            },
+            include_images=True,
+        )
         try:
             self._calibrator.start_coded_pattern(
                 screen_geometry.width(),
@@ -1137,6 +1272,12 @@ class CameraWindow(QMainWindow):
         self._suspend_selected_square()
         selected_index = self._projector_selector.currentIndex()
         screen_geometry = self._screens[selected_index].geometry()
+        self._record_runtime_diagnostic(
+            "calibration-start-requested",
+            "Quick calibration verification requested.",
+            details={"operation": "quick-verification"},
+            include_images=True,
+        )
         try:
             self._calibrator.start_verification(
                 result,
@@ -1173,6 +1314,12 @@ class CameraWindow(QMainWindow):
         self._suspend_selected_square()
         selected_index = self._projector_selector.currentIndex()
         screen_geometry = self._screens[selected_index].geometry()
+        self._record_runtime_diagnostic(
+            "calibration-start-requested",
+            "Calibration validation requested.",
+            details={"operation": "validation"},
+            include_images=True,
+        )
         try:
             self._calibrator.start_validation_only(
                 result,
@@ -1196,11 +1343,6 @@ class CameraWindow(QMainWindow):
         self._projector_status.setText(
             "Projector is black; the selected board square is remembered."
         )
-
-    def _show_manual_target(self) -> None:
-        self._suspend_selected_square()
-        self._projector_window.show_target()
-        self._alignment_monitor.set_paused("manual projector target")
 
     def _show_focus_pattern(self) -> None:
         if not self._open_projector():
@@ -1278,16 +1420,22 @@ class CameraWindow(QMainWindow):
         self._camera_selector.setEnabled(not active)
         self._projector_selector.setEnabled(not active)
         self._open_projector_button.setEnabled(not active)
-        self._show_target_button.setEnabled(not active)
         self._focus_pattern_button.setEnabled(not active)
         self._close_projector_button.setEnabled(not active)
         self._snapshot_button.setEnabled(not active and not self._snapshot_visible)
+        self._board_widget.setEnabled(
+            not active and self._calibration_result is not None
+        )
         if active:
             self._alignment_monitor.set_paused("projector calibration")
 
     def _cancel_projector_calibration(self) -> None:
         self._calibrator.cancel()
         self._restore_remembered_square()
+        self._record_runtime_diagnostic(
+            "calibration-cancelled",
+            "Projector calibration was cancelled.",
+        )
 
     def _projector_calibration_completed(
         self,
@@ -1332,18 +1480,34 @@ class CameraWindow(QMainWindow):
                 f"{self._projector_status.text()} "
                 f"Saved to calibrations/{saved_path.name}."
             )
+        self._record_runtime_diagnostic(
+            "calibration-completed",
+            self._projector_status.text(),
+            details={
+                "board_confidence": result.board_detection.confidence,
+                "board_method": result.board_detection.method,
+                "board_reprojection_error_pixels": (
+                    result.board_detection.reprojection_error
+                ),
+                "mapping_coverage_ratio": result.mapping.coverage_ratio,
+                "mapping_inlier_ratio": result.mapping.inlier_ratio,
+                "mapping_rms_error_projector_pixels": (
+                    result.mapping.rms_error
+                ),
+                "validation_rms_error_camera_pixels": (
+                    result.validation.rms_error
+                ),
+                "validation_maximum_error_camera_pixels": (
+                    result.validation.maximum_error
+                ),
+            },
+            include_images=True,
+        )
         self._restore_remembered_square()
 
     def _projector_calibration_failed(self, message: str) -> None:
         self._projector_window.show_black()
-        if (
-            (
-                self._calibrator.quick_verification
-                or self._calibrator.validation_only
-                or self._calibrator.coded_pattern_mode
-            )
-            and self._calibration_result is not None
-        ):
+        if self._calibration_result is not None:
             result = self._calibration_result
             self._projector_window.set_projector_grid(
                 result.mapping.projector_grid
@@ -1357,15 +1521,14 @@ class CameraWindow(QMainWindow):
                 (geometry.width(), geometry.height()),
             )
             self._alignment_monitor.set_black()
-            operation = (
-                "Quick realignment"
-                if self._calibrator.quick_verification
-                else (
-                    "Validation"
-                    if self._calibrator.validation_only
-                    else "Coded-pattern calibration"
-                )
-            )
+            if self._calibrator.quick_verification:
+                operation = "Quick realignment"
+            elif self._calibrator.validation_only:
+                operation = "Validation"
+            elif self._calibrator.coded_pattern_mode:
+                operation = "Coded-pattern calibration"
+            else:
+                operation = "Full calibration"
             self._projector_status.setText(
                 f"{operation} failed: {message} The previous verified "
                 "calibration remains active."
@@ -1376,6 +1539,21 @@ class CameraWindow(QMainWindow):
                     "Projector calibration validation failed",
                     message,
                 )
+            self._record_runtime_diagnostic(
+                "calibration-failed",
+                message,
+                details={
+                    "operation": operation,
+                    "previous_calibration_retained": True,
+                },
+                include_images=True,
+                additional_images={
+                    f"calibration-{name}": image
+                    for name, image in (
+                        self._calibrator.diagnostic_captures.items()
+                    )
+                },
+            )
             self._restore_remembered_square()
             return
         self._invalidate_calibration()
@@ -1385,6 +1563,19 @@ class CameraWindow(QMainWindow):
             "error",
             message,
         )
+        self._record_runtime_diagnostic(
+            "calibration-failed",
+            message,
+            details={
+                "operation": "full",
+                "previous_calibration_retained": False,
+            },
+            include_images=True,
+            additional_images={
+                f"calibration-{name}": image
+                for name, image in self._calibrator.diagnostic_captures.items()
+            },
+        )
         QMessageBox.warning(
             self,
             "Projector calibration failed",
@@ -1392,6 +1583,7 @@ class CameraWindow(QMainWindow):
         )
 
     def _board_square_clicked(self, row: int, column: int) -> None:
+        clicked_square = f"{chr(ord('a') + column)}{8 - row}"
         if (
             self._calibration_result is None
             or self._camera_only_calibration
@@ -1399,7 +1591,24 @@ class CameraWindow(QMainWindow):
             self._projector_status.setText(
                 "No matching projector calibration is available."
             )
+            self._record_runtime_diagnostic(
+                "board-square-projection-rejected",
+                self._projector_status.text(),
+                details={
+                    "square": clicked_square,
+                    "calibration_available": (
+                        self._calibration_result is not None
+                    ),
+                    "camera_only_calibration": self._camera_only_calibration,
+                },
+                include_images=True,
+            )
             return
+        self._record_runtime_diagnostic(
+            "board-square-clicked",
+            f"Physical board square {clicked_square} was clicked.",
+            details={"square": clicked_square},
+        )
         self._remembered_board_square = (row, column)
         self._board_widget.set_selected_square((row, column))
         if self._selected_board_square == (row, column):
@@ -1421,6 +1630,7 @@ class CameraWindow(QMainWindow):
         row: int,
         column: int,
     ) -> None:
+        clicked_square = f"{chr(ord('a') + column)}{8 - row}"
         if (
             self._pending_board_square != (row, column)
             or self._calibration_result is None
@@ -1443,6 +1653,12 @@ class CameraWindow(QMainWindow):
             )
         except (RuntimeError, ValueError) as error:
             self._pending_board_square = None
+            self._record_runtime_diagnostic(
+                "board-square-projection-failed",
+                str(error),
+                details={"square": clicked_square},
+                include_images=True,
+            )
             QMessageBox.warning(self, "Square projection", str(error))
             return
 
@@ -1457,6 +1673,16 @@ class CameraWindow(QMainWindow):
         square_name = f"{chr(ord('a') + column)}{8 - row}"
         self._projector_status.setText(
             f"Projecting {square_name} (row {row + 1}, column {column + 1})."
+        )
+        self._record_runtime_diagnostic(
+            "board-square-projected",
+            self._projector_status.text(),
+            details={
+                "square": square_name,
+                "physical_row": physical_row,
+                "physical_column": physical_column,
+            },
+            include_images=True,
         )
 
     def _activate_calibration_result(
@@ -1841,14 +2067,27 @@ class CameraWindow(QMainWindow):
     def _update_reference_move_tracking(self) -> None:
         if self._latest_frame is None or self._calibration_result is None:
             return
+        lichess_controller = self._lichess_game_controller
+        lichess_signature = (
+            None
+            if lichess_controller is None
+            else lichess_controller.expected_signature
+        )
+        tracking_position = (
+            self._piece_synchronizer.position
+            if lichess_controller is None
+            else lichess_controller.physical_position
+        )
         try:
             update = self._reference_move_tracker.observe(
                 self._latest_frame,
                 self._calibration_result.mapping.camera_grid,
                 self._board_quarter_turns,
-                self._piece_synchronizer.position,
+                tracking_position,
                 (
-                    self._legal_game.physical_move_signatures
+                    (lichess_signature,)
+                    if lichess_signature is not None
+                    else self._legal_game.physical_move_signatures
                     if self._game_mode == "offline-game"
                     else ()
                 ),
@@ -1861,6 +2100,23 @@ class CameraWindow(QMainWindow):
         status_message = _reference_tracking_status_message(update)
         if status_message is not None:
             self._occupancy_status.setText(status_message)
+        if (
+            update.state != self._last_runtime_tracker_state
+            or update.state
+            in {
+                "accepted",
+                "ambiguous",
+                "illegal-removal",
+                "pending-capture",
+            }
+        ):
+            self._last_runtime_tracker_state = update.state
+            self._record_runtime_diagnostic(
+                "reference-tracker",
+                update.message,
+                tracker_update=update,
+                include_images=True,
+            )
         rejected_move = self._last_rejected_move
         correction_restored = (
             rejected_move is not None
@@ -1875,10 +2131,34 @@ class CameraWindow(QMainWindow):
             self._occupancy_status.setText(
                 "Board matches the accepted reference."
             )
-            self._piece_status.setText(
-                _accepted_position_message(self._legal_game)
-            )
+            if (
+                lichess_controller is not None
+                and lichess_controller.state == "correction"
+            ):
+                synchronization = (
+                    lichess_controller.note_correction_restored()
+                )
+                self._piece_status.setText(synchronization.message)
+                self._lichess_sync_status.setText(
+                    synchronization.message
+                )
+                self._last_projected_lichess_uci = None
+                self._update_lichess_synchronization_projection()
+                self._record_runtime_diagnostic(
+                    "lichess-correction-restored",
+                    synchronization.message,
+                    include_images=True,
+                )
+            else:
+                self._piece_status.setText(
+                    _accepted_position_message(self._legal_game)
+                )
         if update.state == "illegal-removal" and update.move is not None:
+            if lichess_controller is not None:
+                if lichess_signature is not None:
+                    lichess_controller.confirm_expected_move(update.move)
+                self._reject_unconfirmed_lichess_move(update.move)
+                return
             square = update.move[0]
             self._reference_move_tracker.reset_activity()
             newly_marked = self._last_rejected_move != update.move
@@ -1894,7 +2174,29 @@ class CameraWindow(QMainWindow):
             return
         source, destination = update.move
         legal_move: LegalMoveResult | None = None
-        if self._game_mode == "offline-game":
+        lichess_pending = (
+            lichess_controller is not None
+            and lichess_signature is not None
+        )
+        if lichess_controller is not None and not lichess_pending:
+            self._reject_unconfirmed_lichess_move(update.move)
+            return
+        if lichess_pending:
+            expected_move = (
+                lichess_signature.source,
+                lichess_signature.destination,
+            )
+            if update.move != expected_move:
+                lichess_controller.confirm_expected_move(update.move)
+                self._reject_unconfirmed_lichess_move(update.move)
+                return
+            legal_move = lichess_controller.pending_result
+            if legal_move is None:
+                self._lichess_sync_status.setText(
+                    "The pending Lichess move cannot be applied physically."
+                )
+                return
+        elif self._game_mode == "offline-game":
             try:
                 legal_move = self._legal_game.apply_move(
                     source,
@@ -1929,7 +2231,7 @@ class CameraWindow(QMainWindow):
             self._reference_move_tracker.commit_accepted(update.move)
         except ValueError as error:
             self._piece_synchronizer.restore(previous_position)
-            if legal_move is not None:
+            if legal_move is not None and not lichess_pending:
                 self._legal_game.rollback()
             self._reference_move_tracker.reset_activity()
             self._piece_status.setText(
@@ -1943,7 +2245,20 @@ class CameraWindow(QMainWindow):
         self._board_widget.set_last_move(update.move)
         self._persist_piece_position(position_update.position)
         self._persist_move_reference()
-        if legal_move is None:
+        if lichess_pending and lichess_controller is not None:
+            synchronization = lichess_controller.confirm_expected_move(
+                update.move
+            )
+            self._lichess_sync_status.setText(synchronization.message)
+            self._piece_status.setText(synchronization.message)
+            self._last_projected_lichess_uci = None
+            self._update_lichess_synchronization_projection()
+            self._record_runtime_diagnostic(
+                "lichess-physical-move-confirmed",
+                synchronization.message,
+                include_images=True,
+            )
+        elif legal_move is None:
             self._piece_status.setText(position_update.message)
         else:
             self._persist_game_state()
@@ -1952,7 +2267,8 @@ class CameraWindow(QMainWindow):
                 f"Legal move {legal_move.san} accepted; "
                 f"{legal_move.status.turn} to move."
             )
-        self._project_accepted_move(update.move)
+        if not lichess_pending:
+            self._project_accepted_move(update.move)
 
     def _reset_pieces_to_start(self) -> None:
         if self._latest_frame is None or self._calibration_result is None:
@@ -2051,6 +2367,92 @@ class CameraWindow(QMainWindow):
             f"Projecting move {source_name}-{destination_name} for 2 seconds."
         )
         QTimer.singleShot(2000, self._finish_move_projection)
+
+    def _update_lichess_synchronization_projection(self) -> None:
+        controller = self._lichess_game_controller
+        if controller is None:
+            return
+        signature = controller.expected_signature
+        if signature is None:
+            self._last_projected_lichess_uci = None
+            return
+        self._last_projected_lichess_uci = signature.uci
+        self._project_lichess_move_guidance(
+            (signature.source, signature.destination)
+        )
+
+    def _project_lichess_move_guidance(
+        self,
+        move: tuple[tuple[int, int], tuple[int, int]],
+    ) -> None:
+        source, destination = move
+        move_name = f"{square_name(source)}-{square_name(destination)}"
+        if self._camera_only_calibration:
+            self._projector_status.setText(
+                f"Lichess move {move_name} is pending; physical projection "
+                "is unavailable."
+            )
+            return
+        if self._calibration_result is None or not self._open_projector():
+            self._projector_status.setText(
+                f"Lichess move {move_name} is pending, but no calibrated "
+                "projector is available."
+            )
+            return
+        try:
+            self._projector_window.show_move(
+                self._physical_board_square(*source),
+                self._physical_board_square(*destination),
+                source_is_light=(sum(source) % 2 == 0),
+                destination_is_light=(sum(destination) % 2 == 0),
+            )
+        except (RuntimeError, ValueError) as error:
+            self._projector_status.setText(
+                f"Lichess move guidance failed: {error}"
+            )
+            return
+        self._alignment_monitor.set_paused("Lichess move guidance")
+        self._projector_status.setText(
+            f"Projecting pending Lichess move {move_name} for 2 seconds."
+        )
+        QTimer.singleShot(2000, self._finish_move_projection)
+
+    def _reject_unconfirmed_lichess_move(
+        self,
+        move: tuple[tuple[int, int], tuple[int, int]],
+    ) -> None:
+        controller = self._lichess_game_controller
+        self._reference_move_tracker.reset_activity()
+        newly_marked = self._last_rejected_move != move
+        self._last_rejected_move = move
+        self._board_widget.set_illegal_source(move[0])
+        expected = (
+            None if controller is None else controller.expected_signature
+        )
+        if expected is None:
+            message = (
+                f"Physical move {square_name(move[0])}-"
+                f"{square_name(move[1])} is not yet present in Lichess. "
+                "Restore the physical board and make the move in the "
+                "Lichess browser first."
+            )
+        else:
+            message = (
+                f"Physical move {square_name(move[0])}-"
+                f"{square_name(move[1])} does not match pending Lichess move "
+                f"{square_name(expected.source)}-"
+                f"{square_name(expected.destination)}. Restore the board or "
+                "complete the pending move."
+            )
+        self._piece_status.setText(message)
+        self._lichess_sync_status.setText(message)
+        self._record_runtime_diagnostic(
+            "lichess-physical-move-rejected",
+            message,
+            include_images=True,
+        )
+        if newly_marked:
+            self._project_illegal_move_correction(move)
 
     def _project_illegal_move_correction(
         self,
@@ -2357,14 +2759,16 @@ class CameraWindow(QMainWindow):
         worker = LichessConnectionWorker(client)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.status_changed.connect(self._lichess_status.setText)
+        worker.status_changed.connect(
+            self._lichess_connection_status_changed
+        )
         worker.account_event_received.connect(
             self._lichess_account_event_received
         )
         worker.game_event_received.connect(
             self._lichess_game_event_received
         )
-        worker.failed.connect(self._lichess_status.setText)
+        worker.failed.connect(self._lichess_connection_failed)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(self._lichess_thread_finished)
@@ -2374,12 +2778,36 @@ class CameraWindow(QMainWindow):
         self._lichess_disconnect_requested = False
         self._lichess_button.setText("Disconnect Lichess")
         self._lichess_status.setText("Connecting to Lichess...")
+        self._record_runtime_diagnostic(
+            "lichess-connect-requested",
+            "Connecting to Lichess.",
+        )
         thread.start()
+
+    def _lichess_connection_status_changed(self, message: str) -> None:
+        self._lichess_status.setText(message)
+        self._record_runtime_diagnostic(
+            "lichess-connection-status",
+            message,
+        )
+
+    def _lichess_connection_failed(self, message: str) -> None:
+        self._lichess_status.setText(message)
+        self._record_runtime_diagnostic(
+            "lichess-connection-failed",
+            message,
+        )
 
     def _lichess_account_event_received(self, event: object) -> None:
         if not isinstance(event, AccountGameEvent):
             return
         if event.event_type == "gameStart":
+            if event.game_id != self._lichess_game_id:
+                self._lichess_game_controller = None
+                self._last_projected_lichess_uci = None
+            self._lichess_game_id = event.game_id
+            self._lichess_player_color = event.color
+            self._lichess_opponent_name = event.opponent_name
             self._lichess_status.setText(
                 f"Lichess game {event.game_id} started as "
                 f"{event.color} against {event.opponent_name}; loading state."
@@ -2388,15 +2816,21 @@ class CameraWindow(QMainWindow):
             self._lichess_status.setText(
                 f"Lichess game {event.game_id} finished."
             )
+        self._record_runtime_diagnostic(
+            "lichess-account-event",
+            f"{event.event_type} for game {event.game_id}.",
+        )
 
     def _lichess_game_event_received(self, event: object) -> None:
         if isinstance(event, LichessPollingSnapshot):
             self._update_lichess_board(event.game.state)
+            self._update_lichess_synchronization(event.game)
             self._lichess_status.setText(
                 _lichess_polling_snapshot_message(event)
             )
         elif isinstance(event, LichessGameFull):
             self._update_lichess_board(event.state)
+            self._update_lichess_synchronization(event)
             self._lichess_status.setText(
                 f"Lichess game {event.game_id}: "
                 f"{event.white.name} (White) vs "
@@ -2405,16 +2839,360 @@ class CameraWindow(QMainWindow):
             )
         elif isinstance(event, LichessGameState):
             self._update_lichess_board(event)
+            self._update_lichess_synchronization_state(event)
             self._lichess_status.setText(
                 _lichess_game_state_message(event)
             )
+        else:
+            return
+        self._record_runtime_diagnostic(
+            "lichess-game-state",
+            self._lichess_status.text(),
+        )
 
     def _update_lichess_board(self, state: LichessGameState) -> None:
+        self._latest_lichess_state = state
         position, last_move = _lichess_board_state(state)
         self._lichess_board_widget.set_pieces(position)
         self._lichess_board_widget.set_occupied_squares(position)
         self._lichess_board_widget.set_last_move(last_move)
-        self._board_tabs.setCurrentWidget(self._lichess_board_widget)
+        self._update_turn_indicator()
+
+    def _update_lichess_synchronization(
+        self,
+        game: LichessGameFull,
+    ) -> None:
+        if (
+            self._lichess_game_id != game.game_id
+            or self._lichess_player_color is None
+        ):
+            self._lichess_sync_status.setText(
+                "Lichess physical synchronization is waiting for account "
+                "game metadata."
+            )
+            return
+        if (
+            self._lichess_game_controller is None
+            or self._lichess_game_controller.game_id != game.game_id
+        ):
+            initial_position = LegalGame(game.initial_fen).position
+            if (
+                not self._reference_move_tracker.initialized
+                or self._piece_synchronizer.position != initial_position
+            ):
+                self._lichess_sync_status.setText(
+                    "Physical reconciliation required: Phase 7 currently "
+                    "attaches only when the accepted physical board matches "
+                    "the Lichess initial position."
+                )
+                self._record_runtime_diagnostic(
+                    "lichess-reconciliation-required",
+                    self._lichess_sync_status.text(),
+                    include_images=True,
+                )
+                return
+            self._lichess_game_controller = LichessGameController(
+                game.game_id,
+                game.initial_fen,
+                self._lichess_player_color,
+                self._lichess_opponent_name,
+            )
+        self._update_lichess_synchronization_state(game.state)
+
+    def _update_lichess_synchronization_state(
+        self,
+        state: LichessGameState,
+    ) -> None:
+        controller = self._lichess_game_controller
+        if controller is None:
+            return
+        update = controller.accept_server_history(state.moves)
+        self._lichess_sync_status.setText(update.message)
+        self._record_runtime_diagnostic(
+            "lichess-synchronization",
+            update.message,
+        )
+        signature = controller.expected_signature
+        if signature is None:
+            self._last_projected_lichess_uci = None
+            return
+        if signature.uci == self._last_projected_lichess_uci:
+            return
+        self._last_projected_lichess_uci = signature.uci
+        self._piece_status.setText(update.message)
+        self._project_lichess_move_guidance(
+            (signature.source, signature.destination)
+        )
+
+    def _record_runtime_diagnostic(
+        self,
+        event_type: str,
+        message: str,
+        *,
+        details: dict[str, object] | None = None,
+        tracker_update: ReferenceTrackerUpdate | None = None,
+        include_images: bool = False,
+        additional_images: dict[str, ImageArray] | None = None,
+    ) -> None:
+        controller = self._lichess_game_controller
+        controller_state: dict[str, object] | None = None
+        if controller is not None:
+            controller_state = {
+                "game_id": controller.game_id,
+                "state": controller.state,
+                "server_fen": controller.server_fen,
+                "physical_fen": controller.physical_fen,
+                "server_moves": list(controller.server_moves),
+                "pending_moves": list(controller.pending_moves),
+                "server_position": _diagnostic_position(
+                    controller.server_position
+                ),
+                "controller_physical_position": _diagnostic_position(
+                    controller.physical_position
+                ),
+            }
+        tracker_state: dict[str, object] = {
+            "initialized": self._reference_move_tracker.initialized,
+            "last_state": self._last_runtime_tracker_state,
+        }
+        if tracker_update is not None:
+            tracker_state.update(
+                {
+                    "state": tracker_update.state,
+                    "move": (
+                        None
+                        if tracker_update.move is None
+                        else [
+                            square_name(tracker_update.move[0]),
+                            square_name(tracker_update.move[1]),
+                        ]
+                    ),
+                    "message": tracker_update.message,
+                }
+            )
+        active_camera: dict[str, object] | None = None
+        if (
+            self._camera is not None
+            and 0 <= self._active_device_index < len(self._devices)
+        ):
+            active_device = self._devices[self._active_device_index]
+            camera_format = self._camera.cameraFormat()
+            camera_resolution = camera_format.resolution()
+            active_camera = {
+                "name": active_device.description(),
+                "id": self._device_key(active_device),
+                "width": camera_resolution.width(),
+                "height": camera_resolution.height(),
+                "maximum_fps": camera_format.maxFrameRate(),
+            }
+        selected_projector: dict[str, object] | None = None
+        selected_projector_index = self._projector_selector.currentIndex()
+        if 0 <= selected_projector_index < len(self._screens):
+            selected_screen = self._screens[selected_projector_index]
+            selected_geometry = selected_screen.geometry()
+            selected_projector = {
+                "name": selected_screen.name(),
+                "manufacturer": selected_screen.manufacturer(),
+                "model": selected_screen.model(),
+                "width": selected_geometry.width(),
+                "height": selected_geometry.height(),
+                "x": selected_geometry.x(),
+                "y": selected_geometry.y(),
+            }
+        calibration_metrics: dict[str, object] | None = None
+        if self._calibration_result is not None:
+            result = self._calibration_result
+            calibration_metrics = {
+                "board_confidence": result.board_detection.confidence,
+                "board_method": result.board_detection.method,
+                "board_reprojection_error_pixels": (
+                    result.board_detection.reprojection_error
+                ),
+                "mapping_coverage_ratio": result.mapping.coverage_ratio,
+                "mapping_decoded_ratio": result.mapping.decoded_ratio,
+                "mapping_inlier_ratio": result.mapping.inlier_ratio,
+                "mapping_rms_error_projector_pixels": (
+                    result.mapping.rms_error
+                ),
+                "mapping_maximum_error_projector_pixels": (
+                    result.mapping.maximum_error
+                ),
+                "validation_rms_error_camera_pixels": (
+                    result.validation.rms_error
+                ),
+                "validation_maximum_error_camera_pixels": (
+                    result.validation.maximum_error
+                ),
+                "validation_maximum_square_fraction": (
+                    result.validation.maximum_square_fraction
+                ),
+            }
+        state: dict[str, object] = {
+            "application": {
+                "python_version": sys.version,
+                "platform": sys.platform,
+                "opencv_version": cv2.__version__,
+                "diagnostics_error": self._runtime_diagnostics_error,
+            },
+            "hardware": {
+                "active_camera": active_camera,
+                "available_cameras": [
+                    {
+                        "name": device.description(),
+                        "id": self._device_key(device),
+                    }
+                    for device in self._devices
+                ],
+                "selected_projector": selected_projector,
+                "available_projectors": [
+                    {
+                        "name": screen.name(),
+                        "width": screen.geometry().width(),
+                        "height": screen.geometry().height(),
+                    }
+                    for screen in self._screens
+                ],
+                "latest_frame_size": (
+                    None
+                    if self._latest_frame is None
+                    else [
+                        self._latest_frame.shape[1],
+                        self._latest_frame.shape[0],
+                    ]
+                ),
+                "camera_status": self._camera_status.text(),
+            },
+            "lichess": {
+                "game_id": self._lichess_game_id,
+                "player_color": self._lichess_player_color,
+                "opponent": self._lichess_opponent_name,
+                "connection_status": self._lichess_status.text(),
+                "synchronization_status": self._lichess_sync_status.text(),
+                "controller": controller_state,
+                "display_position": _diagnostic_position(
+                    self._lichess_board_widget.pieces
+                ),
+            },
+            "physical": {
+                "game_mode": self._game_mode,
+                "accepted_position": _diagnostic_position(
+                    self._piece_synchronizer.position
+                ),
+                "last_rejected_move": (
+                    None
+                    if self._last_rejected_move is None
+                    else [
+                        square_name(self._last_rejected_move[0]),
+                        square_name(self._last_rejected_move[1]),
+                    ]
+                ),
+                "reference_initialized": (
+                    self._reference_move_tracker.initialized
+                ),
+                "diagnostic_images": {
+                    "latest_camera": "diagnostics/runtime-camera.png",
+                    "accepted_board": (
+                        "diagnostics/runtime-accepted-board.png"
+                    ),
+                },
+            },
+            "tracker": tracker_state,
+            "calibration": {
+                "available": self._calibration_result is not None,
+                "verified_available": (
+                    self._verified_calibration_result is not None
+                ),
+                "camera_only": self._camera_only_calibration,
+                "camera_geometry_ready": self._camera_geometry_ready,
+                "operation_active": self._calibrator.active,
+                "quick_verification": self._calibrator.quick_verification,
+                "validation_only": self._calibrator.validation_only,
+                "coded_pattern_mode": self._calibrator.coded_pattern_mode,
+                "projector_output": self._alignment_monitor.output_mode,
+                "metrics": calibration_metrics,
+                "remembered_square": (
+                    None
+                    if self._remembered_board_square is None
+                    else (
+                        f"{chr(ord('a') + self._remembered_board_square[1])}"
+                        f"{8 - self._remembered_board_square[0]}"
+                    )
+                ),
+                "selected_square": (
+                    None
+                    if self._selected_board_square is None
+                    else (
+                        f"{chr(ord('a') + self._selected_board_square[1])}"
+                        f"{8 - self._selected_board_square[0]}"
+                    )
+                ),
+                "pending_square": (
+                    None
+                    if self._pending_board_square is None
+                    else (
+                        f"{chr(ord('a') + self._pending_board_square[1])}"
+                        f"{8 - self._pending_board_square[0]}"
+                    )
+                ),
+                "alignment_status": self._alignment_status.text(),
+            },
+            "ui": {
+                "turn": self._turn_text.text(),
+                "piece_status": self._piece_status.text(),
+                "occupancy_status": self._occupancy_status.text(),
+                "projector_status": self._projector_status.text(),
+                "physical_board_enabled": self._board_widget.isEnabled(),
+                "projector_window_visible": (
+                    self._projector_window.isVisible()
+                ),
+                "board_images": {
+                    "physical": "diagnostics/runtime-physical-ui.png",
+                    "lichess": "diagnostics/runtime-lichess-ui.png",
+                },
+            },
+        }
+        images: dict[str, ImageArray] | None = None
+        if include_images:
+            images = {}
+            if self._latest_frame is not None:
+                images["camera"] = self._latest_frame
+            accepted_reference = self._reference_move_tracker.reference
+            if accepted_reference is not None:
+                images["accepted-board"] = accepted_reference
+        if additional_images:
+            if images is None:
+                images = {}
+            images.update(additional_images)
+        try:
+            self._runtime_diagnostics.record(
+                event_type,
+                message,
+                state,
+                details=details,
+                images=images,
+            )
+            self._save_runtime_board_snapshots()
+            self._runtime_diagnostics_error = None
+        except (OSError, ValueError) as error:
+            self._runtime_diagnostics_error = str(error)
+            self._camera_status.setText(
+                f"Runtime diagnostics unavailable: {error}"
+            )
+
+    def _save_runtime_board_snapshots(self) -> None:
+        diagnostic_root = _PROJECT_ROOT / "diagnostics"
+        diagnostic_root.mkdir(parents=True, exist_ok=True)
+        for name, widget in (
+            ("physical-ui", self._board_widget),
+            ("lichess-ui", self._lichess_board_widget),
+        ):
+            temporary_path = diagnostic_root / f"runtime-{name}.tmp.png"
+            final_path = diagnostic_root / f"runtime-{name}.png"
+            if not widget.grab().save(str(temporary_path), "PNG"):
+                raise OSError(
+                    f"Could not save runtime {name} board snapshot."
+                )
+            temporary_path.replace(final_path)
 
     def _lichess_thread_finished(self) -> None:
         self._lichess_thread = None
@@ -2428,9 +3206,14 @@ class CameraWindow(QMainWindow):
             QTimer.singleShot(0, self.close)
 
     def _update_turn_indicator(self) -> None:
-        state = _turn_indicator_state(self._game_mode, self._legal_game)
+        state = (
+            _lichess_turn_indicator_state(self._latest_lichess_state)
+            if self._latest_lichess_state is not None
+            else _turn_indicator_state(self._game_mode, self._legal_game)
+        )
         if state is None:
             self._turn_indicator.hide()
+            self._turn_text.setText("Not enforced")
             self._turn_indicator.setToolTip("")
             self._turn_indicator.setAccessibleName("No enforced chess turn")
             return
@@ -2441,6 +3224,7 @@ class CameraWindow(QMainWindow):
         self._turn_indicator.setToolTip(description)
         self._turn_indicator.setAccessibleName(description)
         self._turn_indicator.show()
+        self._turn_text.setText(description)
 
     def _restore_move_reference(self) -> None:
         if (
@@ -2568,11 +3352,29 @@ class CameraWindow(QMainWindow):
             "The last verified calibration remains active; restoring the "
             "remembered square."
         )
+        self._record_runtime_diagnostic(
+            "alignment-calibration-error",
+            message,
+            details={
+                "source": source,
+                "previous_calibration_retained": (
+                    self._verified_calibration_result is not None
+                ),
+            },
+            include_images=True,
+        )
         self._restore_remembered_square()
 
     def _projector_selection_changed(self) -> None:
         if self._calibrator.active:
             return
+        self._record_runtime_diagnostic(
+            "projector-selection-changed",
+            "The selected projector display changed.",
+            details={
+                "selected_index": self._projector_selector.currentIndex()
+            },
+        )
         self._restore_saved_calibration()
 
     def _restore_saved_calibration(self) -> None:
@@ -2581,6 +3383,11 @@ class CameraWindow(QMainWindow):
         selected_index = self._projector_selector.currentIndex()
         if not 0 <= selected_index < len(self._screens):
             self._invalidate_calibration()
+            self._record_runtime_diagnostic(
+                "saved-calibration-unavailable",
+                "No projector display is selected.",
+                details={"reason": "projector-unavailable"},
+            )
             return
 
         active_device = self._devices[self._active_device_index]
@@ -2602,6 +3409,11 @@ class CameraWindow(QMainWindow):
             )
         except (OSError, ValueError) as error:
             self._invalidate_calibration()
+            self._record_runtime_diagnostic(
+                "saved-calibration-load-failed",
+                str(error),
+                details={"match": "camera-and-projector"},
+            )
             QMessageBox.warning(
                 self,
                 "Saved calibration",
@@ -2621,6 +3433,11 @@ class CameraWindow(QMainWindow):
                 )
             except (OSError, ValueError) as error:
                 self._invalidate_calibration()
+                self._record_runtime_diagnostic(
+                    "saved-calibration-load-failed",
+                    str(error),
+                    details={"match": "camera-only"},
+                )
                 QMessageBox.warning(
                     self,
                     "Saved calibration",
@@ -2629,11 +3446,21 @@ class CameraWindow(QMainWindow):
                 return
             if result is None:
                 self._invalidate_calibration()
+                self._record_runtime_diagnostic(
+                    "saved-calibration-unavailable",
+                    "No saved calibration matches the active camera.",
+                    details={"reason": "camera-mismatch"},
+                )
                 return
             self._activate_camera_only_calibration(result)
             self._projector_status.setText(
                 "Loaded saved camera board geometry. Physical projection "
                 "is unavailable until the calibrated display returns."
+            )
+            self._record_runtime_diagnostic(
+                "saved-calibration-loaded",
+                self._projector_status.text(),
+                details={"match": "camera-only"},
             )
             return
 
@@ -2641,6 +3468,12 @@ class CameraWindow(QMainWindow):
         self._projector_status.setText(
             "Loaded the matching saved projector calibration. "
             "Recalibrate if the board plane or hardware moved."
+        )
+        self._record_runtime_diagnostic(
+            "saved-calibration-loaded",
+            self._projector_status.text(),
+            details={"match": "camera-and-projector"},
+            include_images=True,
         )
         self._restore_remembered_square()
 
@@ -2715,6 +3548,24 @@ class CameraWindow(QMainWindow):
             self._detection_status.setText(
                 "No complete empty 8x8 board was detected in this snapshot."
             )
+        self._record_runtime_diagnostic(
+            "board-snapshot-detected" if detection is not None else (
+                "board-snapshot-detection-failed"
+            ),
+            self._detection_status.text(),
+            details={
+                "confidence": (
+                    None if detection is None else detection.confidence
+                ),
+                "method": None if detection is None else detection.method,
+                "reprojection_error_pixels": (
+                    None
+                    if detection is None
+                    else detection.reprojection_error
+                ),
+            },
+            include_images=True,
+        )
 
         if self._save_diagnostics.isChecked():
             active_device = self._devices[self._active_device_index]

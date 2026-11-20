@@ -2,7 +2,7 @@ from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
-from PySide6.QtCore import QPointF, QRect, Qt
+from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import (
     QColor,
     QImage,
@@ -18,7 +18,6 @@ from .projector_calibration import square_polygons
 
 DisplayMode = Literal[
     "black",
-    "target",
     "pattern",
     "grid",
     "squares",
@@ -65,38 +64,10 @@ def focus_pattern(
     return pattern
 
 
-def target_rectangle(
-    width: int,
-    height: int,
-    center_x_percent: int,
-    center_y_percent: int,
-    size_percent: int,
-) -> QRect:
-    if width <= 0 or height <= 0:
-        raise ValueError("Projector dimensions must be positive.")
-    if not 0 <= center_x_percent <= 100:
-        raise ValueError("center_x_percent must be between 0 and 100.")
-    if not 0 <= center_y_percent <= 100:
-        raise ValueError("center_y_percent must be between 0 and 100.")
-    if not 1 <= size_percent <= 100:
-        raise ValueError("size_percent must be between 1 and 100.")
-
-    side = max(1, round(min(width, height) * size_percent / 100))
-    center_x = round(width * center_x_percent / 100)
-    center_y = round(height * center_y_percent / 100)
-    left = min(max(center_x - side // 2, 0), width - side)
-    top = min(max(center_y - side // 2, 0), height - side)
-    return QRect(left, top, side, side)
-
-
 class ProjectorWindow(QWidget):
     def __init__(self) -> None:
         super().__init__(None, Qt.WindowType.FramelessWindowHint)
         self._display_mode: DisplayMode = "black"
-        self._center_x_percent = 50
-        self._center_y_percent = 50
-        self._size_percent = 10
-        self._target_color = QColor(255, 255, 255)
         self._pattern: QImage | None = None
         self._projector_grid: NDArray[np.float32] | None = None
         self._selected_square: tuple[int, int] | None = None
@@ -136,21 +107,6 @@ class ProjectorWindow(QWidget):
             )
         self.raise_()
         self.activateWindow()
-
-    def set_target(
-        self,
-        center_x_percent: int,
-        center_y_percent: int,
-        size_percent: int,
-    ) -> None:
-        self._center_x_percent = center_x_percent
-        self._center_y_percent = center_y_percent
-        self._size_percent = size_percent
-        self.update()
-
-    def show_target(self) -> None:
-        self._display_mode = "target"
-        self.update()
 
     def show_black(self) -> None:
         self._display_mode = "black"
@@ -280,18 +236,7 @@ class ProjectorWindow(QWidget):
     def paintEvent(self, event: QPaintEvent) -> None:
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor(0, 0, 0))
-        if self._display_mode == "target":
-            painter.fillRect(
-                target_rectangle(
-                    self.width(),
-                    self.height(),
-                    self._center_x_percent,
-                    self._center_y_percent,
-                    self._size_percent,
-                ),
-                self._target_color,
-            )
-        elif self._display_mode == "pattern" and self._pattern is not None:
+        if self._display_mode == "pattern" and self._pattern is not None:
             painter.drawImage(self.rect(), self._pattern)
         elif self._display_mode == "grid" and self._projector_grid is not None:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)

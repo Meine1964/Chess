@@ -10,6 +10,7 @@
 - [Chess-piece UI rendering and move synchronization](./chess-piece-ui-tracking-specification.md)
 - [Chess-square occupancy and UI marking](./chess-square-occupancy-ui-specification.md)
 - [Projector/camera chessboard system](./projector-camera-chessboard-specification.md)
+- [Lichess physical move synchronization](./lichess-physical-move-synchronization-specification.md)
 
 ## 1. Goal
 
@@ -530,13 +531,15 @@ result, validates game identity and event ordering, handles keep-alives, and
 surfaces redacted HTTP/protocol errors.
 
 The desktop UI now provides explicit connect and disconnect controls, a
-persistent Lichess status line, and separate `Physical position` and
-`Lichess position` board tabs. Remote updates render their reconstructed FEN
-and last move on the Lichess board without changing the accepted physical
-position or camera reference. Network iteration runs in a cancellable Qt worker
-thread and never on the camera/UI thread. The worker keeps at most one HTTP
-stream open: it closes the account stream after `gameStart`, follows that game,
-and returns to the account stream after a terminal game state. It stops
+persistent Lichess status line, and simultaneous `Physical position` and
+`Lichess position` board panels. The dashboard uses four quadrants: camera,
+physical position, scrollable interaction panel, and Lichess position. Remote
+updates render their reconstructed FEN and last move on the Lichess board
+without changing the accepted physical position or camera reference. Network
+iteration runs in a cancellable Qt worker thread and never on the camera/UI
+thread. The worker keeps at most one HTTP stream open: it closes the account
+stream after `gameStart`, follows that game, and returns to the account stream
+after a terminal game state. It stops
 permanently for authentication and protocol failures, honors `Retry-After` for
 HTTP 429, and otherwise reconnects with bounded exponential backoff, including
 after a socket or SSL read timeout. A successfully opened stream resets the
@@ -552,8 +555,7 @@ provide live clock values for correspondence games. The UI explicitly reports
 when polling is active and when clocks are unavailable.
 
 The Lichess state is displayed for observation only and does not yet change the
-local legal game, physical reference, or projector. Live account acceptance
-remains to be completed with a locally configured token.
+local legal game, physical reference, or projector.
 
 Official API reference:
 <https://github.com/lichess-org/api/blob/master/doc/specs/lichess-api.yaml>
@@ -567,9 +569,19 @@ as Lichess after every streamed event and after reconnecting.
 with Stockfish. On the tested network, blocked streaming response headers
 triggered the read-only polling fallback, which discovered the active game,
 reconstructed its move history and position, and updated the separate Lichess
-board tab after subsequent moves.
+board panel after subsequent moves.
 
 ## 10. Phase 7: Incoming Opponent Moves
+
+Detailed behavior is defined in the
+[Lichess physical move synchronization specification](./lichess-physical-move-synchronization-specification.md).
+
+**Implementation status:** The first ordinary-move synchronization slice is
+implemented and awaiting live acceptance. It maintains separate server and
+physical legal cursors, validates complete move-history prefixes, queues moves
+in server order, projects one pending move at a time, and commits the physical
+position and camera reference only after exact expected evidence. Captures,
+special moves, and restart persistence remain staged Phase 7 work.
 
 When Lichess reports an opponent move:
 

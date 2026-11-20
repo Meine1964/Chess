@@ -497,8 +497,8 @@ The implemented non-disruptive monitor:
 - Requires two consecutive geometric failures before invalidation.
 - Immediately makes the projector black and disables the calibration only
   after confirmed optical or geometric loss.
-- Pauses during calibration, focus patterns, manual targets, and full-board
-  previews that intentionally obscure normal monitoring evidence.
+- Pauses during calibration, focus patterns, and full-board previews that
+  intentionally obscure normal monitoring evidence.
 
 Projector movement is not physically observable while the projector is
 completely black. In the selected non-disruptive mode it is detected while a
@@ -663,9 +663,7 @@ The current interface contains:
   display at application startup.
 - **Open projector (black)** action for reopening or moving the output after
   display changes.
-- One white square with manually adjustable center X, center Y, and size as
-  percentages of the projector resolution.
-- **Show square**, **Black**, and **Close projector** actions.
+- **Black** and **Close projector** actions.
 - **Focus pattern** action showing a native-resolution black/white checkerboard
   with a central cross for manual optical focus adjustment.
 - Remembered projector display and target settings.

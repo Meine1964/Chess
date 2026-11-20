@@ -33,8 +33,13 @@ The initial calibration path is implemented with:
 - Exact frameless placement on the selected display without an operating
   system fullscreen transition.
 - A safe black state on startup, cancellation, timeout, and failure.
-- Projector intensity 112, selected from measured camera response.
-- A 250 ms settling interval and three averaged camera frames per state.
+- Projector intensity 255. Live empty-board evidence under daylight showed
+  that intensity 112 produced a median response of only two grayscale levels
+  despite zero saturation, so calibration uses the available optical
+  headroom rather than weakening response thresholds.
+- A 1000 ms settling interval and three averaged camera frames per state. The
+  interval accommodates measured HDMI display latency that otherwise allowed
+  captures to contain the preceding projector pattern.
 - A three-second watchdog for every capture state.
 - Gray-code capture with the optically unresolvable least-significant X and Y
   bits omitted.
@@ -512,8 +517,8 @@ After calibration is completed or restored, the application:
     indicator to red after confirmed calibration loss. The last optically
     verified mesh remains available and recalibration remains a manual action.
 
-Monitoring pauses for full calibration, focus patterns, manual targets,
-full-board grids, and all-square fills because those modes intentionally
+Monitoring pauses for full calibration, focus patterns, full-board grids, and
+all-square fills because those modes intentionally
 change or obscure the evidence used by the normal monitor.
 
 A projector emits no measurable signal while completely black. Therefore the
