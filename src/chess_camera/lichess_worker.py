@@ -16,6 +16,78 @@ from .lichess_client import (
 )
 
 
+class LichessMoveSubmissionWorker(QObject):
+    accepted = Signal(str, str)
+    rejected = Signal(str, str, str)
+    uncertain = Signal(str, str, str)
+    finished = Signal()
+
+    def __init__(
+        self,
+        client: LichessReadOnlyClient,
+        game_id: str,
+        uci: str,
+        confirmed_moves: tuple[str, ...],
+    ) -> None:
+        super().__init__()
+        self._client = client
+        self._game_id = game_id
+        self._uci = uci
+        self._confirmed_moves = confirmed_moves
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self._client.submit_move(self._game_id, self._uci)
+        except LichessHTTPError as error:
+            self.rejected.emit(
+                self._game_id,
+                self._uci,
+                f"Lichess rejected the move with HTTP {error.status}.",
+            )
+        except (
+            LichessConnectionError,
+            LichessProtocolError,
+            OSError,
+        ) as error:
+            self._resolve_uncertain_outcome(str(error))
+        except LichessError as error:
+            self.rejected.emit(self._game_id, self._uci, str(error))
+        else:
+            self.accepted.emit(self._game_id, self._uci)
+        finally:
+            self.finished.emit()
+
+    def _resolve_uncertain_outcome(self, submission_error: str) -> None:
+        try:
+            snapshot = self._client.get_game_snapshot(self._game_id)
+        except (LichessError, OSError) as refresh_error:
+            self.uncertain.emit(
+                self._game_id,
+                self._uci,
+                f"{submission_error} Authoritative refresh also failed: "
+                f"{refresh_error}",
+            )
+            return
+        server_moves = snapshot.game.state.moves
+        if server_moves == (*self._confirmed_moves, self._uci):
+            self.accepted.emit(self._game_id, self._uci)
+            return
+        if server_moves == self._confirmed_moves:
+            self.rejected.emit(
+                self._game_id,
+                self._uci,
+                "Lichess history confirms that the move was not accepted.",
+            )
+            return
+        self.uncertain.emit(
+            self._game_id,
+            self._uci,
+            "Lichess history changed unexpectedly while resolving the "
+            "submission outcome.",
+        )
+
+
 class LichessConnectionWorker(QObject):
     status_changed = Signal(str)
     account_event_received = Signal(object)

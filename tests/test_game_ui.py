@@ -100,7 +100,7 @@ def test_polling_message_reports_unavailable_correspondence_clocks() -> None:
         "Lichess game oozTO3xk: Meine (White) vs "
         "Stockfish level 1 (Black). White to move; "
         "clocks unavailable for this game; status started; result *. "
-        "Connected by read-only polling."
+        "Connected by polling."
     )
 
 

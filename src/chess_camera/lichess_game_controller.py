@@ -121,6 +121,72 @@ class LichessGameController:
             signature.promotion,
         )
 
+    @property
+    def local_move_signatures(self) -> tuple[LegalMoveSignature, ...]:
+        if (
+            self._state != "synchronized"
+            or self._server_game.fen != self._physical_game.fen
+            or self._server_game.status.turn != self._player_color
+        ):
+            return ()
+        return tuple(
+            signature
+            for signature in self._physical_game.legal_move_signatures
+            if signature.kind == "ordinary"
+        )
+
+    def prepare_local_move(
+        self,
+        move: tuple[Square, Square],
+    ) -> tuple[str, LegalMoveResult]:
+        signature = next(
+            (
+                candidate
+                for candidate in self.local_move_signatures
+                if (candidate.source, candidate.destination) == move
+            ),
+            None,
+        )
+        if signature is None:
+            raise ValueError(
+                "The physical move is not a supported local Lichess move."
+            )
+        preview = LegalGame(self._physical_game.fen)
+        return (
+            signature.uci,
+            preview.apply_move(
+                signature.source,
+                signature.destination,
+                signature.promotion,
+            ),
+        )
+
+    def commit_local_move(
+        self,
+        move: tuple[Square, Square],
+    ) -> LegalMoveResult:
+        uci, _preview = self.prepare_local_move(move)
+        server_result = _apply_uci(self._server_game, uci)
+        physical_result = _apply_uci(self._physical_game, uci)
+        if server_result.fen != physical_result.fen:
+            raise ValueError(
+                "Lichess server and physical move commits diverged."
+            )
+        self._server_moves = (*self._server_moves, uci)
+        self._state = (
+            "game-complete"
+            if self._server_game.status.is_game_over
+            else "synchronized"
+        )
+        return physical_result
+
+    def require_reconciliation(
+        self,
+        message: str,
+    ) -> LichessSynchronizationUpdate:
+        self._state = "reconciliation-required"
+        return self._update((), message)
+
     def accept_server_history(
         self,
         moves: tuple[str, ...],

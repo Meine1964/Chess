@@ -1,7 +1,7 @@
 # Lichess Physical Move Synchronization Specification
 
-**Version:** 0.1  
-**Status:** Ordinary-move slice implemented; live acceptance pending  
+**Version:** 0.2
+**Status:** Incoming and outgoing ordinary-move slices implemented; live acceptance pending
 **Platform:** Python on Windows
 
 **Related specifications:**
@@ -13,8 +13,9 @@
 
 ## 1. Purpose
 
-This specification defines Phase 7 of the Lichess physical-board integration:
-synchronizing moves already accepted by Lichess onto the physical board.
+This specification defines the ordinary-move slices of Phases 7 and 8 of the
+Lichess physical-board integration: synchronizing moves already accepted by
+Lichess onto the physical board and submitting local physical moves.
 
 When Lichess advances the remote game, the application shall:
 
@@ -26,9 +27,9 @@ When Lichess advances the remote game, the application shall:
 6. Advance the physical position and replace the camera reference only after
    exact confirmation.
 
-The first implementation remains read-only with respect to Lichess. Moves are
-made in the Lichess browser and then reproduced on the physical board. Sending
-physical moves to Lichess remains Phase 8.
+The first outgoing slice submits ordinary non-capturing moves only. Captures,
+castling, en passant, and promotion remain reconciliation-only until their
+outgoing slices are implemented.
 
 ## 2. Design Principles
 
@@ -407,20 +408,40 @@ The user may:
 After restoration, the application shall resume guidance for the same pending
 move. After an exact expected final position, it may commit normally.
 
-## 13. Browser-First Local Moves
+## 13. Local Ordinary-Move Submission
 
-Until Phase 8 is implemented, local moves shall be performed in this order:
+Local submission is available only when the physical and server positions are
+synchronized, it is the configured player's turn, and the camera identifies a
+unique ordinary non-capturing legal move.
 
-1. Make the move in the Lichess browser.
-2. Wait for it to appear in authoritative history.
-3. Follow the application's physical projection.
-4. Reproduce the move physically.
+The application shall use a two-phase commit:
 
-A physical move made before it appears in Lichess history shall not be
-committed in Lichess synchronization mode. The application shall preserve the
-reference and instruct the user to restore the physical position.
+1. Preserve the settled candidate image without changing the accepted
+   reference, physical position, server position, UI position, or turn.
+2. Submit the UCI move once with
+   `POST /api/board/game/{gameId}/move/{move}`.
+3. After a successful response, advance the controller's server and physical
+   positions, commit the preserved image as the accepted reference, update the
+   UI, persist synchronized state, and display the accepted move.
+4. After an explicit HTTP rejection, preserve the previous authoritative state
+   and reference and require the physical move to be restored.
 
-This prevents local camera evidence from becoming an unconfirmed server move.
+The application shall pause further camera move inference while submission is
+pending. It shall never retry a move automatically.
+
+If the POST outcome is uncertain because the response is interrupted or
+invalid, the submission worker shall fetch the authoritative game snapshot:
+
+- If history equals the previously confirmed history plus the submitted move,
+  treat the move as accepted and commit it once.
+- If history still equals the previously confirmed history, treat the move as
+  rejected and require restoration.
+- If the refresh fails or history has another shape, enter reconciliation and
+  preserve both the previous reference and the pending physical discrepancy.
+
+Polling fallback remains capable of submitting moves. Polling affects only how
+authoritative game updates are received; it does not make a valid Board API
+session read-only.
 
 ## 14. Reconnection and Polling
 

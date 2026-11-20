@@ -71,7 +71,10 @@ from .lichess_client import (
     PlayerColor,
 )
 from .lichess_game_controller import LichessGameController
-from .lichess_worker import LichessConnectionWorker
+from .lichess_worker import (
+    LichessConnectionWorker,
+    LichessMoveSubmissionWorker,
+)
 from .occupancy import (
     SquareOccupancyDetector,
     detect_starting_position_orientation,
@@ -224,7 +227,7 @@ def _lichess_polling_snapshot_message(
         f"{game.white.name} (White) vs {game.black.name} (Black). "
         f"{state.turn.capitalize()} to move; {clock_text}"
         f"status {state.status}; result {state.result}. "
-        "Connected by read-only polling."
+        "Connected by polling."
     )
 
 
@@ -415,6 +418,16 @@ class CameraWindow(QMainWindow):
         self._game_mode: GameMode = "diagnostic"
         self._lichess_thread: QThread | None = None
         self._lichess_worker: LichessConnectionWorker | None = None
+        self._lichess_client: LichessReadOnlyClient | None = None
+        self._lichess_submission_thread: QThread | None = None
+        self._lichess_submission_worker: (
+            LichessMoveSubmissionWorker | None
+        ) = None
+        self._pending_lichess_local_move: (
+            tuple[tuple[int, int], tuple[int, int]] | None
+        ) = None
+        self._pending_lichess_local_uci: str | None = None
+        self._pending_lichess_local_result: LegalMoveResult | None = None
         self._lichess_disconnect_requested = False
         self._close_pending = False
         self._lichess_game_id: str | None = None
@@ -2099,6 +2112,8 @@ class CameraWindow(QMainWindow):
     def _update_reference_move_tracking(self) -> None:
         if self._latest_frame is None or self._calibration_result is None:
             return
+        if self._pending_lichess_local_move is not None:
+            return
         lichess_controller = self._lichess_game_controller
         lichess_signature = (
             None
@@ -2119,6 +2134,8 @@ class CameraWindow(QMainWindow):
                 (
                     (lichess_signature,)
                     if lichess_signature is not None
+                    else lichess_controller.local_move_signatures
+                    if lichess_controller is not None
                     else self._legal_game.physical_move_signatures
                     if self._game_mode == "offline-game"
                     else ()
@@ -2211,7 +2228,18 @@ class CameraWindow(QMainWindow):
             and lichess_signature is not None
         )
         if lichess_controller is not None and not lichess_pending:
-            self._reject_unconfirmed_lichess_move(update.move)
+            try:
+                uci, legal_move = lichess_controller.prepare_local_move(
+                    update.move
+                )
+            except ValueError:
+                self._reject_unconfirmed_lichess_move(update.move)
+                return
+            self._begin_lichess_local_move_submission(
+                update.move,
+                uci,
+                legal_move,
+            )
             return
         if lichess_pending:
             expected_move = (
@@ -2301,6 +2329,216 @@ class CameraWindow(QMainWindow):
             )
         if not lichess_pending:
             self._project_accepted_move(update.move)
+
+    def _begin_lichess_local_move_submission(
+        self,
+        move: tuple[tuple[int, int], tuple[int, int]],
+        uci: str,
+        legal_move: LegalMoveResult,
+    ) -> None:
+        controller = self._lichess_game_controller
+        client = self._lichess_client
+        if (
+            controller is None
+            or client is None
+            or self._lichess_submission_thread is not None
+        ):
+            self._reference_move_tracker.reset_activity()
+            self._piece_status.setText(
+                "Cannot submit the physical move because the Lichess "
+                "connection is not ready."
+            )
+            return
+        thread = QThread(self)
+        worker = LichessMoveSubmissionWorker(
+            client,
+            controller.game_id,
+            uci,
+            controller.server_moves,
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.accepted.connect(self._lichess_local_move_accepted)
+        worker.rejected.connect(self._lichess_local_move_rejected)
+        worker.uncertain.connect(self._lichess_local_move_uncertain)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._lichess_submission_finished)
+        thread.finished.connect(thread.deleteLater)
+        self._pending_lichess_local_move = move
+        self._pending_lichess_local_uci = uci
+        self._pending_lichess_local_result = legal_move
+        self._lichess_submission_thread = thread
+        self._lichess_submission_worker = worker
+        message = (
+            f"Submitting physical move {square_name(move[0])}-"
+            f"{square_name(move[1])} to Lichess."
+        )
+        self._piece_status.setText(message)
+        self._lichess_sync_status.setText(message)
+        self._record_runtime_diagnostic(
+            "lichess-local-move-submitting",
+            message,
+            details={"uci": uci, "game_id": controller.game_id},
+            include_images=True,
+        )
+        thread.start()
+
+    def _lichess_local_move_accepted(
+        self,
+        game_id: str,
+        uci: str,
+    ) -> None:
+        controller = self._lichess_game_controller
+        move = self._pending_lichess_local_move
+        legal_move = self._pending_lichess_local_result
+        if (
+            controller is None
+            or move is None
+            or legal_move is None
+            or game_id != controller.game_id
+            or uci != self._pending_lichess_local_uci
+        ):
+            return
+        previous_position = self._piece_synchronizer.position
+        try:
+            position_update = (
+                self._piece_synchronizer.accept_authoritative_move(
+                    move[0],
+                    move[1],
+                    legal_move.position,
+                )
+            )
+            committed = controller.commit_local_move(move)
+            self._reference_move_tracker.commit_accepted(move)
+        except ValueError as error:
+            self._piece_synchronizer.restore(previous_position)
+            self._reference_move_tracker.reset_activity()
+            synchronization = controller.require_reconciliation(
+                f"Lichess accepted {uci}, but the local commit failed: "
+                f"{error}"
+            )
+            self._piece_status.setText(synchronization.message)
+            self._lichess_sync_status.setText(synchronization.message)
+            self._clear_pending_lichess_local_move()
+            return
+        self._board_widget.set_pieces(position_update.position)
+        self._board_widget.set_occupied_squares(position_update.position)
+        self._board_widget.set_illegal_source(None)
+        self._board_widget.set_last_move(move)
+        self._last_rejected_move = None
+        self._persist_piece_position(position_update.position)
+        self._persist_move_reference()
+        if self._latest_lichess_state is not None:
+            remote_status = "started"
+            winner: PlayerColor | None = None
+            if committed.status.is_game_over:
+                if committed.status.is_checkmate:
+                    remote_status = "mate"
+                    winner = (
+                        "black"
+                        if committed.status.turn == "white"
+                        else "white"
+                    )
+                elif committed.status.is_stalemate:
+                    remote_status = "stalemate"
+                else:
+                    remote_status = "draw"
+            self._update_lichess_board(
+                replace(
+                    self._latest_lichess_state,
+                    moves=controller.server_moves,
+                    fen=controller.server_fen,
+                    turn=committed.status.turn,
+                    status=remote_status,
+                    winner=winner,
+                    result=committed.status.result,
+                )
+            )
+        message = (
+            f"Lichess accepted {square_name(move[0])}-"
+            f"{square_name(move[1])}; {committed.status.turn} to move."
+        )
+        self._piece_status.setText(message)
+        self._lichess_sync_status.setText(message)
+        self._record_runtime_diagnostic(
+            "lichess-local-move-accepted",
+            message,
+            details={"uci": uci, "game_id": game_id},
+            include_images=True,
+        )
+        self._clear_pending_lichess_local_move()
+        self._project_accepted_move(move)
+
+    def _lichess_local_move_rejected(
+        self,
+        game_id: str,
+        uci: str,
+        reason: str,
+    ) -> None:
+        controller = self._lichess_game_controller
+        move = self._pending_lichess_local_move
+        if (
+            controller is None
+            or move is None
+            or game_id != controller.game_id
+            or uci != self._pending_lichess_local_uci
+        ):
+            return
+        self._reference_move_tracker.reset_activity()
+        self._last_rejected_move = move
+        self._board_widget.set_illegal_source(move[0])
+        message = (
+            f"Lichess did not accept {square_name(move[0])}-"
+            f"{square_name(move[1])}: {reason} Restore the physical move."
+        )
+        self._piece_status.setText(message)
+        self._lichess_sync_status.setText(message)
+        self._record_runtime_diagnostic(
+            "lichess-local-move-rejected",
+            message,
+            details={"uci": uci, "game_id": game_id},
+            include_images=True,
+        )
+        self._clear_pending_lichess_local_move()
+        self._project_illegal_move_correction(move)
+
+    def _lichess_local_move_uncertain(
+        self,
+        game_id: str,
+        uci: str,
+        reason: str,
+    ) -> None:
+        controller = self._lichess_game_controller
+        move = self._pending_lichess_local_move
+        if (
+            controller is None
+            or move is None
+            or game_id != controller.game_id
+            or uci != self._pending_lichess_local_uci
+        ):
+            return
+        self._reference_move_tracker.reset_activity()
+        synchronization = controller.require_reconciliation(
+            f"The outcome of Lichess move {uci} is uncertain. {reason}"
+        )
+        self._last_rejected_move = move
+        self._board_widget.set_illegal_source(move[0])
+        self._piece_status.setText(synchronization.message)
+        self._lichess_sync_status.setText(synchronization.message)
+        self._record_runtime_diagnostic(
+            "lichess-local-move-uncertain",
+            synchronization.message,
+            details={"uci": uci, "game_id": game_id},
+            include_images=True,
+        )
+        self._clear_pending_lichess_local_move()
+        self._project_illegal_move_correction(move)
+
+    def _clear_pending_lichess_local_move(self) -> None:
+        self._pending_lichess_local_move = None
+        self._pending_lichess_local_uci = None
+        self._pending_lichess_local_result = None
 
     def _reset_pieces_to_start(self) -> None:
         if self._latest_frame is None or self._calibration_result is None:
@@ -2808,6 +3046,7 @@ class CameraWindow(QMainWindow):
         thread.finished.connect(thread.deleteLater)
         self._lichess_thread = thread
         self._lichess_worker = worker
+        self._lichess_client = client
         self._lichess_disconnect_requested = False
         self._lichess_button.setText("Disconnect Lichess")
         self._lichess_status.setText("Connecting to Lichess...")
@@ -2938,6 +3177,19 @@ class CameraWindow(QMainWindow):
     ) -> None:
         controller = self._lichess_game_controller
         if controller is None:
+            return
+        if (
+            self._pending_lichess_local_uci is not None
+            and state.moves
+            == (
+                *controller.server_moves,
+                self._pending_lichess_local_uci,
+            )
+        ):
+            self._lichess_sync_status.setText(
+                "Lichess received the submitted move; awaiting the "
+                "submission response."
+            )
             return
         update = controller.accept_server_history(state.moves)
         self._lichess_sync_status.setText(update.message)
@@ -3230,11 +3482,18 @@ class CameraWindow(QMainWindow):
     def _lichess_thread_finished(self) -> None:
         self._lichess_thread = None
         self._lichess_worker = None
+        self._lichess_client = None
         self._lichess_button.setText("Connect to Lichess")
         self._lichess_button.setEnabled(True)
         if self._lichess_disconnect_requested:
             self._lichess_status.setText("Lichess disconnected.")
         self._lichess_disconnect_requested = False
+        if self._close_pending:
+            QTimer.singleShot(0, self.close)
+
+    def _lichess_submission_finished(self) -> None:
+        self._lichess_submission_thread = None
+        self._lichess_submission_worker = None
         if self._close_pending:
             QTimer.singleShot(0, self.close)
 
@@ -3673,6 +3932,17 @@ class CameraWindow(QMainWindow):
         super().keyPressEvent(event)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if (
+            self._lichess_submission_thread is not None
+            and self._lichess_submission_thread.isRunning()
+        ):
+            self._close_pending = True
+            self._lichess_status.setText(
+                "Waiting for the pending Lichess move submission before "
+                "closing."
+            )
+            event.ignore()
+            return
         if (
             self._lichess_worker is not None
             and self._lichess_thread is not None

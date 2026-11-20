@@ -31,6 +31,7 @@ class FakeTransport:
             {} if json_responses is None else json_responses
         )
         self.requests: list[tuple[str, Mapping[str, str]]] = []
+        self.post_responses: dict[str, Mapping[str, object]] = {}
 
     @contextmanager
     def open_stream(
@@ -48,6 +49,14 @@ class FakeTransport:
     ) -> Mapping[str, object]:
         self.requests.append((path, dict(headers)))
         return self._json_responses[path]
+
+    def post_json(
+        self,
+        path: str,
+        headers: Mapping[str, str],
+    ) -> Mapping[str, object]:
+        self.requests.append((path, dict(headers)))
+        return self.post_responses[path]
 
 
 def _line(payload: object) -> bytes:
@@ -105,6 +114,46 @@ def test_account_stream_uses_auth_headers_and_ignores_keepalives() -> None:
         "Accept": "application/x-ndjson",
         "User-Agent": "Chess test client",
     }
+
+
+def test_submit_move_uses_board_api_and_auth_headers() -> None:
+    path = "/api/board/game/p8Jy2ayw/move/e2e4"
+    transport = FakeTransport({})
+    transport.post_responses[path] = {"ok": True}
+    client = LichessReadOnlyClient(
+        "secret-token",
+        transport=transport,
+        user_agent="Chess test client",
+    )
+
+    client.submit_move("p8Jy2ayw", "e2e4")
+
+    assert transport.requests == [
+        (
+            path,
+            {
+                "Authorization": "Bearer secret-token",
+                "Accept": "application/json",
+                "User-Agent": "Chess test client",
+            },
+        )
+    ]
+
+
+def test_submit_move_requires_positive_confirmation() -> None:
+    path = "/api/board/game/p8Jy2ayw/move/e2e4"
+    transport = FakeTransport({})
+    transport.post_responses[path] = {"ok": False}
+    client = LichessReadOnlyClient(
+        "secret-token",
+        transport=transport,
+    )
+
+    with pytest.raises(
+        LichessProtocolError,
+        match="did not confirm",
+    ):
+        client.submit_move("p8Jy2ayw", "e2e4")
 
 
 def test_stream_open_callback_and_keepalive_cancellation() -> None:

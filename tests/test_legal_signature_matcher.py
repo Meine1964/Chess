@@ -29,6 +29,33 @@ def test_matches_unique_ordinary_legal_signature() -> None:
     assert match.signature.kind == "ordinary"
 
 
+def test_matches_legal_move_with_weaker_vacated_source_evidence() -> None:
+    game = LegalGame()
+
+    match = match_legal_move_signature(
+        _scores(
+            ((6, 4), 0.067),
+            ((4, 4), 0.105),
+            ((4, 0), 0.035),
+        ),
+        game.legal_move_signatures,
+    )
+
+    assert match.signature is not None
+    assert match.signature.uci == "e2e4"
+
+
+def test_rejects_legal_move_when_source_change_is_only_noise() -> None:
+    game = LegalGame()
+
+    match = match_legal_move_signature(
+        _scores(((6, 4), 0.055), ((4, 4), 0.105)),
+        game.legal_move_signatures,
+    )
+
+    assert match.signature is None
+
+
 def test_unexplained_third_square_rejects_signature() -> None:
     game = LegalGame()
     scores = _scores(

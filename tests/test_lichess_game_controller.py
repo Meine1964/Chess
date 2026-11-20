@@ -1,3 +1,5 @@
+import pytest
+
 from src.chess_camera.lichess_game_controller import LichessGameController
 
 
@@ -49,6 +51,32 @@ def test_controller_queues_multiple_moves_in_server_order() -> None:
 
     assert controller.expected_signature is not None
     assert controller.expected_signature.uci == "g1f3"
+
+
+def test_controller_prepares_and_commits_local_ordinary_move() -> None:
+    controller = _controller()
+    controller.accept_server_history(())
+
+    uci, preview = controller.prepare_local_move(((6, 4), (4, 4)))
+
+    assert uci == "e2e4"
+    assert preview.position[(4, 4)] == "P"
+    committed = controller.commit_local_move(((6, 4), (4, 4)))
+    assert committed.fen == preview.fen
+    assert controller.server_moves == ("e2e4",)
+    assert controller.server_fen == preview.fen
+    assert controller.physical_fen == preview.fen
+    assert controller.state == "synchronized"
+
+
+def test_controller_does_not_prepare_opponent_or_special_local_move() -> None:
+    controller = _controller()
+    controller.accept_server_history(())
+    controller.commit_local_move(((6, 4), (4, 4)))
+
+    assert controller.local_move_signatures == ()
+    with pytest.raises(ValueError, match="not a supported"):
+        controller.prepare_local_move(((1, 4), (3, 4)))
 
 
 def test_controller_rejects_wrong_physical_move_without_advancing() -> None:

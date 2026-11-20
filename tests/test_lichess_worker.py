@@ -16,6 +16,7 @@ from src.chess_camera.lichess_client import (
     OngoingGame,
 )
 from src.chess_camera.lichess_worker import LichessConnectionWorker
+from src.chess_camera.lichess_worker import LichessMoveSubmissionWorker
 
 
 class FakeClient:
@@ -175,6 +176,146 @@ class PollingFallbackClient:
             ),
             False,
         )
+
+
+class SubmissionClient:
+    def __init__(
+        self,
+        *,
+        submit_error: Exception | None = None,
+        server_moves: tuple[str, ...] = (),
+        refresh_error: Exception | None = None,
+    ) -> None:
+        self._submit_error = submit_error
+        self._server_moves = server_moves
+        self._refresh_error = refresh_error
+        self.submissions: list[tuple[str, str]] = []
+
+    def submit_move(self, game_id: str, uci: str) -> None:
+        self.submissions.append((game_id, uci))
+        if self._submit_error is not None:
+            raise self._submit_error
+
+    def get_game_snapshot(self, game_id: str) -> LichessPollingSnapshot:
+        if self._refresh_error is not None:
+            raise self._refresh_error
+        board = chess.Board()
+        for uci in self._server_moves:
+            board.push_uci(uci)
+        state = LichessGameState(
+            self._server_moves,
+            board.fen(),
+            "white" if board.turn else "black",
+            0,
+            0,
+            0,
+            0,
+            "started",
+            None,
+            "*",
+        )
+        return LichessPollingSnapshot(
+            LichessGameFull(
+                game_id,
+                chess.STARTING_FEN,
+                LichessPlayer("white", "Meine", 1500),
+                LichessPlayer("black", "Stockfish level 1", None),
+                state,
+            ),
+            False,
+        )
+
+
+def test_move_submission_worker_emits_acceptance() -> None:
+    client = SubmissionClient()
+    worker = LichessMoveSubmissionWorker(
+        cast(LichessReadOnlyClient, client),
+        "game1234",
+        "e2e4",
+        (),
+    )
+    accepted: list[tuple[str, str]] = []
+    worker.accepted.connect(
+        lambda game_id, uci: accepted.append((game_id, uci))
+    )
+
+    worker.run()
+
+    assert client.submissions == [("game1234", "e2e4")]
+    assert accepted == [("game1234", "e2e4")]
+
+
+def test_move_submission_worker_resolves_lost_response_from_history() -> None:
+    client = SubmissionClient(
+        submit_error=LichessConnectionError("Response was lost."),
+        server_moves=("e2e4",),
+    )
+    worker = LichessMoveSubmissionWorker(
+        cast(LichessReadOnlyClient, client),
+        "game1234",
+        "e2e4",
+        (),
+    )
+    accepted: list[tuple[str, str]] = []
+    worker.accepted.connect(
+        lambda game_id, uci: accepted.append((game_id, uci))
+    )
+
+    worker.run()
+
+    assert accepted == [("game1234", "e2e4")]
+
+
+def test_move_submission_worker_resolves_rejection_from_history() -> None:
+    client = SubmissionClient(
+        submit_error=LichessConnectionError("Response was lost."),
+    )
+    worker = LichessMoveSubmissionWorker(
+        cast(LichessReadOnlyClient, client),
+        "game1234",
+        "e2e4",
+        (),
+    )
+    rejected: list[tuple[str, str, str]] = []
+    worker.rejected.connect(
+        lambda game_id, uci, message: rejected.append(
+            (game_id, uci, message)
+        )
+    )
+
+    worker.run()
+
+    assert rejected == [
+        (
+            "game1234",
+            "e2e4",
+            "Lichess history confirms that the move was not accepted.",
+        )
+    ]
+
+
+def test_move_submission_worker_reports_unresolved_outcome() -> None:
+    client = SubmissionClient(
+        submit_error=LichessConnectionError("Response was lost."),
+        refresh_error=LichessConnectionError("Refresh failed."),
+    )
+    worker = LichessMoveSubmissionWorker(
+        cast(LichessReadOnlyClient, client),
+        "game1234",
+        "e2e4",
+        (),
+    )
+    uncertain: list[tuple[str, str, str]] = []
+    worker.uncertain.connect(
+        lambda game_id, uci, message: uncertain.append(
+            (game_id, uci, message)
+        )
+    )
+
+    worker.run()
+
+    assert len(uncertain) == 1
+    assert uncertain[0][:2] == ("game1234", "e2e4")
 
 
 def test_worker_follows_active_game_without_blocking_retry_loop() -> None:

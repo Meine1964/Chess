@@ -8,6 +8,8 @@ from .chess_position import Position, Square
 from .legal_game import LegalMoveSignature
 from .piece_color_classifier import PieceColorClassification
 
+LEGAL_SOURCE_CHANGE_RATIO = 0.7
+
 
 @dataclass(frozen=True)
 class SignatureEvidence:
@@ -57,12 +59,24 @@ def match_legal_move_signature(
         ):
             continue
         expected = {change.square for change in signature.changes}
-        expected_scores = [float(scores[square]) for square in expected]
+        expected_scores = {
+            square: float(scores[square]) for square in expected
+        }
         if not expected_scores:
             continue
-        minimum_expected = min(expected_scores)
-        if minimum_expected < minimum_square_change:
+        source_score = expected_scores.get(signature.source)
+        if (
+            source_score is None
+            or source_score
+            < minimum_square_change * LEGAL_SOURCE_CHANGE_RATIO
+            or any(
+                score < minimum_square_change
+                for square, score in expected_scores.items()
+                if square != signature.source
+            )
+        ):
             continue
+        minimum_expected = min(expected_scores.values())
         ignored = expected | set(explained.get(signature.uci, ()))
         unexpected_scores = [
             float(scores[row, column])
@@ -77,7 +91,7 @@ def match_legal_move_signature(
         )
         if strongest_unexpected > unexpected_limit:
             continue
-        mean_expected = float(np.mean(expected_scores))
+        mean_expected = float(np.mean(tuple(expected_scores.values())))
         evidence.append(
             SignatureEvidence(
                 signature,

@@ -282,6 +282,15 @@ reference, persisted FEN, UI pieces, and last-move indication shall commit
 together. Any failure before reference commit shall roll back the legal game
 and preserve the previous logical position and reference.
 
+For an authoritative legal signature, a vacated source may have weaker visual
+change evidence than its destination because removing a piece can reveal a
+similar-colored square. The source shall use a lower evidence floor while every
+other expected changed square retains the normal movement threshold. The
+signature must remain unique, and the existing unexpected-change, obstruction,
+released-piece, and consecutive-observation safeguards shall still pass.
+Diagnostic movement mode shall continue to require the normal threshold for
+both its source and destination.
+
 For a capture, destination occupancy remains occupied. The visual transition
 is the destination changing from the captured piece's color appearance to the
 mover's color appearance. The legal signature supplies both before and after

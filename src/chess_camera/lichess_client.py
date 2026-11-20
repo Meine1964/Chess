@@ -123,6 +123,12 @@ class NdjsonTransport(Protocol):
         headers: Mapping[str, str],
     ) -> Mapping[str, object]: ...
 
+    def post_json(
+        self,
+        path: str,
+        headers: Mapping[str, str],
+    ) -> Mapping[str, object]: ...
+
 
 class UrllibNdjsonTransport:
     def __init__(
@@ -210,6 +216,49 @@ class UrllibNdjsonTransport:
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise LichessProtocolError(
                 "Lichess returned invalid JSON."
+            ) from error
+        if not isinstance(payload, dict):
+            raise LichessProtocolError(
+                "A Lichess JSON response must be an object."
+            )
+        return cast(dict[str, object], payload)
+
+    def post_json(
+        self,
+        path: str,
+        headers: Mapping[str, str],
+    ) -> Mapping[str, object]:
+        if not path.startswith("/"):
+            raise ValueError("Lichess request paths must start with '/'.")
+        request = urllib.request.Request(
+            f"{self._base_url}{path}",
+            data=b"",
+            headers=dict(headers),
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(
+                request,
+                timeout=self._timeout_seconds,
+            ) as response:
+                payload = json.load(response)
+        except urllib.error.HTTPError as error:
+            retry_after = (
+                _retry_after_seconds(error.headers.get("Retry-After"))
+                if error.code == 429
+                else None
+            )
+            raise LichessHTTPError(
+                error.code,
+                retry_after_seconds=retry_after,
+            ) from error
+        except OSError as error:
+            raise LichessConnectionError(
+                "Could not confirm the Lichess move submission."
+            ) from error
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise LichessProtocolError(
+                "Lichess returned invalid JSON after move submission."
             ) from error
         if not isinstance(payload, dict):
             raise LichessProtocolError(
@@ -341,6 +390,22 @@ class LichessReadOnlyClient:
             {**self._headers, "Accept": "application/json"},
         )
         return _parse_game_snapshot(payload, normalized_game_id)
+
+    def submit_move(self, game_id: str, uci: str) -> None:
+        normalized_game_id = _normalize_game_id(game_id)
+        try:
+            move = chess.Move.from_uci(uci)
+        except ValueError as error:
+            raise ValueError(f"Invalid UCI move '{uci}'.") from error
+        normalized_uci = move.uci()
+        payload = self._transport.post_json(
+            f"/api/board/game/{normalized_game_id}/move/{normalized_uci}",
+            {**self._headers, "Accept": "application/json"},
+        )
+        if payload.get("ok") is not True:
+            raise LichessProtocolError(
+                "Lichess did not confirm the submitted move."
+            )
 
 
 def reconnect_delays(
