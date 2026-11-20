@@ -1,7 +1,7 @@
 # Lichess Physical-Board Integration Roadmap
 
-**Version:** 0.5
-**Status:** Phases 2-3 live-accepted; Phase 4-5 first slices implemented
+**Version:** 0.6
+**Status:** Phases 2-6 live-accepted
 **Platform:** Python on Windows  
 
 **Related specifications:**
@@ -479,6 +479,13 @@ scopes. The token shall:
 - Be loaded from an environment variable or secure operating-system credential
   storage.
 
+The application shall never request or store a Lichess username/password
+credential pair. The first implementation shall read a personal access token
+from `LICHESS_TOKEN`. The official Board game stream requires the `board:play`
+scope even when the client only observes events; the read-only milestone shall
+therefore enforce safety by exposing no move, challenge, chat, abort, resign, or
+other mutating API methods.
+
 All requests shall include an identifying `User-Agent`.
 
 Implement:
@@ -495,13 +502,72 @@ Implement:
 
 The first networking milestone shall observe games without submitting moves.
 
+### 9.1 First read-only client slice
+
+The first client slice shall:
+
+- Open `GET /api/stream/event` and
+  `GET /api/board/game/stream/{gameId}` only.
+- Send `Authorization: Bearer ...`, `Accept: application/x-ndjson`, and an
+  identifying `User-Agent` on every request.
+- Ignore empty NDJSON keep-alive lines.
+- Parse and validate `gameStart`, `gameFinish`, `gameFull`, and `gameState`
+  events into typed immutable models.
+- Reconstruct the complete position from the initial FEN plus the complete UCI
+  move list, rejecting invalid or internally inconsistent streams.
+- Surface HTTP 401/403/404 errors without including the token.
+- Convert HTTP 429 into an explicit retry delay, preferring `Retry-After` and
+  otherwise waiting at least 60 seconds.
+- Provide bounded exponential reconnect delays without sleeping inside the
+  parser or HTTP transport.
+
+The transport shall be injectable so automated tests never contact Lichess.
+
+**Implementation status:** The typed read-only account and Board game stream
+client is implemented. It reconstructs standard-chess FEN from the complete UCI
+move list, exposes players, colors, clocks, side to move, status, winner, and
+result, validates game identity and event ordering, handles keep-alives, and
+surfaces redacted HTTP/protocol errors.
+
+The desktop UI now provides explicit connect and disconnect controls, a
+persistent Lichess status line, and separate `Physical position` and
+`Lichess position` board tabs. Remote updates render their reconstructed FEN
+and last move on the Lichess board without changing the accepted physical
+position or camera reference. Network iteration runs in a cancellable Qt worker
+thread and never on the camera/UI thread. The worker keeps at most one HTTP
+stream open: it closes the account stream after `gameStart`, follows that game,
+and returns to the account stream after a terminal game state. It stops
+permanently for authentication and protocol failures, honors `Retry-After` for
+HTTP 429, and otherwise reconnects with bounded exponential backoff, including
+after a socket or SSL read timeout. A successfully opened stream resets the
+backoff sequence. Disconnect checks include blank keep-alive lines so an idle
+stream can stop cooperatively.
+
+If the network path blocks long-lived HTTP response headers, the worker falls
+back to read-only polling. It discovers games through
+`GET /api/account/playing` and reconstructs the active game from
+`GET /game/export/{gameId}` every five seconds, while keeping only one request
+active at a time. Streaming remains preferred because polling exports do not
+provide live clock values for correspondence games. The UI explicitly reports
+when polling is active and when clocks are unavailable.
+
+The Lichess state is displayed for observation only and does not yet change the
+local legal game, physical reference, or projector. Live account acceptance
+remains to be completed with a locally configured token.
+
 Official API reference:
 <https://github.com/lichess-org/api/blob/master/doc/specs/lichess-api.yaml>
 
-### 9.1 Phase 6 acceptance gate
+### 9.2 Phase 6 acceptance gate
 
 The application follows a live game and reconstructs exactly the same position
 as Lichess after every streamed event and after reconnecting.
+
+**Acceptance status:** Live-accepted against a standard correspondence game
+with Stockfish. On the tested network, blocked streaming response headers
+triggered the read-only polling fallback, which discovered the active game,
+reconstructed its move history and position, and updated the separate Lichess
+board tab after subsequent moves.
 
 ## 10. Phase 7: Incoming Opponent Moves
 

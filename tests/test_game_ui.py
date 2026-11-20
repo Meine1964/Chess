@@ -1,10 +1,20 @@
 from src.chess_camera.camera_app import (
     _accepted_position_message,
+    _format_lichess_clock,
     _illegal_correction_message,
+    _lichess_board_state,
+    _lichess_game_state_message,
+    _lichess_polling_snapshot_message,
     _reference_tracking_status_message,
     _turn_indicator_state,
 )
 from src.chess_camera.legal_game import LegalGame
+from src.chess_camera.lichess_client import (
+    LichessGameFull,
+    LichessGameState,
+    LichessPlayer,
+    LichessPollingSnapshot,
+)
 from src.chess_camera.reference_move_tracker import (
     ReferenceTrackerState,
     ReferenceTrackerUpdate,
@@ -13,6 +23,82 @@ from src.chess_camera.reference_move_tracker import (
 
 def test_turn_indicator_is_hidden_in_diagnostic_mode() -> None:
     assert _turn_indicator_state("diagnostic", LegalGame()) is None
+
+
+def test_lichess_game_state_message_reports_clocks_and_result() -> None:
+    state = LichessGameState(
+        (),
+        "unused",
+        "black",
+        65000,
+        9000,
+        0,
+        0,
+        "started",
+        None,
+        "*",
+    )
+
+    assert _format_lichess_clock(-1) == "0:00"
+    assert _lichess_game_state_message(state) == (
+        "Lichess: Black to move; White 1:05, Black 0:09; "
+        "status started; result *."
+    )
+
+
+def test_polling_message_reports_unavailable_correspondence_clocks() -> None:
+    state = LichessGameState(
+        (),
+        "unused",
+        "white",
+        0,
+        0,
+        0,
+        0,
+        "started",
+        None,
+        "*",
+    )
+    snapshot = LichessPollingSnapshot(
+        LichessGameFull(
+            "oozTO3xk",
+            "unused",
+            LichessPlayer("white", "Meine", 1500),
+            LichessPlayer("black", "Stockfish level 1", None),
+            state,
+        ),
+        False,
+    )
+
+    assert _lichess_polling_snapshot_message(snapshot) == (
+        "Lichess game oozTO3xk: Meine (White) vs "
+        "Stockfish level 1 (Black). White to move; "
+        "clocks unavailable for this game; status started; result *. "
+        "Connected by read-only polling."
+    )
+
+
+def test_lichess_board_state_uses_remote_fen_and_last_move() -> None:
+    game = LegalGame()
+    result = game.apply_move((6, 4), (4, 4))
+    state = LichessGameState(
+        ("e2e4",),
+        result.fen,
+        "black",
+        0,
+        0,
+        0,
+        0,
+        "started",
+        None,
+        "*",
+    )
+
+    position, last_move = _lichess_board_state(state)
+
+    assert (6, 4) not in position
+    assert position[(4, 4)] == "P"
+    assert last_move == ((6, 4), (4, 4))
 
 
 def test_turn_indicator_tracks_authoritative_side_to_move() -> None:

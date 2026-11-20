@@ -8,7 +8,7 @@ from typing import cast
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QSettings, QTimer, Qt
+from PySide6.QtCore import QSettings, QThread, QTimer, Qt
 from PySide6.QtGui import (
     QCloseEvent,
     QGuiApplication,
@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSpinBox,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -59,6 +60,15 @@ from .chess_position import (
 from .chessboard_widget import ChessboardWidget, rotate_square
 from .diagnostics import DiagnosticStore
 from .legal_game import GameMode, LegalGame, LegalMoveResult
+from .lichess_client import (
+    AccountGameEvent,
+    LichessConfigurationError,
+    LichessGameFull,
+    LichessGameState,
+    LichessPollingSnapshot,
+    LichessReadOnlyClient,
+)
+from .lichess_worker import LichessConnectionWorker
 from .occupancy import (
     SquareOccupancyDetector,
     detect_starting_position_orientation,
@@ -171,6 +181,69 @@ def _reference_tracking_status_message(
             "move one piece at a time."
         )
     return update.message
+
+
+def _format_lichess_clock(milliseconds: int) -> str:
+    total_seconds = max(0, milliseconds) // 1000
+    minutes, seconds = divmod(total_seconds, 60)
+    return f"{minutes}:{seconds:02d}"
+
+
+def _lichess_game_state_message(state: LichessGameState) -> str:
+    return (
+        f"Lichess: {state.turn.capitalize()} to move; "
+        f"White {_format_lichess_clock(state.white_time_ms)}, "
+        f"Black {_format_lichess_clock(state.black_time_ms)}; "
+        f"status {state.status}; result {state.result}."
+    )
+
+
+def _lichess_polling_snapshot_message(
+    snapshot: LichessPollingSnapshot,
+) -> str:
+    game = snapshot.game
+    state = game.state
+    clock_text = (
+        f"White {_format_lichess_clock(state.white_time_ms)}, "
+        f"Black {_format_lichess_clock(state.black_time_ms)}; "
+        if snapshot.clocks_available
+        else "clocks unavailable for this game; "
+    )
+    return (
+        f"Lichess game {game.game_id}: "
+        f"{game.white.name} (White) vs {game.black.name} (Black). "
+        f"{state.turn.capitalize()} to move; {clock_text}"
+        f"status {state.status}; result {state.result}. "
+        "Connected by read-only polling."
+    )
+
+
+def _lichess_board_state(
+    state: LichessGameState,
+) -> tuple[
+    Position,
+    tuple[tuple[int, int], tuple[int, int]] | None,
+]:
+    position = LegalGame(state.fen).position
+    if not state.moves:
+        return position, None
+    uci = state.moves[-1]
+    if len(uci) < 4:
+        raise ValueError("A Lichess move must contain two squares.")
+    return position, (
+        _ui_square_from_name(uci[:2]),
+        _ui_square_from_name(uci[2:4]),
+    )
+
+
+def _ui_square_from_name(name: str) -> tuple[int, int]:
+    if (
+        len(name) != 2
+        or name[0] not in "abcdefgh"
+        or name[1] not in "12345678"
+    ):
+        raise ValueError(f"Invalid chess square: {name}")
+    return 8 - int(name[1]), ord(name[0]) - ord("a")
 
 
 def _is_external_camera(
@@ -320,6 +393,10 @@ class CameraWindow(QMainWindow):
         self._piece_synchronizer = PiecePositionSynchronizer()
         self._legal_game = LegalGame()
         self._game_mode: GameMode = "diagnostic"
+        self._lichess_thread: QThread | None = None
+        self._lichess_worker: LichessConnectionWorker | None = None
+        self._lichess_disconnect_requested = False
+        self._close_pending = False
         self._latest_stable_occupied_ui: (
             frozenset[tuple[int, int]] | None
         ) = None
@@ -348,6 +425,14 @@ class CameraWindow(QMainWindow):
         self._preview.setMinimumSize(960, 540)
         self._preview.setStyleSheet("background: #202020;")
         self._board_widget = ChessboardWidget()
+        self._lichess_board_widget = ChessboardWidget()
+        self._lichess_board_widget.setEnabled(False)
+        self._board_tabs = QTabWidget()
+        self._board_tabs.addTab(self._board_widget, "Physical position")
+        self._board_tabs.addTab(
+            self._lichess_board_widget,
+            "Lichess position",
+        )
         self._restore_piece_position()
         self._restore_game_mode()
         self._board_widget.setEnabled(False)
@@ -422,12 +507,17 @@ class CameraWindow(QMainWindow):
             self._toggle_physical_reconciliation
         )
         self._reconcile_button.setEnabled(False)
+        self._lichess_button = QPushButton("Connect to Lichess")
+        self._lichess_button.clicked.connect(
+            self._toggle_lichess_connection
+        )
         button_layout = QHBoxLayout()
         button_layout.addWidget(self._snapshot_button)
         button_layout.addWidget(self._resume_button)
         button_layout.addWidget(self._save_diagnostics)
         button_layout.addWidget(self._reset_pieces_button)
         button_layout.addWidget(self._reconcile_button)
+        button_layout.addWidget(self._lichess_button)
 
         self._screens = list(QGuiApplication.screens())
         self._projector_selector = QComboBox()
@@ -601,10 +691,16 @@ class CameraWindow(QMainWindow):
         self._piece_status.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
+        self._lichess_status = QLabel(
+            "Lichess disconnected. Configure LICHESS_TOKEN to connect."
+        )
+        self._lichess_status.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
 
         content_layout = QHBoxLayout()
         content_layout.addWidget(self._preview, stretch=3)
-        content_layout.addWidget(self._board_widget, stretch=2)
+        content_layout.addWidget(self._board_tabs, stretch=2)
 
         layout = QVBoxLayout()
         layout.addLayout(content_layout, stretch=1)
@@ -621,6 +717,7 @@ class CameraWindow(QMainWindow):
         layout.addWidget(self._alignment_status)
         layout.addWidget(self._occupancy_status)
         layout.addWidget(self._piece_status)
+        layout.addWidget(self._lichess_status)
         layout.addWidget(self._instructions)
         container = QWidget()
         container.setLayout(layout)
@@ -2241,6 +2338,95 @@ class CameraWindow(QMainWindow):
             "starting position or restore its saved legal game."
         )
 
+    def _toggle_lichess_connection(self) -> None:
+        if self._lichess_worker is not None:
+            self._lichess_disconnect_requested = True
+            self._lichess_button.setEnabled(False)
+            self._lichess_button.setText("Disconnecting...")
+            self._lichess_status.setText(
+                "Disconnecting from Lichess after the current keep-alive."
+            )
+            self._lichess_worker.request_stop()
+            return
+        try:
+            client = LichessReadOnlyClient.from_environment()
+        except LichessConfigurationError as error:
+            self._lichess_status.setText(str(error))
+            return
+        thread = QThread(self)
+        worker = LichessConnectionWorker(client)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.status_changed.connect(self._lichess_status.setText)
+        worker.account_event_received.connect(
+            self._lichess_account_event_received
+        )
+        worker.game_event_received.connect(
+            self._lichess_game_event_received
+        )
+        worker.failed.connect(self._lichess_status.setText)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._lichess_thread_finished)
+        thread.finished.connect(thread.deleteLater)
+        self._lichess_thread = thread
+        self._lichess_worker = worker
+        self._lichess_disconnect_requested = False
+        self._lichess_button.setText("Disconnect Lichess")
+        self._lichess_status.setText("Connecting to Lichess...")
+        thread.start()
+
+    def _lichess_account_event_received(self, event: object) -> None:
+        if not isinstance(event, AccountGameEvent):
+            return
+        if event.event_type == "gameStart":
+            self._lichess_status.setText(
+                f"Lichess game {event.game_id} started as "
+                f"{event.color} against {event.opponent_name}; loading state."
+            )
+        else:
+            self._lichess_status.setText(
+                f"Lichess game {event.game_id} finished."
+            )
+
+    def _lichess_game_event_received(self, event: object) -> None:
+        if isinstance(event, LichessPollingSnapshot):
+            self._update_lichess_board(event.game.state)
+            self._lichess_status.setText(
+                _lichess_polling_snapshot_message(event)
+            )
+        elif isinstance(event, LichessGameFull):
+            self._update_lichess_board(event.state)
+            self._lichess_status.setText(
+                f"Lichess game {event.game_id}: "
+                f"{event.white.name} (White) vs "
+                f"{event.black.name} (Black). "
+                f"{_lichess_game_state_message(event.state)}"
+            )
+        elif isinstance(event, LichessGameState):
+            self._update_lichess_board(event)
+            self._lichess_status.setText(
+                _lichess_game_state_message(event)
+            )
+
+    def _update_lichess_board(self, state: LichessGameState) -> None:
+        position, last_move = _lichess_board_state(state)
+        self._lichess_board_widget.set_pieces(position)
+        self._lichess_board_widget.set_occupied_squares(position)
+        self._lichess_board_widget.set_last_move(last_move)
+        self._board_tabs.setCurrentWidget(self._lichess_board_widget)
+
+    def _lichess_thread_finished(self) -> None:
+        self._lichess_thread = None
+        self._lichess_worker = None
+        self._lichess_button.setText("Connect to Lichess")
+        self._lichess_button.setEnabled(True)
+        if self._lichess_disconnect_requested:
+            self._lichess_status.setText("Lichess disconnected.")
+        self._lichess_disconnect_requested = False
+        if self._close_pending:
+            QTimer.singleShot(0, self.close)
+
     def _update_turn_indicator(self) -> None:
         state = _turn_indicator_state(self._game_mode, self._legal_game)
         if state is None:
@@ -2601,6 +2787,18 @@ class CameraWindow(QMainWindow):
         super().keyPressEvent(event)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if (
+            self._lichess_worker is not None
+            and self._lichess_thread is not None
+            and self._lichess_thread.isRunning()
+        ):
+            self._close_pending = True
+            self._lichess_status.setText(
+                "Disconnecting from Lichess before closing."
+            )
+            self._lichess_worker.request_stop()
+            event.ignore()
+            return
         self._calibrator.cancel()
         self._alignment_monitor.clear()
         if self._camera is not None:
