@@ -4,6 +4,7 @@ from src.chess_camera.legal_game import LegalGame
 from src.chess_camera.legal_signature_matcher import (
     match_legal_move_signature,
 )
+from src.chess_camera.piece_color_classifier import PieceColorClassification
 
 
 def _scores(*changes: tuple[tuple[int, int], float]) -> np.ndarray:
@@ -65,6 +66,34 @@ def test_matches_castling_four_square_signature() -> None:
     assert match.signature is not None
     assert match.signature.uci == "e1g1"
     assert match.signature.kind == "castling"
+
+
+def test_capture_requires_vacated_source_and_mover_color_destination() -> None:
+    game = LegalGame("4k3/8/8/4p3/8/5N2/8/4K3 w - - 0 1")
+    scores = _scores(((5, 5), 0.2), ((3, 4), 0.2))
+    valid_colors = {
+        (5, 5): PieceColorClassification("empty", 0.01, 0.2),
+        (3, 4): PieceColorClassification("white", 0.02, 0.18),
+    }
+    uncertain_destination = {
+        **valid_colors,
+        (3, 4): PieceColorClassification("uncertain", 0.12, 0.01),
+    }
+
+    matched = match_legal_move_signature(
+        scores,
+        game.legal_move_signatures,
+        piece_colors=valid_colors,
+    )
+    rejected = match_legal_move_signature(
+        scores,
+        game.legal_move_signatures,
+        piece_colors=uncertain_destination,
+    )
+
+    assert matched.signature is not None
+    assert matched.signature.uci == "f3e5"
+    assert rejected.signature is None
 
 
 def test_queen_is_the_only_generated_promotion_signature() -> None:

@@ -479,9 +479,11 @@ notice are vendored with the application. The standard position model, Qt SVG
 rendering, reference-image one-source/one-destination synchronization,
 ambiguity handling, and explicit starting-position reset are implemented.
 Offline legal authority, persistent turn indication, illegal-move correction,
-and targeted opposite-color residual resolution are also implemented. Physical
-captures, special-move signatures, and arbitrary-position setup remain future
-work.
+targeted opposite-color residual resolution, legal physical signatures, and
+single-action captures are implemented and have passed live physical-board
+acceptance. Reference-relative physical piece-color classification has also
+passed live acceptance for white and black captures and wrong-color rejection;
+arbitrary-position setup remains future work.
 
 ### Milestone 1: Asset import
 

@@ -1,7 +1,7 @@
 # Lichess Physical-Board Integration Roadmap
 
-**Version:** 0.4
-**Status:** Phase 1 and Phase 2 legal-signature matching implemented
+**Version:** 0.5
+**Status:** Phase 2 and Phase 3 first slice live-accepted
 **Platform:** Python on Windows  
 
 **Related specifications:**
@@ -266,6 +266,11 @@ not generated. A regression shall cover a black `e2xf1=Q` capture-promotion
 while the black king on `e8` remains in check from a white pawn on `d7`; the
 physical action must be detected and marked illegal.
 
+**Live acceptance:** Completed. Ordinary captures, castling, en passant,
+queen promotion, capture-promotion, check-constrained illegal moves, correction
+restoration, and camera remapping behavior have been exercised on the physical
+board.
+
 ## 6. Phase 3: Physical Piece-Color Classification
 
 The camera does not need to distinguish knights from bishops. It needs a
@@ -279,6 +284,15 @@ conservative per-square classification:
 The classifier should use known logical piece colors and the accepted
 reference as calibration evidence.
 
+The first implementation shall learn reference-relative appearance samples for
+empty squares, white pieces, and black pieces. Each sample shall use a
+background-relative LAB descriptor from the square interior so classification
+does not depend only on absolute brightness or board-square color. Empty
+samples shall be compared within the same board-square parity. A current square
+shall be classified only when the best class is within the configured distance
+limit and separated from the runner-up by a confidence margin; otherwise its
+label shall be `uncertain`.
+
 Capture acceptance requires:
 
 1. A known source piece.
@@ -290,6 +304,23 @@ Capture acceptance requires:
 7. A unique matching legal move.
 
 Uncertain color evidence shall preserve the previous position and reference.
+
+For the first integration slice, completed captures and capture-promotions
+shall require the observed source to classify as empty and the observed
+destination to classify as the moving piece's color. This evidence supplements,
+and does not replace, the physical signature thresholds or authoritative legal
+move check.
+
+**Implementation status:** The reference-relative classifier and first capture
+integration slice are implemented. Focused tests cover empty, white, black, and
+uncertain labels; successful source-vacancy and mover-color evidence; rejection
+of uncertain capture destinations; and the existing ordinary-capture and
+capture-promotion tracker workflows.
+
+**Live acceptance:** Completed with a legal white capture, a legal black
+capture, and a wrong-color destination replacement. Both legal captures
+committed successfully, while the wrong-color destination preserved the
+accepted position, FEN, turn, and reference.
 
 ## 7. Phase 4: Complete Physical Move Workflows
 

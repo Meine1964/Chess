@@ -6,6 +6,7 @@ import numpy as np
 from .board_detector import FloatArray
 from .chess_position import Square
 from .legal_game import LegalMoveSignature
+from .piece_color_classifier import PieceColorClassification
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ def match_legal_move_signature(
     signatures: Sequence[LegalMoveSignature],
     *,
     explained_residuals: Mapping[str, Collection[Square]] | None = None,
+    piece_colors: Mapping[Square, PieceColorClassification] | None = None,
     minimum_square_change: float = 0.08,
     minimum_dominance: float = 0.025,
 ) -> LegalSignatureMatch:
@@ -40,6 +42,12 @@ def match_legal_move_signature(
     explained = {} if explained_residuals is None else explained_residuals
     evidence: list[SignatureEvidence] = []
     for signature in signatures:
+        if (
+            piece_colors is not None
+            and signature.kind in ("capture", "capture-promotion")
+            and not _capture_colors_match(signature, piece_colors)
+        ):
+            continue
         expected = {change.square for change in signature.changes}
         expected_scores = [float(scores[square]) for square in expected]
         if not expected_scores:
@@ -97,3 +105,20 @@ def match_legal_move_signature(
         ranked,
         f"Legal physical signature {ranked[0].signature.uci} matched.",
     )
+
+
+def _capture_colors_match(
+    signature: LegalMoveSignature,
+    piece_colors: Mapping[Square, PieceColorClassification],
+) -> bool:
+    for change in signature.changes:
+        if change.square == signature.source:
+            expected = "empty"
+        elif change.square == signature.destination and change.after is not None:
+            expected = "white" if change.after.isupper() else "black"
+        else:
+            continue
+        classification = piece_colors.get(change.square)
+        if classification is None or classification.label != expected:
+            return False
+    return True

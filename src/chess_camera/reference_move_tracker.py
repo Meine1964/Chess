@@ -8,6 +8,7 @@ from .board_detector import FloatArray, ImageArray
 from .chess_position import Position, Square, square_name
 from .legal_game import LegalMoveSignature
 from .legal_signature_matcher import match_legal_move_signature
+from .piece_color_classifier import classify_piece_colors
 from .occupancy import rectify_board
 
 ReferenceTrackerState = Literal[
@@ -203,6 +204,18 @@ class ReferenceMoveTracker:
             )
         move: tuple[Square, Square] | None = None
         if physical_signatures:
+            piece_colors = (
+                classify_piece_colors(
+                    self._reference,
+                    normalized,
+                    position,
+                )
+                if any(
+                    signature.kind in ("capture", "capture-promotion")
+                    for signature in physical_signatures
+                )
+                else None
+            )
             explained_residuals = {
                 signature.uci: tuple(
                     square
@@ -221,6 +234,7 @@ class ReferenceMoveTracker:
                 scores,
                 physical_signatures,
                 explained_residuals=explained_residuals,
+                piece_colors=piece_colors,
                 minimum_square_change=self._minimum_square_change,
                 minimum_dominance=self._minimum_dominance,
             )
