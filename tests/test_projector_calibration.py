@@ -544,7 +544,7 @@ def test_square_projection_waits_for_white_side_orientation() -> None:
 
 def test_occupied_square_skips_runtime_optical_alignment_check() -> None:
     from types import SimpleNamespace
-    from unittest.mock import MagicMock
+    from unittest.mock import MagicMock, patch
 
     from src.chess_camera.camera_app import CameraWindow
 
@@ -563,13 +563,84 @@ def test_occupied_square_skips_runtime_optical_alignment_check() -> None:
         _record_runtime_diagnostic=MagicMock(),
     )
 
-    CameraWindow._project_board_square_after_black(window, 0, 2)
+    with patch(
+        "src.chess_camera.camera_app.QTimer.singleShot"
+    ) as single_shot:
+        CameraWindow._project_board_square_after_black(window, 0, 2)
 
     window._alignment_monitor.set_selected_square.assert_called_once_with(
         0,
         2,
         verify_projection=False,
     )
+    assert single_shot.call_args.args[0] == 1000
+
+
+def test_suspending_projection_clears_marker_but_remembers_square() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    remembered_square = (4, 2)
+    window = SimpleNamespace(
+        _selected_board_square=remembered_square,
+        _pending_board_square=(3, 2),
+        _remembered_board_square=remembered_square,
+        _board_widget=MagicMock(),
+    )
+
+    CameraWindow._suspend_selected_square(window)
+
+    assert window._selected_board_square is None
+    assert window._pending_board_square is None
+    assert window._remembered_board_square == remembered_square
+    window._board_widget.set_selected_square.assert_called_once_with(None)
+    window._board_widget.set_last_move.assert_not_called()
+
+
+def test_selected_square_timeout_returns_projector_to_black() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    selected_square = (4, 2)
+    window = SimpleNamespace(
+        _selected_board_square=selected_square,
+        _projector_window=SimpleNamespace(output_mode="selected_square"),
+        _black_projector=MagicMock(),
+        _projector_status=MagicMock(),
+    )
+
+    CameraWindow._finish_selected_square_projection(
+        window,
+        *selected_square,
+    )
+
+    window._black_projector.assert_called_once_with()
+    window._projector_status.setText.assert_called_once_with(
+        "Square illumination finished; projector returned to black."
+    )
+
+
+def test_stale_selected_square_timeout_does_not_clear_newer_square() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    window = SimpleNamespace(
+        _selected_board_square=(3, 2),
+        _projector_window=SimpleNamespace(output_mode="selected_square"),
+        _black_projector=MagicMock(),
+        _projector_status=MagicMock(),
+    )
+
+    CameraWindow._finish_selected_square_projection(window, 4, 2)
+
+    window._black_projector.assert_not_called()
+    window._projector_status.setText.assert_not_called()
 
 
 def test_failed_recalibration_invalidates_previous_mapping() -> None:
@@ -656,6 +727,42 @@ def test_open_projector_marks_black_as_authoritative_output() -> None:
 
     assert CameraWindow._open_projector(window) is True
     window._alignment_monitor.set_black.assert_called_once_with()
+
+
+def test_black_action_opens_and_raises_projector_before_clearing_marker() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    window = SimpleNamespace(
+        _calibrator=SimpleNamespace(active=False),
+        _open_projector=MagicMock(return_value=True),
+        _suspend_selected_square=MagicMock(),
+        _projector_status=MagicMock(),
+    )
+
+    CameraWindow._black_projector(window)
+
+    window._open_projector.assert_called_once_with()
+    window._suspend_selected_square.assert_called_once_with()
+
+
+def test_missing_remembered_projector_falls_back_to_primary() -> None:
+    from types import SimpleNamespace
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    primary = SimpleNamespace(name=lambda: "primary")
+    secondary = SimpleNamespace(name=lambda: "secondary")
+
+    selected = CameraWindow._default_projector_index(
+        [primary, secondary],
+        primary,
+        "missing-projector",
+    )
+
+    assert selected == 0
 
 
 def test_reset_to_start_blacks_projector_before_verification() -> None:

@@ -32,7 +32,11 @@ The initial calibration path is implemented with:
   resolution, and desktop position.
 - Exact frameless placement on the selected display without an operating
   system fullscreen transition.
-- A safe black state on startup, cancellation, timeout, and failure.
+- A safe black state on startup, cancellation, timeout, and failure. Startup
+  actively opens the remembered projector display and raises a black frameless
+  always-on-top window so an operating-system display screen saver cannot
+  remain visible. If the remembered display is unavailable, startup uses the
+  primary display.
 - Projector intensity 255. Live empty-board evidence under daylight showed
   that intensity 112 produced a median response of only two grayscale levels
   despite zero saturation, so calibration uses the available optical

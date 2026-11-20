@@ -852,6 +852,7 @@ class CameraWindow(QMainWindow):
         self._occupancy_timer.setInterval(100)
         self._occupancy_timer.timeout.connect(self._update_occupancy)
         self._occupancy_timer.start()
+        QTimer.singleShot(0, self._black_projector)
         if selected_index is None:
             self._wait_for_external_camera()
         else:
@@ -870,6 +871,8 @@ class CameraWindow(QMainWindow):
         for index, screen in enumerate(screens):
             if screen.name() == saved_screen_name:
                 return index
+        if saved_screen_name and primary_screen in screens:
+            return screens.index(primary_screen)
         for index, screen in enumerate(screens):
             if screen is not primary_screen:
                 return index
@@ -1338,9 +1341,9 @@ class CameraWindow(QMainWindow):
     def _black_projector(self) -> None:
         if self._calibrator.active:
             self._calibrator.cancel()
-        self._projector_window.show_black()
+        if not self._open_projector():
+            return
         self._suspend_selected_square()
-        self._alignment_monitor.set_black()
         self._projector_status.setText(
             "Projector is black; the selected board square is remembered."
         )
@@ -1704,6 +1707,25 @@ class CameraWindow(QMainWindow):
             },
             include_images=True,
         )
+        QTimer.singleShot(
+            1000,
+            lambda: self._finish_selected_square_projection(row, column),
+        )
+
+    def _finish_selected_square_projection(
+        self,
+        row: int,
+        column: int,
+    ) -> None:
+        if (
+            self._selected_board_square != (row, column)
+            or self._projector_window.output_mode != "selected_square"
+        ):
+            return
+        self._black_projector()
+        self._projector_status.setText(
+            "Square illumination finished; projector returned to black."
+        )
 
     def _activate_calibration_result(
         self,
@@ -1903,9 +1925,7 @@ class CameraWindow(QMainWindow):
     def _suspend_selected_square(self) -> None:
         self._selected_board_square = None
         self._pending_board_square = None
-        self._board_widget.set_selected_square(
-            self._remembered_board_square
-        )
+        self._board_widget.set_selected_square(None)
 
     def _reset_occupancy(self, status: str) -> None:
         self._occupancy_detector.reset()

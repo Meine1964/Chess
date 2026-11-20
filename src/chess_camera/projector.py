@@ -66,7 +66,11 @@ def focus_pattern(
 
 class ProjectorWindow(QWidget):
     def __init__(self) -> None:
-        super().__init__(None, Qt.WindowType.FramelessWindowHint)
+        super().__init__(
+            None,
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint,
+        )
         self._display_mode: DisplayMode = "black"
         self._pattern: QImage | None = None
         self._projector_grid: NDArray[np.float32] | None = None

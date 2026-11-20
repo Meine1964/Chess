@@ -2,6 +2,7 @@ import os
 
 import numpy as np
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -34,6 +35,17 @@ def test_focus_pattern_has_checkerboard_cross_and_border() -> None:
     assert np.all(pattern[:, 0] == 255)
     assert pattern[24, 20] == 255
     assert pattern[12, 40] == 255
+
+
+def test_projector_window_stays_above_screen_savers(
+    application: QApplication,
+) -> None:
+    window = ProjectorWindow()
+
+    assert (
+        window.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
+        == Qt.WindowType.WindowStaysOnTopHint
+    )
 
 
 def test_projector_renders_patterns_and_calibrated_squares(

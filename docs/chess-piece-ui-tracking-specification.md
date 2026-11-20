@@ -405,12 +405,21 @@ shall not infer arbitrary piece identities from occupancy dots.
 ## 15. Interaction with Projector Selection
 
 Clicking a UI square shall continue to project the corresponding physical
-square.
+square. The projection and its selected-square UI marker shall remain active
+for one second, then automatically return to authoritative black and clear the
+temporary marker. A timeout belonging to an older selection shall not cancel
+a newer projected square.
 
 Any action that renders black projector output, including **Open projector
 (black)** and **Black**, shall also mark black as the authoritative projector
 state used by the occupancy gate. The displayed projector status and the
 occupancy gate shall not disagree about whether the projector is black.
+The **Black** action shall open or raise the selected projector window before
+rendering black, so a closed, obscured, or screen-saver-covered output cannot
+remain visible.
+Rendering black shall clear the active selected-square marker from the
+physical-position UI while retaining the remembered square internally for
+later reuse. It shall not clear the accepted last-move highlighting.
 
 Piece rendering shall not:
 
