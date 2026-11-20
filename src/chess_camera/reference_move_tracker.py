@@ -6,6 +6,8 @@ import numpy as np
 
 from .board_detector import FloatArray, ImageArray
 from .chess_position import Position, Square, square_name
+from .legal_game import LegalMoveSignature
+from .legal_signature_matcher import match_legal_move_signature
 from .occupancy import rectify_board
 
 ReferenceTrackerState = Literal[
@@ -57,6 +59,7 @@ class ReferenceMoveTracker:
         self._candidate_move: tuple[Square, Square] | None = None
         self._candidate_count = 0
         self._pending_reference: ImageArray | None = None
+        self._camera_grid_remapped = False
 
     @property
     def initialized(self) -> bool:
@@ -68,6 +71,7 @@ class ReferenceMoveTracker:
 
     def clear(self) -> None:
         self._reference = None
+        self._camera_grid_remapped = False
         self.reset_activity()
 
     def reset_activity(self) -> None:
@@ -89,6 +93,7 @@ class ReferenceMoveTracker:
             ui_quarter_turns,
             self._canonical_size,
         )
+        self._camera_grid_remapped = False
         self.reset_activity()
 
     def set_canonical_reference(self, reference: ImageArray) -> None:
@@ -101,6 +106,11 @@ class ReferenceMoveTracker:
                 "Canonical reference has an unexpected image shape."
             )
         self._reference = np.asarray(reference, dtype=np.uint8).copy()
+        self._camera_grid_remapped = False
+        self.reset_activity()
+
+    def note_camera_grid_remap(self) -> None:
+        self._camera_grid_remapped = True
         self.reset_activity()
 
     def observe(
@@ -109,6 +119,7 @@ class ReferenceMoveTracker:
         camera_grid: FloatArray,
         ui_quarter_turns: int,
         position: Position,
+        physical_signatures: tuple[LegalMoveSignature, ...] = (),
     ) -> ReferenceTrackerUpdate:
         if self._reference is None:
             return ReferenceTrackerUpdate(
@@ -154,6 +165,7 @@ class ReferenceMoveTracker:
         has_large_obstruction = _has_large_obstruction(
             self._reference,
             normalized,
+            allow_boundary_remap_residuals=self._camera_grid_remapped,
         )
 
         self._settled_count += 1
@@ -175,6 +187,7 @@ class ReferenceMoveTracker:
         if float(np.max(scores)) < self._minimum_square_change:
             if has_large_obstruction:
                 self._clear_pending()
+                self._camera_grid_remapped = False
                 return ReferenceTrackerUpdate(
                     "waiting-for-clear",
                     None,
@@ -188,12 +201,42 @@ class ReferenceMoveTracker:
                 "Board matches the accepted reference.",
                 scores,
             )
-        move = self._select_move(
-            scores,
-            position,
-            self._reference,
-            normalized,
-        )
+        move: tuple[Square, Square] | None = None
+        if physical_signatures:
+            explained_residuals = {
+                signature.uci: tuple(
+                    square
+                    for square in position
+                    if _is_retained_opposite_piece_residual(
+                        self._reference,
+                        normalized,
+                        square,
+                        signature.source,
+                        position,
+                    )
+                )
+                for signature in physical_signatures
+            }
+            legal_match = match_legal_move_signature(
+                scores,
+                physical_signatures,
+                explained_residuals=explained_residuals,
+                minimum_square_change=self._minimum_square_change,
+                minimum_dominance=self._minimum_dominance,
+            )
+            if legal_match.signature is not None:
+                move = (
+                    legal_match.signature.source,
+                    legal_match.signature.destination,
+                )
+        if move is None:
+            move = self._select_move(
+                scores,
+                position,
+                self._reference,
+                normalized,
+                allow_boundary_residuals=self._camera_grid_remapped,
+            )
         if move is None:
             self._candidate_move = None
             self._candidate_count = 0
@@ -214,6 +257,7 @@ class ReferenceMoveTracker:
             self._reference,
             normalized,
             ignored_squares=move,
+            allow_boundary_remap_residuals=self._camera_grid_remapped,
         ):
             self._clear_pending()
             return ReferenceTrackerUpdate(
@@ -265,6 +309,7 @@ class ReferenceMoveTracker:
         accepted_reference = self._pending_reference
         self.reset_activity()
         self._reference = accepted_reference
+        self._camera_grid_remapped = False
 
     def rejected_move_is_restored(
         self,
@@ -294,6 +339,8 @@ class ReferenceMoveTracker:
         position: Position,
         reference: ImageArray,
         candidate: ImageArray,
+        *,
+        allow_boundary_residuals: bool = False,
     ) -> tuple[Square, Square] | None:
         occupied = set(position)
         if not occupied:
@@ -342,6 +389,10 @@ class ReferenceMoveTracker:
                 square = (row, column)
                 if (
                     float(remaining[square]) > remaining_limit
+                    and not (
+                        allow_boundary_residuals
+                        and _is_boundary_square(square)
+                    )
                     and not _is_retained_opposite_piece_residual(
                         reference,
                         candidate,
@@ -436,6 +487,8 @@ def _has_large_obstruction(
     reference: ImageArray,
     candidate: ImageArray,
     ignored_squares: tuple[Square, ...] = (),
+    *,
+    allow_boundary_remap_residuals: bool = False,
 ) -> bool:
     difference = cv2.absdiff(
         cv2.cvtColor(reference, cv2.COLOR_BGR2GRAY),
@@ -462,10 +515,16 @@ def _has_large_obstruction(
         cv2.connectedComponentsWithStats(mask)
     )
     minimum_square_pixels = square_size * square_size * 0.15
+    board_area = reference.shape[0] * reference.shape[1]
+    obstruction_components: list[tuple[set[Square], set[str]]] = []
+    residual_sides: set[str] = set()
     for component in range(1, component_count):
         area = statistics[component, cv2.CC_STAT_AREA]
-        covered_squares = sum(
-            np.count_nonzero(
+        covered_squares = {
+            (row, column)
+            for row in range(8)
+            for column in range(8)
+            if np.count_nonzero(
                 labels[
                     row * square_size : (row + 1) * square_size,
                     column * square_size : (column + 1) * square_size,
@@ -473,19 +532,66 @@ def _has_large_obstruction(
                 == component
             )
             >= minimum_square_pixels
-            for row in range(8)
-            for column in range(8)
+        }
+        sides = _component_boundary_sides(
+            statistics[component],
+            mask.shape,
         )
-        board_area = reference.shape[0] * reference.shape[1]
+        if (
+            area >= board_area * 0.0015
+            and sides
+            and covered_squares
+            and all(_is_boundary_square(square) for square in covered_squares)
+        ):
+            residual_sides.update(sides)
         if (
             area >= board_area * 0.0125
-            and covered_squares >= 3
+            and len(covered_squares) >= 3
         ) or (
             area >= board_area * 0.02
-            and covered_squares >= 2
+            and len(covered_squares) >= 2
         ):
-            return True
-    return False
+            obstruction_components.append((covered_squares, sides))
+    if not obstruction_components:
+        return False
+    if (
+        allow_boundary_remap_residuals
+        and len(residual_sides) >= 2
+        and all(
+            sides
+            and covered_squares
+            and all(
+                _is_boundary_square(square)
+                for square in covered_squares
+            )
+            for covered_squares, sides in obstruction_components
+        )
+    ):
+        return False
+    return True
+
+
+def _is_boundary_square(square: Square) -> bool:
+    row, column = square
+    return row in (0, 7) or column in (0, 7)
+
+
+def _component_boundary_sides(
+    statistics: np.ndarray,
+    shape: tuple[int, int],
+) -> set[str]:
+    x, y, width, height, _area = (int(value) for value in statistics)
+    image_height, image_width = shape
+    sides: set[str] = set()
+    if x == 0:
+        sides.add("left")
+    if x + width >= image_width:
+        sides.add("right")
+    if y == 0:
+        sides.add("top")
+    if y + height >= image_height:
+        sides.add("bottom")
+    return sides
 
 
 def _has_released_piece_footprint(

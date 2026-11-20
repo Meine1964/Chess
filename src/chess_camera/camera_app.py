@@ -1479,6 +1479,7 @@ class CameraWindow(QMainWindow):
         self._reset_occupancy(
             "Occupancy stabilizing after board movement."
         )
+        self._reference_move_tracker.note_camera_grid_remap()
         if not self._camera_only_calibration:
             self._projector_window.set_projector_grid(mapping.projector_grid)
         if (
@@ -1700,6 +1701,11 @@ class CameraWindow(QMainWindow):
                 self._calibration_result.mapping.camera_grid,
                 self._board_quarter_turns,
                 self._piece_synchronizer.position,
+                (
+                    self._legal_game.physical_move_signatures
+                    if self._game_mode == "offline-game"
+                    else ()
+                ),
             )
         except (ValueError, cv2.error) as error:
             self._occupancy_status.setText(
@@ -1745,13 +1751,24 @@ class CameraWindow(QMainWindow):
                 if newly_marked:
                     self._project_illegal_move_correction(update.move)
                 return
+        previous_position = self._piece_synchronizer.position
         try:
-            position_update = self._piece_synchronizer.accept_move(
-                source,
-                destination,
-            )
+            if legal_move is None:
+                position_update = self._piece_synchronizer.accept_move(
+                    source,
+                    destination,
+                )
+            else:
+                position_update = (
+                    self._piece_synchronizer.accept_authoritative_move(
+                        source,
+                        destination,
+                        legal_move.position,
+                    )
+                )
             self._reference_move_tracker.commit_accepted(update.move)
         except ValueError as error:
+            self._piece_synchronizer.restore(previous_position)
             if legal_move is not None:
                 self._legal_game.rollback()
             self._reference_move_tracker.reset_activity()
@@ -1896,8 +1913,8 @@ class CameraWindow(QMainWindow):
         physical_destination = self._physical_board_square(*destination)
         try:
             self._projector_window.show_correction(
-                physical_destination,
                 physical_source,
+                physical_destination,
             )
         except (RuntimeError, ValueError) as error:
             self._projector_status.setText(
@@ -1907,8 +1924,8 @@ class CameraWindow(QMainWindow):
             return
         self._alignment_monitor.set_paused("illegal move indication")
         self._projector_status.setText(
-            "Projecting the incorrect square in red and the correct square "
-            "in white for 2 seconds."
+            "Projecting the illegal move source and destination in red "
+            "for 2 seconds."
         )
         QTimer.singleShot(2000, self._finish_illegal_move_projection)
 

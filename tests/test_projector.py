@@ -10,7 +10,6 @@ from src.chess_camera.projector import (
     PROJECTED_ON_DARK_SQUARE,
     PROJECTED_ILLEGAL_MOVE,
     PROJECTED_ON_LIGHT_SQUARE,
-    PROJECTED_CORRECT_SQUARE,
     ProjectorWindow,
     focus_pattern,
     target_rectangle,
@@ -153,6 +152,6 @@ def test_projector_renders_patterns_and_calibrated_squares(
     application.processEvents()
     correction_image = window.grab().toImage()
     assert correction_image.pixelColor(145, 64) == PROJECTED_ILLEGAL_MOVE
-    assert correction_image.pixelColor(205, 99) == PROJECTED_CORRECT_SQUARE
+    assert correction_image.pixelColor(205, 99) == PROJECTED_ILLEGAL_MOVE
     assert correction_image.pixelColor(175, 64).red() == 0
     window.close()

@@ -138,6 +138,44 @@ class PiecePositionSynchronizer:
             f"Moved {square_name(source)}-{square_name(destination)}.",
         )
 
+    def accept_authoritative_move(
+        self,
+        source: Square,
+        destination: Square,
+        position: Mapping[Square, PieceCode],
+    ) -> PositionUpdate:
+        _validate_squares(frozenset({source, destination}))
+        if self._position is None:
+            raise ValueError("Piece position is not initialized.")
+        moving_piece = self._position.get(source)
+        if moving_piece is None:
+            raise ValueError(
+                f"No known UI piece is present on {square_name(source)}."
+            )
+        updated = _validated_position(position)
+        if source in updated:
+            raise ValueError(
+                f"The authoritative move did not vacate {square_name(source)}."
+            )
+        destination_piece = updated.get(destination)
+        if destination_piece is None:
+            raise ValueError(
+                "The authoritative move did not occupy "
+                f"{square_name(destination)}."
+            )
+        if moving_piece.isupper() != destination_piece.isupper():
+            raise ValueError(
+                "The authoritative destination piece has the wrong color."
+            )
+        self._position = updated
+        self._occupied_baseline = frozenset(updated)
+        return PositionUpdate(
+            "moved",
+            updated.copy(),
+            (source, destination),
+            f"Accepted {square_name(source)}-{square_name(destination)}.",
+        )
+
     def observe(
         self,
         occupied_squares: frozenset[Square],
@@ -181,6 +219,20 @@ def _validate_squares(squares: frozenset[Square]) -> None:
     for row, column in squares:
         if not 0 <= row < 8 or not 0 <= column < 8:
             raise ValueError("Occupied squares must be inside the 8x8 board.")
+
+
+def _validated_position(
+    position: Mapping[Square, PieceCode],
+) -> Position:
+    validated: Position = {}
+    for square, piece in position.items():
+        _validate_squares(frozenset({square}))
+        if piece not in frozenset("KQRBNPkqrbnp"):
+            raise ValueError(f"Unknown piece code: {piece}")
+        validated[square] = piece
+    if not validated:
+        raise ValueError("An authoritative piece position cannot be empty.")
+    return validated
 
 
 def _ambiguous_message(

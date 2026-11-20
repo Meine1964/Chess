@@ -1,7 +1,7 @@
 # Lichess Physical-Board Integration Roadmap
 
-**Version:** 0.2
-**Status:** Phase 1 implemented; Phases 2-8 planned
+**Version:** 0.4
+**Status:** Phase 1 and Phase 2 legal-signature matching implemented
 **Platform:** Python on Windows  
 
 **Related specifications:**
@@ -35,8 +35,11 @@ whether it is legal. It shall instead ask:
 
 For every legal move, the application shall generate an expected physical
 change signature and score the settled camera evidence against that signature.
-The move may be accepted only when one legal move explains the evidence
-unambiguously.
+It shall also generate queen-only pseudo-legal signatures for physical
+candidate detection. Pseudo-legal signatures obey piece movement and occupancy
+rules but may leave the moving side's king in check. They exist only to identify
+a completed physical action for correction guidance; the move may be accepted
+only when the rules authority confirms that the matched candidate is legal.
 
 The camera layer shall remain responsible for visual evidence. A separate
 chess-rules and game-control layer shall be responsible for legality, turn
@@ -122,8 +125,8 @@ legal game is complete.
   piece directly to a legal destination or restore the previous position.
 - The authoritative source piece remains at its logical square and is marked
   red on the UI. A calibrated projector briefly illuminates the physically
-  observed incorrect destination in red and the authoritative source in white
-  before returning to black.
+  observed incorrect destination and the authoritative source in red before
+  returning to black.
 - Diagnostic mode can remain legality-independent.
 
 Implemented. Physical capture, castling, en passant, and promotion evidence
@@ -147,6 +150,13 @@ Phase 1 also includes the implemented ordinary-move reliability layer:
 
 For each currently legal move, generate the physical changes expected after
 the move is complete.
+
+**Implementation status:** Signature generation is implemented. Every legal
+move exposes a typed signature containing UCI, SAN, move kind, source,
+destination, promotion choice, and the exact before/after piece value for each
+changed square. Signatures are derived by applying each legal move to a
+temporary `python-chess` board and diffing its piece map, so the rules are not
+duplicated and the authoritative game remains unchanged.
 
 ### 5.1 Ordinary move
 
@@ -186,8 +196,8 @@ For `e7e8q`:
 
 - `e7` becomes empty.
 - `e8` becomes occupied by White.
-- The user selects the promotion type because exact physical piece-type
-  recognition is not required.
+- The initial implementation assumes promotion to a queen.
+- Rook, bishop, and knight underpromotion remain future extensions.
 
 The visual matcher shall score all expected changed squares, vacancy evidence,
 piece-color evidence, unexpected third-square changes, and candidate
@@ -197,6 +207,64 @@ The implemented Phase 1 adjacent-residual check is reusable evidence for this
 phase, but it is not a complete capture or per-square color classifier. Phase 2
 shall generalize that targeted reference evidence into legal physical
 signatures.
+
+Implemented signature kinds are:
+
+- `ordinary`
+- `capture`
+- `castling`
+- `en-passant`
+- `promotion`
+- `capture-promotion`
+
+Focused tests verify ordinary source/destination transitions, destination color
+replacement on capture, both rook transitions during castling, the separate
+captured-pawn square for en passant, queen promotion, and queen
+capture-promotion.
+
+### 5.6 Camera-side legal-signature matching
+
+For every settled observation, the matcher shall:
+
+1. Read the per-square reference-change scores.
+2. Score every currently legal physical signature.
+3. Require every expected changed square to exceed the normal movement
+   threshold.
+4. Penalize the strongest unexplained changed square outside the signature.
+5. Accept only one best signature separated from the runner-up by the configured
+   dominance margin.
+6. Generate only the queen-promotion signature for the initial implementation;
+   underpromotion signatures remain disabled until a promotion-choice workflow
+   is implemented.
+
+Squares already proven to be retained adjacent-piece residuals may be excluded
+from the unexpected-change penalty. They shall still satisfy the Phase 1
+logical-color and lower/base reference-signature checks.
+
+Offline legal mode shall match the settled image against queen-only
+pseudo-legal physical signatures, including signatures excluded from the legal
+move set because they fail to resolve check or expose the king. This allows an
+illegal capture, promotion, or capture-promotion to retain its occupied
+destination evidence and reach correction guidance. Every matched candidate
+shall still be submitted to the legal authority before commit. If no physical
+signature matches, the existing one-piece inference may still identify an
+occupied-to-empty relocation. Neither path may commit an illegal move or replace
+the accepted reference.
+
+**Implementation status:** Implemented. Offline legal mode caches the current
+legal signatures and pseudo-legal physical signatures, scores physical
+signatures against each settled per-square change map, and submits a unique
+match to the legal authority before arbitrary relocation inference. Retained
+adjacent-piece residuals are excluded only for the signature whose source
+satisfies the existing logical-color and lower/base reference check.
+
+If no physical signature uniquely matches, ordinary source/destination
+inference remains available solely to identify and explain an illegal physical
+move to an empty destination. It cannot commit the legal game or accepted
+reference. Physical promotion defaults to queen; underpromotion signatures are
+not generated. A regression shall cover a black `e2xf1=Q` capture-promotion
+while the black king on `e8` remains in check from a white pawn on `d7`; the
+physical action must be detected and marked illegal.
 
 ## 6. Phase 3: Physical Piece-Color Classification
 
@@ -238,6 +306,16 @@ A destination-only removal is an incomplete capture. It shall not replace the
 reference. Later evidence shall still be compared with the original accepted
 reference until the capture is completed or reconciliation is requested.
 
+The first capture slice supports a completed ordinary capture visible in one
+settled observation. When a unique legal capture signature matches, the
+application shall commit the complete authoritative post-move piece map and
+the settled reference atomically. It shall not use the diagnostic relocation
+method, because that method intentionally rejects occupied destinations.
+
+If legal application succeeds but logical/reference commit fails, the legal
+game shall roll back and all previously accepted state shall remain unchanged.
+Two-action captures remain pending until the later workflow described above.
+
 ### 7.2 Castling
 
 The initial physical interaction contract shall require moving the king first
@@ -258,11 +336,10 @@ committing the move.
 After detecting the pawn relocation:
 
 1. Enter a pending-promotion state.
-2. Ask the user to select queen, rook, bishop, or knight.
-3. Apply the selected promotion.
-4. Commit the logical position and reference together.
+2. Apply queen promotion.
+3. Commit the logical position and reference together.
 
-Queen may be preselected but shall not be committed without confirmation.
+Selection of rook, bishop, or knight is deferred to a later extension.
 
 ### 7.5 Phase 4 acceptance gate
 

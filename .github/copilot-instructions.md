@@ -7,6 +7,15 @@
 - Running read-only searches and inspections is allowed when needed to answer accurately.
 - Never commit or push unless the user explicitly requests that operation.
 
+## Specification-First Development
+
+- Before changing implementation code, create or update the relevant specification in `docs/` so the requested behavior, authoritative state, failure handling, and acceptance criteria are explicit.
+- If no applicable specification exists, create one before implementation. Do not treat chat discussion, a todo list, tests, or code comments as a substitute for the repository specification.
+- Keep implementation and tests consistent with the specification. When runtime evidence changes the solution, update the specification as part of the same task rather than leaving the disproved behavior documented.
+- Before staging or pushing implementation changes, update the specification to describe the final validated behavior, implementation status, tests, and known remaining limitations.
+- Do not push implementation changes when their specification is missing, outdated, or still describes the delivered behavior as merely proposed.
+- Documentation-only, instruction-only, formatting-only, and repository-maintenance changes do not require a new product specification unless they intentionally change application behavior.
+
 ## Git Push Workflow
 
 - When the user says `push`, treat it as permission to commit and push the current task's already-validated changes.

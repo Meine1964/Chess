@@ -10,6 +10,7 @@ from src.chess_camera.legal_game import LegalGame
 from src.chess_camera.reference_move_tracker import (
     ReferenceMoveTracker,
     ReferenceTrackerUpdate,
+    _has_large_obstruction,
     square_change_scores,
 )
 
@@ -63,10 +64,17 @@ def _accepted_update(
     tracker: ReferenceMoveTracker,
     image: np.ndarray,
     position: dict[tuple[int, int], str],
+    legal_signatures: tuple = (),
 ) -> object:
     update = None
     for _index in range(5):
-        update = tracker.observe(image, _camera_grid(), 0, position)
+        update = tracker.observe(
+            image,
+            _camera_grid(),
+            0,
+            position,
+            legal_signatures,
+        )
         if update.state == "accepted":
             return update
     assert update is not None
@@ -162,6 +170,76 @@ def test_accepts_non_legal_single_piece_relocation() -> None:
     np.testing.assert_allclose(tracker.reference, moved, atol=3)
 
 
+@pytest.mark.parametrize(
+    ("fen", "source", "destination", "uci", "moving_piece"),
+    (
+        (
+            "4k3/8/8/8/1n6/P7/8/4K3 w - - 0 1",
+            (5, 0),
+            (4, 1),
+            "a3b4",
+            "P",
+        ),
+        (
+            "4k3/8/8/8/1n6/3Q4/8/4K3 b - - 0 1",
+            (4, 1),
+            (5, 3),
+            "b4d3",
+            "n",
+        ),
+    ),
+)
+def test_legal_signature_tracker_accepts_ordinary_capture(
+    fen: str,
+    source: tuple[int, int],
+    destination: tuple[int, int],
+    uci: str,
+    moving_piece: str,
+) -> None:
+    game = LegalGame(fen)
+    reference = _empty_board()
+    for square, piece in game.position.items():
+        _draw_piece(
+            reference,
+            square,
+            (225, 225, 225) if piece.isupper() else (20, 20, 20),
+        )
+    moved = reference.copy()
+    empty = _empty_board()
+    for square in (source, destination):
+        row, column = square
+        moved[
+            row * 100 : (row + 1) * 100,
+            column * 100 : (column + 1) * 100,
+        ] = empty[
+            row * 100 : (row + 1) * 100,
+            column * 100 : (column + 1) * 100,
+        ]
+    _draw_piece(
+        moved,
+        destination,
+        (225, 225, 225) if moving_piece.isupper() else (20, 20, 20),
+    )
+    tracker = ReferenceMoveTracker()
+    tracker.set_reference(reference, _camera_grid(), 0)
+
+    update = _accepted_update(
+        tracker,
+        moved,
+        game.position,
+        game.legal_move_signatures,
+    )
+
+    assert update.state == "accepted"
+    assert update.move == (source, destination)
+    signature = next(
+        signature
+        for signature in game.legal_move_signatures
+        if signature.uci == uci
+    )
+    assert signature.kind == "capture"
+
+
 def test_illegal_game_move_preserves_position_and_reference() -> None:
     source = (7, 6)
     destination = (5, 6)
@@ -193,6 +271,47 @@ def test_illegal_game_move_preserves_position_and_reference() -> None:
     tracker.reset_activity()
 
     assert synchronizer.position == position
+    np.testing.assert_array_equal(tracker.reference, reference)
+
+
+def test_capture_promotion_that_does_not_resolve_check_is_detected() -> None:
+    game = LegalGame("4k3/3P4/8/8/8/8/4p3/5N1K b - - 0 1")
+    source = (6, 4)
+    destination = (7, 5)
+    reference = _empty_board()
+    for square, piece in game.position.items():
+        _draw_piece(
+            reference,
+            square,
+            (225, 225, 225) if piece.isupper() else (20, 20, 20),
+        )
+    moved = reference.copy()
+    empty = _empty_board()
+    for square in (source, destination):
+        row, column = square
+        moved[
+            row * 100 : (row + 1) * 100,
+            column * 100 : (column + 1) * 100,
+        ] = empty[
+            row * 100 : (row + 1) * 100,
+            column * 100 : (column + 1) * 100,
+        ]
+    _draw_piece(moved, destination, (20, 20, 20))
+    tracker = ReferenceMoveTracker()
+    tracker.set_reference(reference, _camera_grid(), 0)
+
+    accepted = _accepted_update(
+        tracker,
+        moved,
+        game.position,
+        game.physical_move_signatures,
+    )
+
+    assert accepted.state == "accepted"
+    assert accepted.move == (source, destination)
+    with pytest.raises(ValueError, match="e2-f1 is not legal for black"):
+        game.apply_move(source, destination)
+    tracker.reset_activity()
     np.testing.assert_array_equal(tracker.reference, reference)
 
 
@@ -331,6 +450,60 @@ def test_stationary_large_obstruction_is_not_evaluated_as_move() -> None:
     assert activity.state in ("activity", "waiting-for-clear")
     assert waiting.state == "waiting-for-clear"
     assert waiting.move is None
+
+
+def test_multi_edge_remap_residual_is_not_a_hand_after_grid_update() -> None:
+    reference = _empty_board()
+    remapped = reference.copy()
+    cv2.rectangle(remapped, (0, 500), (60, 799), (90, 120, 150), -1)
+    cv2.rectangle(remapped, (740, 0), (799, 200), (90, 120, 150), -1)
+
+    assert _has_large_obstruction(reference, remapped)
+    assert not _has_large_obstruction(
+        reference,
+        remapped,
+        allow_boundary_remap_residuals=True,
+    )
+
+
+def test_boundary_remap_score_does_not_hide_interior_relocation() -> None:
+    tracker = ReferenceMoveTracker()
+    scores = np.zeros((8, 8), dtype=np.float32)
+    scores[2, 4] = 0.215
+    scores[3, 4] = 0.153
+    scores[5, 0] = 0.125
+    reference = _empty_board()
+
+    blocked = tracker._select_move(
+        scores,
+        {(2, 4): "p"},
+        reference,
+        reference,
+    )
+    selected = tracker._select_move(
+        scores,
+        {(2, 4): "p"},
+        reference,
+        reference,
+        allow_boundary_residuals=True,
+    )
+
+    assert blocked is None
+    assert selected == ((2, 4), (3, 4))
+
+
+def test_interior_obstruction_is_not_ignored_after_grid_update() -> None:
+    reference = _empty_board()
+    obstructed = reference.copy()
+    cv2.rectangle(obstructed, (250, 250), (550, 550), (30, 40, 220), -1)
+    cv2.rectangle(obstructed, (0, 0), (60, 200), (90, 120, 150), -1)
+    cv2.rectangle(obstructed, (740, 600), (799, 799), (90, 120, 150), -1)
+
+    assert _has_large_obstruction(
+        reference,
+        obstructed,
+        allow_boundary_remap_residuals=True,
+    )
 
 
 def test_two_square_hand_region_blocks_intermediate_move() -> None:

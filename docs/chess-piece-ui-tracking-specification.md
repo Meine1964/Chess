@@ -261,6 +261,26 @@ shall:
 Captures, castling, en passant, and promotion remain outside the first
 reference-tracking milestone.
 
+Offline legal mode shall support a completed ordinary capture when one legal
+capture signature uniquely matches the settled image. After legal application,
+the piece synchronizer shall replace its logical position with the complete
+authoritative post-move position returned by the rules engine rather than
+requiring the destination to have been empty. The logical position, accepted
+reference, persisted FEN, UI pieces, and last-move indication shall commit
+together. Any failure before reference commit shall roll back the legal game
+and preserve the previous logical position and reference.
+
+For a capture, destination occupancy remains occupied. The visual transition
+is the destination changing from the captured piece's color appearance to the
+mover's color appearance. The legal signature supplies both before and after
+piece colors; reference-image evidence must show a material destination change
+even though no empty-destination transition occurs. Regression cases include
+`a3xb4` and `Nb4xd3`.
+
+Diagnostic movement mode shall retain its one-source/one-empty-destination
+contract; an occupied destination without legal-game authority remains
+ambiguous.
+
 The application provides two local movement policies:
 
 - `Diagnostic movement` retains legality-independent one-piece relocation for
@@ -273,14 +293,27 @@ unchanged. The user may move the physical piece directly from the rejected
 square to a legal destination; returning it to its original square first is
 not required. The authoritative source piece remains at its logical square and
 that square is marked red on the UI. When a calibrated projector is available,
-the physically observed incorrect destination is projected in red and the
-authoritative source square is projected in white for two seconds. The
-projector then returns to black so camera verification can resume. The UI mark
-clears when the board returns to the accepted reference or a legal move is
+both the authoritative source square and the physically observed illegal
+destination are projected in red for two seconds. The projector then returns
+to black so camera verification can resume. The UI mark clears when the board
+returns to the accepted reference or a legal move is
 accepted. Restoration uses a separate conservative tolerance: every square
 except the authoritative source must be below the normal movement threshold,
 while the source may retain a small lighting residual. This tolerance does not
 change ordinary move detection.
+
+An otherwise clear illegal relocation shall still reach this correction
+workflow when unrelated settled differences are classified as board-edge
+camera-remap residuals. Such residuals shall not suppress the red authoritative
+source marker. Genuine interior obstruction continues to prevent move
+evaluation.
+
+Offline legal mode shall also detect a completed pseudo-legal capture,
+promotion, or capture-promotion that is illegal only because it fails to resolve
+check or exposes the moving king. The physical signature preserves the occupied destination transition needed to localize that
+action, but only the authoritative legal-move check may commit it. A rejected
+signature shall use the same red source marker and red projector correction on
+both involved squares as any other illegal relocation.
 
 While correction is required, persistent UI guidance shall identify the
 observed incorrect square, the authoritative source square, the side to move,
@@ -410,6 +443,8 @@ Asset diagnostics shall include:
 - Explicit reset uses live occupancy rather than a cached pre-reference result.
 - Failed reset verification preserves the logical position and reference.
 - Offline legal mode rejects moves that are illegal for the authoritative FEN.
+- A pseudo-legal capture-promotion that does not resolve check is localized and
+  marked illegal.
 - Rejection preserves both the accepted position and reference.
 - Restoring a rejected move clears its UI marker despite a small residual on
   the authoritative source square.
@@ -496,11 +531,15 @@ Implemented for ordinary non-capturing moves.
 
 ### Milestone 6: Captures and special physical signatures
 
-- Add destination color-transition evidence for captures.
+- Commit completed ordinary legal captures from a unique legal signature and
+  the authoritative post-move position.
+- Add stronger destination color-transition evidence for captures.
 - Support castling, en passant, and promotion workflows.
 - Reconcile multi-square physical signatures before atomic commit.
 
-Future work.
+Ordinary single-action legal capture commit is implemented. Stronger
+piece-color classification, multi-action capture handling, and special moves
+remain future work.
 
 ## 20. Open Decisions
 

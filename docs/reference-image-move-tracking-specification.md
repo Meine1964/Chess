@@ -430,6 +430,17 @@ A camera-grid change shall never clear or replace the logical piece position.
 
 Geometry changes themselves shall not be treated as piece movement.
 
+If a settled one-piece relocation has dominant source/destination evidence and
+a valid released-piece footprint, broad residuals confined to the outer board
+files or ranks may be classified as camera-grid remap residuals rather than a
+hand only when they touch the canonical image boundary and do not overlap the
+candidate squares. This exception exists so an illegal relocation can still
+reach correction guidance after remapping. Interior obstruction components,
+or any boundary component overlapping the candidate, shall continue to block
+acceptance. The exception shall never commit an illegal move; it only permits
+the existing legality rejection and red correction workflow on both source and
+destination to run.
+
 ## 17. Camera-Only Operation
 
 The tracker shall operate without an attached projector when:

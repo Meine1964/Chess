@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal, cast
 
@@ -7,6 +8,14 @@ from .chess_position import PieceCode, Position, Square, square_name
 
 PromotionPiece = Literal["q", "r", "b", "n"]
 GameMode = Literal["diagnostic", "offline-game", "lichess-game"]
+PhysicalMoveKind = Literal[
+    "ordinary",
+    "capture",
+    "castling",
+    "en-passant",
+    "promotion",
+    "capture-promotion",
+]
 
 
 @dataclass(frozen=True)
@@ -30,12 +39,34 @@ class LegalMoveResult:
     status: GameStatus
 
 
+@dataclass(frozen=True)
+class PhysicalSquareChange:
+    square: Square
+    before: PieceCode | None
+    after: PieceCode | None
+
+
+@dataclass(frozen=True)
+class LegalMoveSignature:
+    uci: str
+    san: str
+    kind: PhysicalMoveKind
+    source: Square
+    destination: Square
+    promotion: PromotionPiece | None
+    changes: tuple[PhysicalSquareChange, ...]
+
+
 class LegalGame:
     def __init__(self, fen: str = chess.STARTING_FEN) -> None:
         try:
             self._board = chess.Board(fen)
         except ValueError as error:
             raise ValueError(f"Invalid chess position: {error}") from error
+        self._signature_cache: tuple[LegalMoveSignature, ...] | None = None
+        self._physical_signature_cache: (
+            tuple[LegalMoveSignature, ...] | None
+        ) = None
 
     @property
     def fen(self) -> str:
@@ -51,6 +82,22 @@ class LegalGame:
     @property
     def legal_uci_moves(self) -> tuple[str, ...]:
         return tuple(sorted(move.uci() for move in self._board.legal_moves))
+
+    @property
+    def legal_move_signatures(self) -> tuple[LegalMoveSignature, ...]:
+        if self._signature_cache is None:
+            self._signature_cache = self._physical_signatures(
+                self._board.legal_moves
+            )
+        return self._signature_cache
+
+    @property
+    def physical_move_signatures(self) -> tuple[LegalMoveSignature, ...]:
+        if self._physical_signature_cache is None:
+            self._physical_signature_cache = self._physical_signatures(
+                self._board.pseudo_legal_moves
+            )
+        return self._physical_signature_cache
 
     def legal_destinations(self, source: Square) -> tuple[Square, ...]:
         source_square = _chess_square(source)
@@ -80,6 +127,7 @@ class LegalGame:
 
     def reset(self) -> None:
         self._board.reset()
+        self._invalidate_signature_caches()
 
     def apply_move(
         self,
@@ -90,6 +138,7 @@ class LegalGame:
         move = self._matching_legal_move(source, destination, promotion)
         san = self._board.san(move)
         self._board.push(move)
+        self._invalidate_signature_caches()
         return LegalMoveResult(
             move.uci(),
             san,
@@ -102,6 +151,7 @@ class LegalGame:
         if not self._board.move_stack:
             raise ValueError("No legal move is available to roll back.")
         move = self._board.pop()
+        self._invalidate_signature_caches()
         san = self._board.san(move)
         return LegalMoveResult(
             move.uci(),
@@ -131,17 +181,12 @@ class LegalGame:
                 f"legal for {self.status.turn}."
             )
         if any(move.promotion is not None for move in candidates):
-            if promotion is None:
-                raise ValueError(
-                    f"Promotion choice is required for "
-                    f"{square_name(source)}-{square_name(destination)}."
-                )
             promotion_type = {
                 "q": chess.QUEEN,
                 "r": chess.ROOK,
                 "b": chess.BISHOP,
                 "n": chess.KNIGHT,
-            }[promotion]
+            }["q" if promotion is None else promotion]
             candidates = [
                 move
                 for move in candidates
@@ -154,6 +199,85 @@ class LegalGame:
         if len(candidates) != 1:
             raise ValueError("The legal move candidate is ambiguous.")
         return candidates[0]
+
+    def _physical_signatures(
+        self,
+        moves: Iterable[chess.Move],
+    ) -> tuple[LegalMoveSignature, ...]:
+        return tuple(
+            self._physical_signature(move)
+            for move in sorted(
+                (
+                    candidate
+                    for candidate in moves
+                    if candidate.promotion in (None, chess.QUEEN)
+                ),
+                key=lambda candidate: candidate.uci(),
+            )
+        )
+
+    def _invalidate_signature_caches(self) -> None:
+        self._signature_cache = None
+        self._physical_signature_cache = None
+
+    def _physical_signature(
+        self,
+        move: chess.Move,
+    ) -> LegalMoveSignature:
+        before = self._board.piece_map()
+        after_board = self._board.copy(stack=False)
+        san = self._board.san(move)
+        is_capture = self._board.is_capture(move)
+        is_castling = self._board.is_castling(move)
+        is_en_passant = self._board.is_en_passant(move)
+        after_board.push(move)
+        after = after_board.piece_map()
+        source = _ui_square(move.from_square)
+        destination = _ui_square(move.to_square)
+        changed_squares = {
+            square
+            for square in set(before) | set(after)
+            if before.get(square) != after.get(square)
+        }
+        ordered_squares = [
+            move.from_square,
+            move.to_square,
+            *sorted(
+                changed_squares - {move.from_square, move.to_square},
+                key=_ui_square,
+            ),
+        ]
+        changes = tuple(
+            PhysicalSquareChange(
+                _ui_square(square),
+                _optional_piece_code(before.get(square)),
+                _optional_piece_code(after.get(square)),
+            )
+            for square in ordered_squares
+            if square in changed_squares
+        )
+        promotion = _promotion_piece(move.promotion)
+        if is_castling:
+            kind: PhysicalMoveKind = "castling"
+        elif is_en_passant:
+            kind = "en-passant"
+        elif promotion is not None and is_capture:
+            kind = "capture-promotion"
+        elif promotion is not None:
+            kind = "promotion"
+        elif is_capture:
+            kind = "capture"
+        else:
+            kind = "ordinary"
+        return LegalMoveSignature(
+            move.uci(),
+            san,
+            kind,
+            source,
+            destination,
+            promotion,
+            changes,
+        )
 
 
 def _chess_square(square: Square) -> chess.Square:
@@ -171,3 +295,18 @@ def _piece_code(symbol: str) -> PieceCode:
     if symbol not in "KQRBNPkqrbnp":
         raise ValueError(f"Unknown chess piece symbol: {symbol}")
     return cast(PieceCode, symbol)
+
+
+def _optional_piece_code(piece: chess.Piece | None) -> PieceCode | None:
+    return None if piece is None else _piece_code(piece.symbol())
+
+
+def _promotion_piece(piece_type: chess.PieceType | None) -> PromotionPiece | None:
+    if piece_type is None:
+        return None
+    return {
+        chess.QUEEN: "q",
+        chess.ROOK: "r",
+        chess.BISHOP: "b",
+        chess.KNIGHT: "n",
+    }[piece_type]

@@ -30,7 +30,6 @@ DisplayMode = Literal[
 PROJECTED_ON_LIGHT_SQUARE = QColor("#007fff")
 PROJECTED_ON_DARK_SQUARE = QColor("#00ffff")
 PROJECTED_ILLEGAL_MOVE = QColor("#ff0000")
-PROJECTED_CORRECT_SQUARE = QColor("#ffffff")
 
 
 def focus_pattern(
@@ -245,17 +244,17 @@ class ProjectorWindow(QWidget):
 
     def show_correction(
         self,
-        incorrect: tuple[int, int],
-        correct: tuple[int, int],
+        source: tuple[int, int],
+        destination: tuple[int, int],
     ) -> None:
         if self._projector_grid is None:
             raise RuntimeError("No calibrated projector grid is available.")
-        for row, column in (incorrect, correct):
+        for row, column in (source, destination):
             if not 0 <= row < 8 or not 0 <= column < 8:
                 raise ValueError(
                     "Projected correction squares must be inside the board."
                 )
-        self._correction_squares = (incorrect, correct)
+        self._correction_squares = (source, destination)
         self._display_mode = "correction"
         self.update()
 
@@ -346,18 +345,15 @@ class ProjectorWindow(QWidget):
             and self._projector_grid is not None
             and self._correction_squares is not None
         ):
-            incorrect, correct = self._correction_squares
+            source, destination = self._correction_squares
             polygons = square_polygons(self._projector_grid)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(PROJECTED_ILLEGAL_MOVE)
-            painter.drawPolygon(
-                self._polygon(polygons[incorrect[0] * 8 + incorrect[1]])
-            )
-            painter.setBrush(PROJECTED_CORRECT_SQUARE)
-            painter.drawPolygon(
-                self._polygon(polygons[correct[0] * 8 + correct[1]])
-            )
+            for row, column in (source, destination):
+                painter.drawPolygon(
+                    self._polygon(polygons[row * 8 + column])
+                )
         painter.end()
         event.accept()
 

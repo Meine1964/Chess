@@ -4,6 +4,7 @@ from src.chess_camera.chess_position import (
     standard_position,
     starting_occupied_squares,
 )
+from src.chess_camera.legal_game import LegalGame
 
 
 def test_standard_position_contains_all_expected_pieces() -> None:
@@ -48,6 +49,24 @@ def test_synchronizer_diagnostic_move_does_not_require_legality() -> None:
 
     assert moved.move == ((7, 6), (5, 6))
     assert moved.position[(5, 6)] == "N"
+
+
+def test_synchronizer_commits_authoritative_capture_position() -> None:
+    game = LegalGame("4k3/8/8/8/1n6/P7/8/4K3 w - - 0 1")
+    synchronizer = PiecePositionSynchronizer()
+    synchronizer.restore(game.position)
+    capture = game.apply_move((5, 0), (4, 1))
+
+    moved = synchronizer.accept_authoritative_move(
+        (5, 0),
+        (4, 1),
+        capture.position,
+    )
+
+    assert moved.move == ((5, 0), (4, 1))
+    assert (5, 0) not in moved.position
+    assert moved.position[(4, 1)] == "P"
+    assert len(moved.position) == 3
 
 
 def test_synchronizer_rejects_source_only_capture_evidence() -> None:
