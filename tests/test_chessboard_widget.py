@@ -195,6 +195,24 @@ def test_widget_shows_pending_legal_move_in_white(
     widget.close()
 
 
+def test_widget_shows_all_castling_guidance_squares_in_white(
+    application: QApplication,
+) -> None:
+    widget = ChessboardWidget()
+    widget.resize(320, 320)
+    squares = ((7, 4), (7, 6), (7, 7), (7, 5))
+    widget.set_guidance_squares(squares)
+    widget.show()
+    application.processEvents()
+
+    image = widget.grab().toImage()
+
+    assert widget.guidance_squares == squares
+    for column in (4, 5, 6, 7):
+        assert QColor(image.pixel(column * 40 + 20, 300)).name() == "#ffffff"
+    widget.close()
+
+
 def test_multiple_ongoing_games_require_explicit_ui_selection(
     application: QApplication,
 ) -> None:

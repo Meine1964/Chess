@@ -180,3 +180,45 @@ def test_controller_keeps_promotion_in_reconciliation() -> None:
 
     assert update.state == "reconciliation-required"
     assert controller.expected_signature is None
+
+
+def test_controller_queues_and_confirms_incoming_castling() -> None:
+    initial_fen = "4k3/8/8/8/8/8/8/4K2R w K - 0 1"
+    controller = LichessGameController(
+        "game1234",
+        initial_fen,
+        "black",
+        "Remote",
+    )
+
+    update = controller.accept_server_history(("e1g1",))
+
+    assert update.state == "guidance"
+    signature = controller.expected_signature
+    assert signature is not None
+    assert signature.kind == "castling"
+    assert controller.confirm_expected_move(
+        (signature.source, signature.destination)
+    ).state == "synchronized"
+    assert controller.physical_fen == controller.server_fen
+
+
+def test_controller_prepares_and_commits_local_castling() -> None:
+    initial_fen = "4k3/8/8/8/8/8/8/4K2R w K - 0 1"
+    controller = LichessGameController(
+        "game1234",
+        initial_fen,
+        "white",
+        "Remote",
+    )
+    controller.accept_server_history(())
+
+    uci, preview = controller.prepare_local_move(((7, 4), (7, 6)))
+
+    assert uci == "e1g1"
+    assert preview.position[(7, 6)] == "K"
+    assert preview.position[(7, 5)] == "R"
+    committed = controller.commit_local_move(((7, 4), (7, 6)))
+    assert committed.fen == preview.fen
+    assert controller.server_moves == ("e1g1",)
+    assert controller.physical_fen == controller.server_fen

@@ -83,10 +83,7 @@ class ProjectorWindow(QWidget):
             tuple[int, int],
         ] | None = None
         self._reconciliation_squares: tuple[tuple[int, int], ...] = ()
-        self._move_squares: tuple[
-            tuple[int, int, bool],
-            tuple[int, int, bool],
-        ] | None = None
+        self._move_squares: tuple[tuple[int, int, bool], ...] = ()
         self.setWindowTitle("Chess Projector Output")
         self.setCursor(Qt.CursorShape.BlankCursor)
 
@@ -178,17 +175,27 @@ class ProjectorWindow(QWidget):
         source_is_light: bool,
         destination_is_light: bool,
     ) -> None:
+        self.show_move_squares(
+            (
+                (*source, source_is_light),
+                (*destination, destination_is_light),
+            )
+        )
+
+    def show_move_squares(
+        self,
+        squares: tuple[tuple[int, int, bool], ...],
+    ) -> None:
         if self._projector_grid is None:
             raise RuntimeError("No calibrated projector grid is available.")
-        for row, column in (source, destination):
+        if not squares:
+            raise ValueError("At least one projected move square is required.")
+        for row, column, _is_light in squares:
             if not 0 <= row < 8 or not 0 <= column < 8:
                 raise ValueError(
                     "Projected move squares must be inside the 8x8 board."
                 )
-        self._move_squares = (
-            (*source, source_is_light),
-            (*destination, destination_is_light),
-        )
+        self._move_squares = tuple(dict.fromkeys(squares))
         self._display_mode = "move"
         self.update()
 
@@ -284,7 +291,7 @@ class ProjectorWindow(QWidget):
         elif (
             self._display_mode == "move"
             and self._projector_grid is not None
-            and self._move_squares is not None
+            and self._move_squares
         ):
             polygons = square_polygons(self._projector_grid)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)

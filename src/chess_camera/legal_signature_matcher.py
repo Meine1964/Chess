@@ -35,6 +35,14 @@ class PendingCaptureMatch:
     message: str
 
 
+@dataclass(frozen=True)
+class PendingCastlingMatch:
+    signature: LegalMoveSignature | None
+    rook_source: Square | None
+    rook_destination: Square | None
+    message: str
+
+
 def match_legal_move_signature(
     change_scores: FloatArray,
     signatures: Sequence[LegalMoveSignature],
@@ -58,6 +66,12 @@ def match_legal_move_signature(
             and not _capture_colors_match(signature, piece_colors)
         ):
             continue
+        if (
+            piece_colors is not None
+            and signature.kind == "castling"
+            and not _changed_square_colors_match(signature, piece_colors)
+        ):
+            continue
         expected = {change.square for change in signature.changes}
         expected_scores = {
             square: float(scores[square]) for square in expected
@@ -65,12 +79,17 @@ def match_legal_move_signature(
         if not expected_scores:
             continue
         source_score = expected_scores.get(signature.source)
+        required_change = (
+            minimum_square_change * LEGAL_SOURCE_CHANGE_RATIO
+            if signature.kind == "castling"
+            else minimum_square_change
+        )
         if (
             source_score is None
             or source_score
             < minimum_square_change * LEGAL_SOURCE_CHANGE_RATIO
             or any(
-                score < minimum_square_change
+                score < required_change
                 for square, score in expected_scores.items()
                 if square != signature.source
             )
@@ -203,6 +222,108 @@ def match_pending_capture(
     )
 
 
+def match_pending_castling(
+    change_scores: FloatArray,
+    signatures: Sequence[LegalMoveSignature],
+    piece_colors: Mapping[Square, PieceColorClassification],
+    *,
+    minimum_square_change: float = 0.08,
+) -> PendingCastlingMatch:
+    scores = np.asarray(change_scores, dtype=np.float32)
+    if scores.shape != (8, 8):
+        raise ValueError("Change scores must describe an 8x8 board.")
+    if minimum_square_change <= 0:
+        raise ValueError("The movement threshold must be positive.")
+    candidates: list[tuple[LegalMoveSignature, Square, Square]] = []
+    for signature in signatures:
+        if signature.kind != "castling":
+            continue
+        rook_source = next(
+            (
+                change.square
+                for change in signature.changes
+                if change.square
+                not in (signature.source, signature.destination)
+                and change.before in ("R", "r")
+                and change.after is None
+            ),
+            None,
+        )
+        rook_destination = next(
+            (
+                change.square
+                for change in signature.changes
+                if change.square
+                not in (signature.source, signature.destination)
+                and change.before is None
+                and change.after in ("R", "r")
+            ),
+            None,
+        )
+        moving_piece = next(
+            (
+                change.before
+                for change in signature.changes
+                if change.square == signature.source
+            ),
+            None,
+        )
+        expected_color = (
+            None
+            if moving_piece is None
+            else "white"
+            if moving_piece.isupper()
+            else "black"
+        )
+        if (
+            rook_source is None
+            or rook_destination is None
+            or expected_color is None
+            or float(scores[signature.source])
+            < minimum_square_change * LEGAL_SOURCE_CHANGE_RATIO
+            or float(scores[signature.destination]) < minimum_square_change
+            or float(scores[rook_source]) >= minimum_square_change
+            or float(scores[rook_destination]) >= minimum_square_change
+            or piece_colors.get(signature.source) is None
+            or piece_colors[signature.source].label != "empty"
+            or piece_colors.get(signature.destination) is None
+            or piece_colors[signature.destination].label != expected_color
+            or piece_colors.get(rook_source) is None
+            or piece_colors[rook_source].label != expected_color
+            or piece_colors.get(rook_destination) is None
+            or piece_colors[rook_destination].label != "empty"
+        ):
+            continue
+        unexplained = scores.copy()
+        unexplained[signature.source] = 0
+        unexplained[signature.destination] = 0
+        unexpected_limit = max(
+            minimum_square_change,
+            min(
+                float(scores[signature.source]),
+                float(scores[signature.destination]),
+            )
+            * 0.75,
+        )
+        if float(np.max(unexplained)) > unexpected_limit:
+            continue
+        candidates.append((signature, rook_source, rook_destination))
+    if len(candidates) != 1:
+        return PendingCastlingMatch(
+            None,
+            None,
+            None,
+            "No unique king-first castling signature matches the board.",
+        )
+    signature, rook_source, rook_destination = candidates[0]
+    return PendingCastlingMatch(
+        signature,
+        rook_source,
+        rook_destination,
+        "The king move matches pending physical castling.",
+    )
+
+
 def find_illegal_removed_piece(
     change_scores: FloatArray,
     signatures: Sequence[LegalMoveSignature],
@@ -270,6 +391,24 @@ def _capture_colors_match(
             expected = "white" if change.after.isupper() else "black"
         else:
             continue
+        classification = piece_colors.get(change.square)
+        if classification is None or classification.label != expected:
+            return False
+    return True
+
+
+def _changed_square_colors_match(
+    signature: LegalMoveSignature,
+    piece_colors: Mapping[Square, PieceColorClassification],
+) -> bool:
+    for change in signature.changes:
+        expected = (
+            "empty"
+            if change.after is None
+            else "white"
+            if change.after.isupper()
+            else "black"
+        )
         classification = piece_colors.get(change.square)
         if classification is None or classification.label != expected:
             return False

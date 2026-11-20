@@ -2211,6 +2211,7 @@ class CameraWindow(QMainWindow):
                 "ambiguous",
                 "illegal-removal",
                 "pending-capture",
+                "pending-castling",
             }
         ):
             self._last_runtime_tracker_state = update.state
@@ -2712,18 +2713,31 @@ class CameraWindow(QMainWindow):
             return
         self._last_projected_lichess_uci = signature.uci
         self._project_lichess_move_guidance(
-            (signature.source, signature.destination)
+            (signature.source, signature.destination),
+            tuple(
+                change.square
+                for change in signature.changes
+                if change.square
+                not in (signature.source, signature.destination)
+            ),
         )
 
     def _project_lichess_move_guidance(
         self,
         move: tuple[tuple[int, int], tuple[int, int]],
+        additional_squares: tuple[tuple[int, int], ...] = (),
     ) -> None:
         source, destination = move
+        guidance_squares = tuple(
+            dict.fromkeys((source, destination, *additional_squares))
+        )
         move_name = f"{square_name(source)}-{square_name(destination)}"
         self._board_widget.set_illegal_source(None)
         self._board_widget.set_reconciliation_squares(())
-        self._board_widget.set_guidance_move(move)
+        if additional_squares:
+            self._board_widget.set_guidance_squares(guidance_squares)
+        else:
+            self._board_widget.set_guidance_move(move)
         if self._camera_only_calibration:
             self._projector_status.setText(
                 f"Lichess move {move_name} is pending; physical projection "
@@ -2737,12 +2751,23 @@ class CameraWindow(QMainWindow):
             )
             return
         try:
-            self._projector_window.show_move(
-                self._physical_board_square(*source),
-                self._physical_board_square(*destination),
-                source_is_light=(sum(source) % 2 == 0),
-                destination_is_light=(sum(destination) % 2 == 0),
-            )
+            if additional_squares:
+                self._projector_window.show_move_squares(
+                    tuple(
+                        (
+                            *self._physical_board_square(*square),
+                            sum(square) % 2 == 0,
+                        )
+                        for square in guidance_squares
+                    )
+                )
+            else:
+                self._projector_window.show_move(
+                    self._physical_board_square(*source),
+                    self._physical_board_square(*destination),
+                    source_is_light=(sum(source) % 2 == 0),
+                    destination_is_light=(sum(destination) % 2 == 0),
+                )
         except (RuntimeError, ValueError) as error:
             self._projector_status.setText(
                 f"Lichess move guidance failed: {error}"
@@ -3523,7 +3548,13 @@ class CameraWindow(QMainWindow):
         self._last_projected_lichess_uci = signature.uci
         self._piece_status.setText(update.message)
         self._project_lichess_move_guidance(
-            (signature.source, signature.destination)
+            (signature.source, signature.destination),
+            tuple(
+                change.square
+                for change in signature.changes
+                if change.square
+                not in (signature.source, signature.destination)
+            ),
         )
 
     def _record_runtime_diagnostic(

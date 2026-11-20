@@ -4,6 +4,7 @@ from src.chess_camera.legal_game import LegalGame
 from src.chess_camera.legal_signature_matcher import (
     find_illegal_removed_piece,
     match_legal_move_signature,
+    match_pending_castling,
     match_pending_capture,
 )
 from src.chess_camera.piece_color_classifier import PieceColorClassification
@@ -95,6 +96,27 @@ def test_matches_castling_four_square_signature() -> None:
     assert match.signature is not None
     assert match.signature.uci == "e1g1"
     assert match.signature.kind == "castling"
+
+
+def test_pending_castling_matches_king_first() -> None:
+    game = LegalGame("4k3/8/8/8/8/8/8/4K2R w K - 0 1")
+    colors = {
+        (7, 4): PieceColorClassification("empty", 0.01, 0.2),
+        (7, 6): PieceColorClassification("white", 0.01, 0.2),
+        (7, 7): PieceColorClassification("white", 0.01, 0.2),
+        (7, 5): PieceColorClassification("empty", 0.01, 0.2),
+    }
+
+    pending = match_pending_castling(
+        _scores(((7, 4), 0.2), ((7, 6), 0.2)),
+        game.physical_move_signatures,
+        colors,
+    )
+
+    assert pending.signature is not None
+    assert pending.signature.uci == "e1g1"
+    assert pending.rook_source == (7, 7)
+    assert pending.rook_destination == (7, 5)
 
 
 def test_capture_requires_vacated_source_and_mover_color_destination() -> None:

@@ -1,7 +1,7 @@
 # Lichess Physical Move Synchronization Specification
 
 **Version:** 0.3
-**Status:** Ordinary moves live-accepted; capture slices implemented and awaiting live acceptance
+**Status:** Ordinary moves live-accepted; capture and castling slices implemented and awaiting live acceptance
 **Platform:** Python on Windows
 
 **Related specifications:**
@@ -28,9 +28,9 @@ When Lichess advances the remote game, the application shall:
 6. Advance the physical position and replace the camera reference only after
    exact confirmation.
 
-The first outgoing slice submits ordinary non-capturing moves only. Captures,
-castling, en passant, and promotion remain reconciliation-only until their
-outgoing slices are implemented.
+Outgoing ordinary moves, non-promotion captures, and castling are supported.
+En passant and promotion remain reconciliation-only until their outgoing
+slices are implemented.
 
 ## 2. Design Principles
 
@@ -438,11 +438,25 @@ the authoritative state and display durable instructions to complete the move
 from the expected source. Moving the attacker to the destination shall then
 confirm the capture against the original reference.
 
+Castling shall support complete final-position evidence and a king-first,
+rook-second workflow. Moving the king to its castling destination shall enter
+a non-authoritative pending-castling state while retaining the original
+position and camera reference. Moving the rook from its castling source to its
+castling destination shall then confirm the complete four-square signature
+against the original reference.
+
+Complete castling may use the reduced legal-source change threshold on all
+four changed squares when classified post-move occupancy and piece colors
+match the expected castled position exactly. This permits lower-contrast rook
+movement without weakening the exact four-square state check.
+
 ### 10.3 Special-move projection
+
+Castling guidance shall mark the king source/destination and rook
+source/destination in white on both the physical UI board and projector.
 
 Later slices shall derive involved squares from the expected signature:
 
-- Castling: king source/destination and rook source/destination.
 - En passant: source, destination, and captured-pawn square.
 - Promotion: source and destination plus queen-replacement guidance.
 
@@ -505,10 +519,14 @@ If a settled action represents a move other than the active expected move:
 - Mark the relevant incorrect squares red.
 - Keep durable correction guidance visible.
 
-### 12.2 Isolated removal
+### 12.2 Incomplete multi-action move
 
 An isolated settled piece removal remains illegal unless it is a recognized
 first step of the active expected capture workflow.
+
+A completed king relocation remains pending rather than illegal when it is the
+king-first step of an active expected castling signature. The authoritative
+state and reference shall remain unchanged until the rook completes castling.
 
 ### 12.3 Correction completion
 
@@ -520,11 +538,11 @@ The user may:
 After restoration, the application shall resume guidance for the same pending
 move. After an exact expected final position, it may commit normally.
 
-## 13. Local Ordinary-Move and Capture Submission
+## 13. Local Ordinary-Move, Capture, and Castling Submission
 
 Local submission is available only when the physical and server positions are
 synchronized, it is the configured player's turn, and the camera identifies a
-unique ordinary move or non-promotion capture.
+unique ordinary move, non-promotion capture, or completed castling signature.
 
 The application shall use a two-phase commit:
 
@@ -770,7 +788,7 @@ Phase 7 slices are declared complete.
 
 ## 21. Implementation Status
 
-The ordinary-move and non-promotion capture slices are implemented:
+The ordinary-move, non-promotion capture, and castling slices are implemented:
 
 - A pure synchronization controller validates complete history prefixes.
 - Server and physical legal cursors advance independently.
@@ -796,11 +814,13 @@ The ordinary-move and non-promotion capture slices are implemented:
 - Incoming and local captures use the same two-phase authority boundaries as
   ordinary moves, including one-action and captured-piece-first camera
   evidence.
-- Promotions, castling, en passant, and capture-promotions explicitly enter
+- Incoming and local castling use four-square guidance and accept either the
+  complete final position or king-first, rook-second physical handling.
+- Promotions, en passant, and capture-promotions explicitly enter
   reconciliation until their staged slices are implemented.
 
-The validated automated suite contains 228 passing tests. Live ordinary-move,
+The validated automated suite contains 234 passing tests. Live ordinary-move,
 polling, reconciliation, and guidance acceptance has been exercised on the
-target camera/projector setup. Lichess capture behavior is automated-test
-validated and awaits live acceptance. Promotions, castling, en passant, and
-capture-promotions remain staged limitations.
+target camera/projector setup. Lichess capture and castling behavior is automated-test validated and awaits
+live acceptance. Promotions, en passant, and capture-promotions remain staged
+limitations.

@@ -114,6 +114,22 @@ def test_projector_renders_patterns_and_calibrated_squares(
     assert move_image.pixelColor(205, 99) == PROJECTED_LEGAL_MOVE
     assert move_image.pixelColor(145, 64).red() == 0
 
+    window.show_move_squares(
+        (
+            (7, 4, False),
+            (7, 6, False),
+            (7, 7, True),
+            (7, 5, True),
+        )
+    )
+    application.processEvents()
+    castling_image = window.grab().toImage()
+    for x_coordinate in (175, 205, 235, 265):
+        assert (
+            castling_image.pixelColor(x_coordinate, 151)
+            == PROJECTED_LEGAL_MOVE
+        )
+
     window.show_illegal_square(2, 3)
     application.processEvents()
     illegal_image = window.grab().toImage()

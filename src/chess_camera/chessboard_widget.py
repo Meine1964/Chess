@@ -65,9 +65,7 @@ class ChessboardWidget(QWidget):
         self._selected_square: tuple[int, int] | None = None
         self._last_move: tuple[tuple[int, int], tuple[int, int]] | None = None
         self._illegal_source: tuple[int, int] | None = None
-        self._guidance_move: (
-            tuple[tuple[int, int], tuple[int, int]] | None
-        ) = None
+        self._guidance_squares: tuple[tuple[int, int], ...] = ()
         self._reconciliation_squares: frozenset[
             tuple[int, int]
         ] = frozenset()
@@ -144,21 +142,33 @@ class ChessboardWidget(QWidget):
     def guidance_move(
         self,
     ) -> tuple[tuple[int, int], tuple[int, int]] | None:
-        return self._guidance_move
+        if len(self._guidance_squares) < 2:
+            return None
+        return self._guidance_squares[0], self._guidance_squares[1]
+
+    @property
+    def guidance_squares(self) -> tuple[tuple[int, int], ...]:
+        return self._guidance_squares
 
     def set_guidance_move(
         self,
         move: tuple[tuple[int, int], tuple[int, int]] | None,
     ) -> None:
-        if move is not None:
-            for row, column in move:
-                if not 0 <= row < 8 or not 0 <= column < 8:
-                    raise ValueError(
-                        "Guidance squares must be inside the 8x8 board."
-                    )
-        if move == self._guidance_move:
+        self.set_guidance_squares(() if move is None else move)
+
+    def set_guidance_squares(
+        self,
+        squares: Collection[tuple[int, int]],
+    ) -> None:
+        guidance_squares = tuple(dict.fromkeys(squares))
+        for row, column in guidance_squares:
+            if not 0 <= row < 8 or not 0 <= column < 8:
+                raise ValueError(
+                    "Guidance squares must be inside the 8x8 board."
+                )
+        if guidance_squares == self._guidance_squares:
             return
-        self._guidance_move = move
+        self._guidance_squares = guidance_squares
         self.update()
 
     @property
@@ -276,8 +286,7 @@ class ChessboardWidget(QWidget):
                     )
                     painter.drawRect(rectangle.adjusted(2, 2, -2, -2))
                 if (
-                    self._guidance_move is not None
-                    and (row, column) in self._guidance_move
+                    (row, column) in self._guidance_squares
                 ):
                     painter.fillRect(rectangle, QColor("#ffffff"))
                     painter.setPen(
