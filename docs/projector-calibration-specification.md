@@ -60,6 +60,8 @@ The initial calibration path is implemented with:
   fitting, or refinement.
 - Up-to-five-Hz non-disruptive continuous board remapping and active-square
   projector verification.
+- Occupancy-aware active-square monitoring that preserves camera-grid drift
+  checks but skips board-plane centroid verification on occupied squares.
 - An interactive 8x8 board using the classic Lichess brown palette.
 - Projection of one inset physical-square polygon when the corresponding
   interface square is clicked.
@@ -84,6 +86,13 @@ The first successful hardware run measured:
 The current implementation restores a strictly matching saved calibration and
 provides **Quick realign / assess**. Automatic drift-triggered recalibration
 remains intentionally disabled.
+
+The occupied-square monitoring path was validated on hardware after a
+populated-board calibration with 1.26 camera pixels maximum validation error.
+The occupied c8 bishop square remained verified for more than five seconds
+with optical verification disabled, while the empty c4 square retained normal
+optical verification and measured 0.7 camera pixels, or 1.4% of local square
+width.
 
 ## 2. Scope
 
@@ -500,8 +509,14 @@ After calibration is completed or restored, the application:
 4. Transfers the calibrated local correction field to the moved board using a
    smooth quadratic camera-space model.
 5. Geometrically warps the stored black reference with the board motion.
-6. While a selected square is projected, locates its illuminated region and
-   compares its centroid with the expected physical-square center.
+6. While an unoccupied selected square is projected, locates its illuminated
+   region and compares its centroid with the expected physical-square center.
+   Occupancy shall be checked with the selected UI `(row, column)` coordinate,
+   which is the key type used by the authoritative accepted position, rather
+   than with its algebraic diagnostic label. A selected occupied square shall
+   continue camera-grid drift monitoring but shall not use the illuminated
+   centroid as projector-plane evidence, because projection onto a raised
+   piece is displaced by parallax.
 7. Accepts in-plane board movement when the updated square remains aligned.
 8. Requires two consecutive projected-square or remapping failures before
    invalidation.
@@ -515,7 +530,8 @@ After calibration is completed or restored, the application:
     failure with a stable camera grid as projector calibration loss.
 12. Makes the projector black and changes the corresponding persistent UI
     indicator to red after confirmed calibration loss. The last optically
-    verified mesh remains available and recalibration remains a manual action.
+    verified mesh remains available only as diagnostic evidence; it shall not
+    remain usable for square projection after calibration loss.
 
 Monitoring pauses for full calibration, focus patterns, full-board grids, and
 all-square fills because those modes intentionally
@@ -704,6 +720,13 @@ Calibration shall fail safely and explain the cause when:
 
 Every failure path shall make the projector black before returning control to
 the user.
+
+A failed full, populated-board, quick-realignment, or validation operation
+shall invalidate the active projection mapping. Matching hardware identity is
+not evidence that a saved mapping remains geometrically valid after the camera,
+board, or projector has moved. The failed mapping may remain on disk for
+diagnostics, but the UI shall require a successful calibration before allowing
+square projection.
 
 ## 19. Implementation Stages
 

@@ -1163,6 +1163,7 @@ class CameraWindow(QMainWindow):
             QMessageBox.critical(self, "Projector error", str(error))
             return False
 
+        self._alignment_monitor.set_black()
         self._settings.setValue(_PROJECTOR_SETTING, screen.name())
         self._settings.sync()
         geometry = screen.geometry()
@@ -1507,32 +1508,31 @@ class CameraWindow(QMainWindow):
 
     def _projector_calibration_failed(self, message: str) -> None:
         self._projector_window.show_black()
+        if self._calibrator.quick_verification:
+            operation = "Quick realignment"
+        elif self._calibrator.validation_only:
+            operation = "Validation"
+        elif self._calibrator.coded_pattern_mode:
+            operation = "Coded-pattern calibration"
+        else:
+            operation = "Full calibration"
         if self._calibration_result is not None:
-            result = self._calibration_result
-            self._projector_window.set_projector_grid(
-                result.mapping.projector_grid
+            invalidation_error = self._invalidate_saved_calibration()
+            self._invalidate_calibration()
+            self._set_calibration_indicator(
+                self._projector_calibration_indicator,
+                "Projector calibration",
+                "error",
+                message,
             )
-            selected_screen = self._screens[
-                self._projector_selector.currentIndex()
-            ]
-            geometry = selected_screen.geometry()
-            self._alignment_monitor.configure(
-                result,
-                (geometry.width(), geometry.height()),
-            )
-            self._alignment_monitor.set_black()
-            if self._calibrator.quick_verification:
-                operation = "Quick realignment"
-            elif self._calibrator.validation_only:
-                operation = "Validation"
-            elif self._calibrator.coded_pattern_mode:
-                operation = "Coded-pattern calibration"
-            else:
-                operation = "Full calibration"
             self._projector_status.setText(
-                f"{operation} failed: {message} The previous verified "
-                "calibration remains active."
+                f"{operation} failed: {message} The previous mapping was "
+                "invalidated; recalibration is required."
             )
+            if invalidation_error is not None:
+                self._projector_status.setText(
+                    f"{self._projector_status.text()} {invalidation_error}"
+                )
             if self._calibrator.validation_only:
                 QMessageBox.warning(
                     self,
@@ -1544,7 +1544,8 @@ class CameraWindow(QMainWindow):
                 message,
                 details={
                     "operation": operation,
-                    "previous_calibration_retained": True,
+                    "previous_calibration_retained": False,
+                    "previous_calibration_invalidated": True,
                 },
                 include_images=True,
                 additional_images={
@@ -1554,7 +1555,6 @@ class CameraWindow(QMainWindow):
                     )
                 },
             )
-            self._restore_remembered_square()
             return
         self._invalidate_calibration()
         self._set_calibration_indicator(
@@ -1567,7 +1567,7 @@ class CameraWindow(QMainWindow):
             "calibration-failed",
             message,
             details={
-                "operation": "full",
+                "operation": operation,
                 "previous_calibration_retained": False,
             },
             include_images=True,
@@ -1600,6 +1600,21 @@ class CameraWindow(QMainWindow):
                         self._calibration_result is not None
                     ),
                     "camera_only_calibration": self._camera_only_calibration,
+                },
+                include_images=True,
+            )
+            return
+        if self._piece_side_orientation_needs_detection:
+            self._projector_status.setText(
+                "Square projection unavailable until White-side orientation "
+                "is resolved."
+            )
+            self._record_runtime_diagnostic(
+                "board-square-projection-rejected",
+                self._projector_status.text(),
+                details={
+                    "square": clicked_square,
+                    "reason": "white-side-orientation-unresolved",
                 },
                 include_images=True,
             )
@@ -1666,11 +1681,15 @@ class CameraWindow(QMainWindow):
         self._selected_board_square = (row, column)
         self._remembered_board_square = (row, column)
         self._board_widget.set_selected_square((row, column))
+        square_name = f"{chr(ord('a') + column)}{8 - row}"
+        verify_projection = (
+            (row, column) not in self._piece_synchronizer.position
+        )
         self._alignment_monitor.set_selected_square(
             physical_row,
             physical_column,
+            verify_projection=verify_projection,
         )
-        square_name = f"{chr(ord('a') + column)}{8 - row}"
         self._projector_status.setText(
             f"Projecting {square_name} (row {row + 1}, column {column + 1})."
         )
@@ -1681,6 +1700,7 @@ class CameraWindow(QMainWindow):
                 "square": square_name,
                 "physical_row": physical_row,
                 "physical_column": physical_column,
+                "optical_alignment_check": verify_projection,
             },
             include_images=True,
         )
@@ -2268,6 +2288,7 @@ class CameraWindow(QMainWindow):
                 "Cannot reset pieces until the camera board is calibrated."
             )
             return
+        self._black_projector()
         self._reset_to_start_requested = True
         self._piece_side_orientation_needs_detection = True
         self._occupancy_detector.reset()
@@ -3290,8 +3311,6 @@ class CameraWindow(QMainWindow):
             return
         self._board_quarter_turns = turns
         self._board_orientation_needs_detection = False
-        self._settings.setValue(_BOARD_ORIENTATION_SETTING, turns)
-        self._settings.sync()
 
     def _restore_remembered_square(self) -> None:
         if (
@@ -3316,12 +3335,8 @@ class CameraWindow(QMainWindow):
 
     def _calibration_error(self, source: str, message: str) -> None:
         self._projector_window.show_black()
-        self._suspend_selected_square()
-        if self._verified_calibration_result is not None:
-            self._calibration_result = self._verified_calibration_result
-            self._projector_window.set_projector_grid(
-                self._verified_calibration_result.mapping.projector_grid
-            )
+        invalidation_error = self._invalidate_saved_calibration()
+        self._invalidate_calibration()
         camera_state = "error" if source == "camera" else "ok"
         projector_state = "error" if source == "projector" else "ok"
         self._set_calibration_indicator(
@@ -3338,24 +3353,32 @@ class CameraWindow(QMainWindow):
         )
         self._alignment_status.setText(
             f"{source.capitalize()} calibration error: {message} "
-            "The last verified calibration remains active."
+            "The projection mapping was invalidated."
         )
         self._projector_status.setText(
-            "The last verified calibration remains active; restoring the "
-            "remembered square."
+            "Projection unavailable until calibration succeeds."
         )
+        if invalidation_error is not None:
+            self._projector_status.setText(
+                f"{self._projector_status.text()} {invalidation_error}"
+            )
         self._record_runtime_diagnostic(
             "alignment-calibration-error",
             message,
             details={
                 "source": source,
-                "previous_calibration_retained": (
-                    self._verified_calibration_result is not None
-                ),
+                "previous_calibration_retained": False,
+                "previous_calibration_invalidated": True,
             },
             include_images=True,
         )
-        self._restore_remembered_square()
+
+    def _invalidate_saved_calibration(self) -> str | None:
+        try:
+            self._calibration_store.invalidate()
+        except OSError as error:
+            return str(error)
+        return None
 
     def _projector_selection_changed(self) -> None:
         if self._calibrator.active:

@@ -146,12 +146,14 @@ Before rendering, every physical occupied square shall be transformed to its
 UI square using the inverse of the existing UI-to-physical rotation. No new
 independent orientation state shall be introduced.
 
-When the confirmed occupied-square set exactly matches a complete starting
-position, the application shall compare the central luminance of the pieces
-on the two occupied sides. Square-color parity supplies two rotations that
-differ by 180 degrees; the brighter piece side shall be assigned to White and
-mapped to the bottom two UI ranks. If the position is incomplete or side
-contrast is insufficient, the saved orientation shall remain unchanged.
+When both starting sides retain at least eight confirmed pieces, the
+application shall compare the central luminance of the confirmed pieces on
+those two sides. Square-color parity supplies two rotations that differ by 180
+degrees; the brighter piece side shall be assigned to White and mapped to the
+bottom two UI ranks. This permits orientation recovery when a small number of
+starting pieces are missed or have moved. If either side has insufficient
+evidence or side contrast is insufficient, the saved complete orientation
+shall remain unchanged and projection shall remain unavailable.
 
 ## 6. Canonical Board Image
 

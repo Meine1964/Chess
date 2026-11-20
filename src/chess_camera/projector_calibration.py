@@ -65,18 +65,20 @@ def coded_marker_pattern(
     height: int,
     *,
     intensity: int = 112,
+    inverse: bool = False,
+    staggered: bool = False,
 ) -> CodedPattern:
     if width <= 1 or height <= 1:
         raise ValueError("Coded-pattern dimensions must be greater than one.")
     if not 1 <= intensity <= 255:
         raise ValueError("Intensity must be between 1 and 255.")
 
-    marker_size = max(40, min(width // 16, height // 9))
+    marker_size = max(32, min(width // 32, height // 18, 40))
     quiet_zone = max(6, marker_size // 6)
     pitch = marker_size + 2 * quiet_zone
-    columns = width // pitch
-    rows = height // pitch
-    if columns < 4 or rows < 3 or columns * rows > 100:
+    columns = min(width // pitch, 20)
+    rows = min(height // pitch, 12)
+    if columns < 4 or rows < 3 or columns * rows > 250:
         raise ValueError(
             "Projector resolution cannot hold enough uniquely coded markers."
         )
@@ -84,10 +86,13 @@ def coded_marker_pattern(
     pattern = np.zeros((height, width), dtype=np.uint8)
     marker_corners: dict[int, FloatArray] = {}
     dictionary = cv2.aruco.getPredefinedDictionary(
-        cv2.aruco.DICT_4X4_100
+        cv2.aruco.DICT_4X4_250
     )
     start_x = (width - columns * pitch) // 2
     start_y = (height - rows * pitch) // 2
+    if staggered:
+        start_x += min(pitch // 2, start_x)
+        start_y += min(pitch // 2, start_y)
     marker_id = 0
     for row in range(rows):
         for column in range(columns):
@@ -95,20 +100,25 @@ def coded_marker_pattern(
             tile_top = start_y + row * pitch
             marker_left = tile_left + quiet_zone
             marker_top = tile_top + quiet_zone
-            pattern[
-                tile_top : tile_top + pitch,
-                tile_left : tile_left + pitch,
-            ] = intensity
             marker = cv2.aruco.generateImageMarker(
                 dictionary,
                 marker_id,
                 marker_size,
             )
+            tile_slice = pattern[
+                tile_top : tile_top + pitch,
+                tile_left : tile_left + pitch,
+            ]
+            if not inverse:
+                tile_slice[:] = intensity
             marker_slice = pattern[
                 marker_top : marker_top + marker_size,
                 marker_left : marker_left + marker_size,
             ]
-            marker_slice[marker == 0] = 0
+            if inverse:
+                marker_slice[marker == 0] = intensity
+            else:
+                marker_slice[marker == 0] = 0
             marker_corners[marker_id] = np.asarray(
                 [
                     [marker_left, marker_top],
@@ -129,6 +139,9 @@ def detect_coded_marker_correspondences(
     black: GrayImage,
     illuminated: GrayImage,
     pattern: CodedPattern,
+    *,
+    inverse: bool = False,
+    minimum_markers: int = 4,
 ) -> tuple[FloatArray, FloatArray, IntArray]:
     if black.shape != illuminated.shape or black.ndim != 2:
         raise ValueError(
@@ -149,16 +162,24 @@ def detect_coded_marker_correspondences(
         0,
         255,
     ).astype(np.uint8)
+    if inverse:
+        normalized = 255 - normalized
     parameters = cv2.aruco.DetectorParameters()
     parameters.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
     detector = cv2.aruco.ArucoDetector(
-        cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_100),
+        cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_250),
         parameters,
     )
     detected_corners, detected_ids, _rejected = detector.detectMarkers(
         normalized
     )
     if detected_ids is None:
+        if minimum_markers == 0:
+            return (
+                np.empty((0, 2), dtype=np.float32),
+                np.empty((0, 2), dtype=np.float32),
+                np.empty((0,), dtype=np.int32),
+            )
         raise CalibrationError("No uniquely coded projector markers were detected.")
 
     camera_points: list[FloatArray] = []
@@ -178,10 +199,16 @@ def detect_coded_marker_correspondences(
         )
         projector_points.append(expected_corners)
         marker_ids.append(marker_id)
-    if len(camera_points) < 4:
+    if len(camera_points) < minimum_markers:
         raise CalibrationError(
             f"Only {len(camera_points)} coded markers were detected; "
-            "at least four are required."
+            f"at least {minimum_markers} are required."
+        )
+    if not camera_points:
+        return (
+            np.empty((0, 2), dtype=np.float32),
+            np.empty((0, 2), dtype=np.float32),
+            np.empty((0,), dtype=np.int32),
         )
     return (
         np.concatenate(camera_points, axis=0),
@@ -377,7 +404,7 @@ def _is_verified_internal_corner_detection(
         detection.method == "internal corners"
         and detection.confidence >= 0.85
         and detection.reprojection_error is not None
-        and detection.reprojection_error <= 1.0
+        and detection.reprojection_error <= 1.1
         and detection.grid_alignment >= 0.8
     )
 
@@ -388,17 +415,44 @@ def fit_coded_pattern_mapping(
     rough_detection: BoardDetection,
     pattern: CodedPattern,
     projector_size: tuple[int, int],
+    *,
+    inverse_illuminated: GrayImage | None = None,
+    inverse_pattern: CodedPattern | None = None,
 ) -> tuple[BoardDetection, MappingResult]:
     refined_detection = fit_visible_middle_lattice(
         black,
         rough_detection,
     )
-    camera_points, projector_points, marker_ids = (
+    captures = [(illuminated, False, pattern)]
+    if inverse_illuminated is not None:
+        captures.append(
+            (
+                inverse_illuminated,
+                True,
+                inverse_pattern if inverse_pattern is not None else pattern,
+            )
+        )
+    correspondence_sets = [
         detect_coded_marker_correspondences(
             black,
-            illuminated,
-            pattern,
+            capture,
+            capture_pattern,
+            inverse=inverse,
+            minimum_markers=0,
         )
+        for capture, inverse, capture_pattern in captures
+    ]
+    camera_points = np.concatenate(
+        [correspondences[0] for correspondences in correspondence_sets],
+        axis=0,
+    )
+    projector_points = np.concatenate(
+        [correspondences[1] for correspondences in correspondence_sets],
+        axis=0,
+    )
+    marker_ids = np.concatenate(
+        [correspondences[2] for correspondences in correspondence_sets],
+        axis=0,
     )
     board_polygon = np.ascontiguousarray(
         refined_detection.outer_corners,
@@ -422,7 +476,8 @@ def fit_coded_pattern_mapping(
     projector_points = projector_points.reshape(marker_count, 4, 2)[
         inside_markers
     ].reshape(-1, 2)
-    inside_marker_count = int(np.count_nonzero(inside_markers))
+    inside_marker_ids = marker_ids[inside_markers]
+    inside_marker_count = int(np.unique(inside_marker_ids).size)
     if inside_marker_count < 4:
         raise CalibrationError(
             f"Only {inside_marker_count} coded markers were visible on the "

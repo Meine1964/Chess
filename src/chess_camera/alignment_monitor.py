@@ -100,6 +100,7 @@ class AlignmentMonitor(QObject):
         self._latest_frame: ImageArray | None = None
         self._black_reference: ImageArray | None = None
         self._selected_square: tuple[int, int] | None = None
+        self._verify_selected_square = True
         self._output_mode: OutputMode = "paused"
         self._check_running = False
         self._generation = 0
@@ -123,6 +124,7 @@ class AlignmentMonitor(QObject):
         self._projector_size = projector_size or (0, 0)
         self._camera_only = projector_size is None
         self._selected_square = None
+        self._verify_selected_square = True
         self._output_mode = "black"
         self._black_reference = None
         self._geometry_failure_count = 0
@@ -142,6 +144,7 @@ class AlignmentMonitor(QObject):
         self._camera_only = False
         self._tracker.reset()
         self._selected_square = None
+        self._verify_selected_square = True
         self._output_mode = "paused"
         self._black_reference = None
         self._generation += 1
@@ -167,13 +170,20 @@ class AlignmentMonitor(QObject):
         self._check_running = False
         self._output_mode = "black"
         self._selected_square = None
+        self._verify_selected_square = True
         self._geometry_failure_count = 0
         self._geometry_failure_source = None
         self.status_changed.emit(
             "Alignment monitor active; acquiring black reference."
         )
 
-    def set_selected_square(self, row: int, column: int) -> None:
+    def set_selected_square(
+        self,
+        row: int,
+        column: int,
+        *,
+        verify_projection: bool = True,
+    ) -> None:
         if self._result is None:
             return
         if not 0 <= row < 8 or not 0 <= column < 8:
@@ -182,6 +192,7 @@ class AlignmentMonitor(QObject):
         self._check_running = False
         self._output_mode = "selected"
         self._selected_square = (row, column)
+        self._verify_selected_square = verify_projection
         self._geometry_failure_count = 0
         self.status_changed.emit(
             "Alignment monitor checking the active projected square."
@@ -317,6 +328,15 @@ class AlignmentMonitor(QObject):
             self.status_changed.emit(
                 "Board alignment OK; waiting for a black reference before "
                 "projector verification."
+            )
+            return
+        if not self._verify_selected_square:
+            self._geometry_failure_count = 0
+            self._geometry_failure_source = None
+            self.status_changed.emit(
+                f"Alignment OK; board drift {displacement:.1f} px. "
+                "Projected-square verification skipped because the selected "
+                "square is occupied."
             )
             return
         if self._stable_board_checks < self._stable_checks_after_remap:

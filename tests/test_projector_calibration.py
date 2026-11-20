@@ -66,8 +66,38 @@ def test_coded_marker_pattern_decodes_absolute_projector_coordinates() -> None:
     )
 
     assert pattern.image.shape == (720, 1280)
-    assert len(pattern.marker_corners) == 72
-    assert len(np.unique(marker_ids)) == 72
+    assert len(pattern.marker_corners) == 240
+    assert len(np.unique(marker_ids)) == 240
+    first_marker = pattern.marker_corners[0]
+    assert first_marker[1, 0] - first_marker[0, 0] == 39
+    assert pattern.marker_corners[1][0, 0] - first_marker[0, 0] == 52
+    assert np.max(np.abs(camera_points - projector_points)) < 0.5
+
+
+def test_inverse_coded_marker_pattern_decodes_same_coordinates() -> None:
+    pattern = coded_marker_pattern(1280, 720)
+    inverse_pattern = coded_marker_pattern(
+        1280,
+        720,
+        inverse=True,
+        staggered=True,
+    )
+
+    camera_points, projector_points, marker_ids = (
+        detect_coded_marker_correspondences(
+            np.zeros_like(pattern.image),
+            inverse_pattern.image,
+            inverse_pattern,
+            inverse=True,
+        )
+    )
+
+    assert inverse_pattern.marker_corners.keys() == pattern.marker_corners.keys()
+    np.testing.assert_allclose(
+        inverse_pattern.marker_corners[0] - pattern.marker_corners[0],
+        26,
+    )
+    assert len(np.unique(marker_ids)) == 240
     assert np.max(np.abs(camera_points - projector_points)) < 0.5
 
 
@@ -83,6 +113,31 @@ def test_coded_marker_error_reports_measured_response() -> None:
             np.zeros_like(pattern.image),
             pattern,
         )
+
+
+def test_optional_coded_capture_allows_no_detected_markers() -> None:
+    pattern = coded_marker_pattern(1280, 720)
+    illuminated = np.full_like(pattern.image, 10)
+
+    camera_points, projector_points, marker_ids = (
+        detect_coded_marker_correspondences(
+            np.zeros_like(pattern.image),
+            illuminated,
+            pattern,
+            minimum_markers=0,
+        )
+    )
+
+    assert camera_points.shape == (0, 2)
+    assert projector_points.shape == (0, 2)
+    assert marker_ids.shape == (0,)
+
+
+def test_inverse_coded_capture_uses_valid_diagnostic_name() -> None:
+    controller = ProjectorCalibrationController(object(), object())
+    controller._captures["coded_inverse"] = np.zeros((10, 10), dtype=np.uint8)
+
+    assert set(controller.diagnostic_captures) == {"coded-inverse"}
 
 
 def test_coded_mapping_uses_measured_visible_lattice() -> None:
@@ -252,7 +307,7 @@ def test_middle_lattice_accepts_verified_internal_corners_on_populated_board(
     rough_detection = BoardDetection(
         grid_points=expected_grid,
         confidence=0.909,
-        reprojection_error=0.47,
+        reprojection_error=1.05,
         method="internal corners",
         grid_alignment=1.0,
     )
@@ -261,6 +316,21 @@ def test_middle_lattice_accepts_verified_internal_corners_on_populated_board(
 
     assert refined.method == "verified internal corners"
     np.testing.assert_allclose(refined.grid_points, expected_grid)
+
+    with pytest.raises(
+        CalibrationError,
+        match="middle-board intersections",
+    ):
+        fit_visible_middle_lattice(
+            image,
+            BoardDetection(
+                grid_points=expected_grid,
+                confidence=0.909,
+                reprojection_error=1.11,
+                method="internal corners",
+                grid_alignment=1.0,
+            ),
+        )
 
 
 def test_gray_code_patterns_decode_projector_coordinates() -> None:
@@ -416,6 +486,200 @@ def test_loaded_camera_geometry_requires_orientation_redetection() -> None:
 
     assert window._board_orientation_needs_detection is True
     assert window._piece_side_orientation_needs_detection is True
+
+
+def test_parity_detection_does_not_persist_incomplete_orientation() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    window = SimpleNamespace(
+        _board_orientation_needs_detection=True,
+        _latest_frame=np.zeros((20, 20, 3), dtype=np.uint8),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(
+                camera_grid=np.zeros((9, 9, 2), dtype=np.float32)
+            )
+        ),
+        _board_quarter_turns=2,
+        _settings=MagicMock(),
+    )
+
+    with patch(
+        "src.chess_camera.camera_app.detect_board_orientation",
+        return_value=1,
+    ):
+        CameraWindow._detect_current_board_orientation(window)
+
+    assert window._board_quarter_turns == 1
+    assert window._board_orientation_needs_detection is False
+    window._settings.setValue.assert_not_called()
+    window._settings.sync.assert_not_called()
+
+
+def test_square_projection_waits_for_white_side_orientation() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    window = SimpleNamespace(
+        _calibration_result=object(),
+        _camera_only_calibration=False,
+        _piece_side_orientation_needs_detection=True,
+        _projector_status=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
+        _open_projector=MagicMock(),
+    )
+
+    CameraWindow._board_square_clicked(window, 4, 2)
+
+    window._open_projector.assert_not_called()
+    assert (
+        "White-side orientation"
+        in window._projector_status.setText.call_args.args[0]
+    )
+
+
+def test_occupied_square_skips_runtime_optical_alignment_check() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    window = SimpleNamespace(
+        _pending_board_square=(0, 2),
+        _calibration_result=object(),
+        _latest_frame=None,
+        _physical_board_square=MagicMock(return_value=(0, 2)),
+        _projector_window=MagicMock(),
+        _selected_board_square=None,
+        _remembered_board_square=None,
+        _board_widget=MagicMock(),
+        _piece_synchronizer=SimpleNamespace(position={(0, 2): "b"}),
+        _alignment_monitor=MagicMock(),
+        _projector_status=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
+    )
+
+    CameraWindow._project_board_square_after_black(window, 0, 2)
+
+    window._alignment_monitor.set_selected_square.assert_called_once_with(
+        0,
+        2,
+        verify_projection=False,
+    )
+
+
+def test_failed_recalibration_invalidates_previous_mapping() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    window = SimpleNamespace(
+        _projector_window=MagicMock(),
+        _calibration_result=object(),
+        _calibrator=SimpleNamespace(
+            quick_verification=False,
+            validation_only=False,
+            coded_pattern_mode=True,
+            diagnostic_captures={},
+        ),
+        _invalidate_saved_calibration=MagicMock(return_value=None),
+        _invalidate_calibration=MagicMock(),
+        _set_calibration_indicator=MagicMock(),
+        _projector_calibration_indicator=object(),
+        _projector_status=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
+    )
+
+    CameraWindow._projector_calibration_failed(window, "failed")
+
+    window._invalidate_saved_calibration.assert_called_once_with()
+    window._invalidate_calibration.assert_called_once_with()
+    assert (
+        "invalidated"
+        in window._projector_status.setText.call_args.args[0]
+    )
+
+
+def test_alignment_loss_invalidates_projection_mapping() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    window = SimpleNamespace(
+        _projector_window=MagicMock(),
+        _invalidate_saved_calibration=MagicMock(return_value=None),
+        _invalidate_calibration=MagicMock(),
+        _set_calibration_indicator=MagicMock(),
+        _camera_calibration_indicator=object(),
+        _projector_calibration_indicator=object(),
+        _alignment_status=MagicMock(),
+        _projector_status=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
+    )
+
+    CameraWindow._calibration_error(window, "camera", "moved")
+
+    window._invalidate_saved_calibration.assert_called_once_with()
+    window._invalidate_calibration.assert_called_once_with()
+    assert (
+        "invalidated"
+        in window._alignment_status.setText.call_args.args[0]
+    )
+
+
+def test_open_projector_marks_black_as_authoritative_output() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    geometry = SimpleNamespace(width=lambda: 1280, height=lambda: 720)
+    screen = SimpleNamespace(
+        geometry=lambda: geometry,
+        name=lambda: "projector",
+    )
+    window = SimpleNamespace(
+        _screens=[screen],
+        _projector_selector=SimpleNamespace(currentIndex=lambda: 0),
+        _projector_window=MagicMock(),
+        _settings=MagicMock(),
+        _projector_status=MagicMock(),
+        _alignment_monitor=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
+    )
+
+    assert CameraWindow._open_projector(window) is True
+    window._alignment_monitor.set_black.assert_called_once_with()
+
+
+def test_reset_to_start_blacks_projector_before_verification() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    window = SimpleNamespace(
+        _latest_frame=object(),
+        _calibration_result=object(),
+        _black_projector=MagicMock(),
+        _reset_to_start_requested=False,
+        _piece_side_orientation_needs_detection=False,
+        _occupancy_detector=MagicMock(),
+        _latest_stable_occupied_ui=frozenset(),
+        _piece_status=MagicMock(),
+        _occupancy_status=MagicMock(),
+    )
+
+    CameraWindow._reset_pieces_to_start(window)
+
+    window._black_projector.assert_called_once_with()
+    assert window._reset_to_start_requested is True
 
 
 def test_mapping_recovers_projector_grid_from_dense_measurements() -> None:
@@ -1036,3 +1300,17 @@ def test_calibration_store_persists_mesh_and_validation(tmp_path) -> None:
         )
         is None
     )
+
+
+def test_calibration_store_archives_invalidated_mapping(tmp_path) -> None:
+    store = CalibrationStore(tmp_path)
+    source = tmp_path / "latest.json"
+    source.write_text('{"schema_version": 1}', encoding="utf-8")
+
+    archived = store.invalidate()
+
+    assert archived is not None
+    assert archived.name.startswith("invalidated-")
+    assert archived.read_text(encoding="utf-8") == '{"schema_version": 1}'
+    assert not source.exists()
+    assert store.saved_projector_display() is None

@@ -124,6 +124,7 @@ class ProjectorCalibrationController(QObject):
         self._validation_only = False
         self._coded_pattern_mode = False
         self._coded_pattern: CodedPattern | None = None
+        self._inverse_coded_pattern: CodedPattern | None = None
         self._quick_phase = ""
 
     @property
@@ -145,9 +146,9 @@ class ProjectorCalibrationController(QObject):
     @property
     def diagnostic_captures(self) -> dict[str, GrayImage]:
         return {
-            name: image.copy()
+            name.replace("_", "-"): image.copy()
             for name, image in self._captures.items()
-            if name in {"black", "white", "coded"}
+            if name in {"black", "white", "coded", "coded_inverse"}
         }
 
     def start(self, projector_width: int, projector_height: int) -> None:
@@ -162,6 +163,7 @@ class ProjectorCalibrationController(QObject):
         self._validation_only = False
         self._coded_pattern_mode = False
         self._coded_pattern = None
+        self._inverse_coded_pattern = None
         self._quick_phase = ""
         self._collecting = False
         self._projector_size = (projector_width, projector_height)
@@ -203,12 +205,20 @@ class ProjectorCalibrationController(QObject):
             projector_height,
             intensity=self._intensity,
         )
+        inverse_pattern = coded_marker_pattern(
+            projector_width,
+            projector_height,
+            intensity=self._intensity,
+            inverse=True,
+            staggered=True,
+        )
         self._active = True
         self._run_token += 1
         self._quick_verification = False
         self._validation_only = False
         self._coded_pattern_mode = True
         self._coded_pattern = pattern
+        self._inverse_coded_pattern = inverse_pattern
         self._quick_phase = ""
         self._collecting = False
         self._projector_size = (projector_width, projector_height)
@@ -235,6 +245,11 @@ class ProjectorCalibrationController(QObject):
                 "coded",
                 pattern.image,
                 "Capturing uniquely coded projector pattern",
+            ),
+            _CaptureStep(
+                "coded_inverse",
+                inverse_pattern.image,
+                "Capturing complementary coded projector pattern",
             ),
         ]
         self._step_index = 0
@@ -263,6 +278,7 @@ class ProjectorCalibrationController(QObject):
         self._validation_only = False
         self._coded_pattern_mode = False
         self._coded_pattern = None
+        self._inverse_coded_pattern = None
         self._quick_phase = "fit"
         self._collecting = False
         self._projector_size = (projector_width, projector_height)
@@ -310,6 +326,7 @@ class ProjectorCalibrationController(QObject):
         self._validation_only = True
         self._coded_pattern_mode = False
         self._coded_pattern = None
+        self._inverse_coded_pattern = None
         self._quick_phase = ""
         self._collecting = False
         self._projector_size = (projector_width, projector_height)
@@ -531,7 +548,7 @@ class ProjectorCalibrationController(QObject):
 
     def _calculate_coded_mapping(self) -> None:
         pattern = self._coded_pattern
-        if pattern is None:
+        if pattern is None or self._inverse_coded_pattern is None:
             raise RuntimeError("Coded projector pattern is not available.")
         black = self._captures["black"]
         rough_detection = self._detector.detect(black)
@@ -545,6 +562,8 @@ class ProjectorCalibrationController(QObject):
             rough_detection,
             pattern,
             self._projector_size,
+            inverse_illuminated=self._captures["coded_inverse"],
+            inverse_pattern=self._inverse_coded_pattern,
         )
         self._detection = detection
         self._mapping = mapping

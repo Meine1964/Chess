@@ -222,3 +222,25 @@ def test_monitor_invalidates_shifted_projected_square() -> None:
     assert len(lost_messages) == 1
     assert calibration_errors[0][0] == "projector"
     assert "projected square is misaligned" in lost_messages[0]
+
+
+def test_monitor_skips_optical_check_for_occupied_square() -> None:
+    monitor = AlignmentMonitor(BoardDetector())
+    lost_messages: list[str] = []
+    status_messages: list[str] = []
+    monitor.alignment_lost.connect(lost_messages.append)
+    monitor.status_changed.connect(status_messages.append)
+    monitor.configure(_result(), (200, 200))
+    detection = _detection()
+    black = np.full((100, 100, 3), 20, dtype=np.uint8)
+    monitor.set_black()
+    monitor._check_completed(monitor._generation, detection, black)
+
+    monitor.set_selected_square(3, 3, verify_projection=False)
+    shifted = black.copy()
+    cv2.rectangle(shifted, (48, 42), (56, 48), (180, 180, 180), -1)
+    monitor._check_completed(monitor._generation, detection, shifted)
+    monitor._check_completed(monitor._generation, detection, shifted)
+
+    assert not lost_messages
+    assert "selected square is occupied" in status_messages[-1]

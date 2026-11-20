@@ -191,10 +191,31 @@ def test_piece_colors_put_white_starting_side_at_ui_bottom() -> None:
     assert white_at_top == 2
 
 
-def test_piece_color_orientation_requires_complete_starting_position() -> None:
+def test_piece_color_orientation_allows_small_starting_side_gaps() -> None:
+    starting = cv2.rotate(_starting_position(), cv2.ROTATE_180)
+    occupied = {
+        (row, column)
+        for row in (0, 1, 6, 7)
+        for column in range(8)
+    }
+    occupied.difference_update({(0, 0), (1, 1), (6, 6), (7, 7)})
+    occupied.update({(3, 3), (4, 4)})
+
+    assert (
+        detect_starting_position_orientation(
+            starting,
+            _camera_grid(),
+            frozenset(occupied),
+            0,
+        )
+        == 2
+    )
+
+
+def test_piece_color_orientation_requires_evidence_on_both_sides() -> None:
     with np.testing.assert_raises_regex(
         ValueError,
-        "complete starting position",
+        "at least eight occupied squares",
     ):
         detect_starting_position_orientation(
             _starting_position(),

@@ -233,14 +233,23 @@ def detect_starting_position_orientation(
         raise ValueError("Minimum piece contrast must be positive.")
     base_turns = parity_turns % 2
     candidate = base_turns
-    expected_occupied = frozenset(
+    candidate_side = frozenset(
         _rotate_square(row, column, candidate)
-        for row in (0, 1, 6, 7)
+        for row in (0, 1)
         for column in range(8)
     )
-    if occupied_squares != expected_occupied:
+    opposite_side = frozenset(
+        _rotate_square(row, column, candidate)
+        for row in (6, 7)
+        for column in range(8)
+    )
+    if (
+        len(occupied_squares & candidate_side) < 8
+        or len(occupied_squares & opposite_side) < 8
+    ):
         raise ValueError(
-            "White-side orientation requires a complete starting position."
+            "White-side orientation requires at least eight occupied squares "
+            "on each starting side."
         )
 
     canonical = rectify_board(frame, camera_grid)
@@ -258,6 +267,8 @@ def detect_starting_position_orientation(
                     ui_column,
                     turns,
                 )
+                if (row, column) not in occupied_squares:
+                    continue
                 lab = cv2.cvtColor(
                     regions[row][column],
                     cv2.COLOR_BGR2LAB,

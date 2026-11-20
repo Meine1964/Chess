@@ -246,9 +246,12 @@ previous physical-grid orientation, even when the logical piece position is
 already initialized. Before square projection or occupancy resumes, the
 application shall re-detect square-color parity from the current camera frame
 so that logical light squares map to physical light squares. When a complete
-starting position is subsequently visible, the application shall also
-re-evaluate the 180-degree White-side ambiguity without clearing or replacing
-the initialized logical position.
+or sufficiently populated starting-side arrangement is subsequently visible,
+the application shall also re-evaluate the 180-degree White-side ambiguity
+without clearing or replacing the initialized logical position. Parity alone
+shall remain transient and shall not overwrite the persisted complete
+quarter-turn orientation. Square projection shall remain unavailable while the
+White-side ambiguity is unresolved.
 
 ## 7. Move Tracking
 
@@ -380,6 +383,8 @@ The UI shall provide an explicit action equivalent to:
 
 The action shall:
 
+- Immediately make the projector output black and mark black as the
+  authoritative projector state before live occupancy verification begins.
 - Enter a dedicated live absolute-occupancy verification mode.
 - Preserve the current logical position and reference while verification is
   pending.
@@ -401,6 +406,11 @@ shall not infer arbitrary piece identities from occupancy dots.
 
 Clicking a UI square shall continue to project the corresponding physical
 square.
+
+Any action that renders black projector output, including **Open projector
+(black)** and **Black**, shall also mark black as the authoritative projector
+state used by the occupancy gate. The displayed projector status and the
+occupancy gate shall not disagree about whether the projector is black.
 
 Piece rendering shall not:
 
@@ -472,6 +482,10 @@ Asset diagnostics shall include:
 - Occupancy resets and calibration interruptions preserve the logical position.
 - Reference metadata mismatches prevent restoration.
 - Explicit reset uses live occupancy rather than a cached pre-reference result.
+- Explicit reset automatically returns the projector to black before occupancy
+  verification.
+- Opening black projector output resumes occupancy processing without requiring
+  a separate **Black** action.
 - Failed reset verification preserves the logical position and reference.
 - Offline legal mode rejects moves that are illegal for the authoritative FEN.
 - A pseudo-legal capture-promotion that does not resolve check is localized and

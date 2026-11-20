@@ -1,6 +1,6 @@
 # Single-Shot Coded-Pattern Chessboard Calibration Specification
 
-**Version:** 0.2
+**Version:** 0.3
 **Status:** Experimental implementation; existing Gray-code calibration preserved
 **Platform:** Python on Windows
 **Camera:** Logitech Webcam C930e at 1920x1080
@@ -14,8 +14,8 @@
 
 ## 1. Purpose
 
-Define a less intrusive camera-to-projector calibration method based on one
-uniquely coded projected pattern.
+Define a less intrusive camera-to-projector calibration method based on a
+short complementary pair of uniquely coded projected patterns.
 
 The method shall:
 
@@ -60,7 +60,8 @@ The proposed workflow reverses the current dependency:
 
 1. Locate only a rough camera-space board region.
 2. Observe visible physical chess-grid boundaries in a projector-black frame.
-3. Project one uniquely coded calibration pattern.
+3. Project normal- and inverse-polarity versions of one uniquely coded
+   calibration pattern.
 4. Decode projector coordinates at visible board-plane locations.
 5. Associate visible physical chess boundaries with measured projector
    coordinates.
@@ -150,12 +151,23 @@ The feature layout shall not depend on the projector center landing at the
 physical board center. The rough board region may appear anywhere within the
 projector image.
 
+At 1280x720, the implementation shall use a centered 20x12 layout of 240
+markers from the 4x4 250-marker dictionary. Each marker shall be 40 projector
+pixels wide with a 6-pixel quiet zone, producing a 52-pixel pitch. Physical
+captures showed that the earlier 80-pixel layout yielded one on-board marker
+and that a 64-pixel layout yielded only two: those markers appeared about 65
+camera pixels wide while a physical square was about 50 camera pixels wide.
+The 40-pixel layout is expected to appear about 40 camera pixels wide, fit
+within a square, and retain roughly 6-7 camera pixels per binary marker cell.
+
 ### 6.4 Optical properties
 
 The initial implementation shall:
 
 - Use a black background.
-- Use measured safe projector intensity, initially 112.
+- Use projector intensity 255. The current hardware capture measured an
+  81-level black-to-coded response at the 99th percentile with less than 0.1%
+  saturated camera pixels, so software intensity is not the limiting factor.
 - Avoid feature widths below the measured optical resolution.
 - Include quiet zones needed by the selected decoder.
 - Avoid large continuously bright regions that saturate light squares.
@@ -175,11 +187,35 @@ The normal sequence shall be:
 2. Make the projector black.
 3. Capture and average a short black-reference burst.
 4. Estimate the rough board region and visible chess-boundary evidence.
-5. Project the coded pattern.
+5. Project the normal-polarity coded pattern.
 6. Wait only for the measured projector/camera settling time.
 7. Capture and average a short coded-pattern burst.
-8. Make the projector black immediately.
-9. Decode and fit offline from the captured frames.
+8. Project and capture the inverse-polarity coded pattern.
+9. Make the projector black immediately.
+10. Decode both polarities and combine only identified marker
+    correspondences on the rough board plane.
+11. Fit offline from the captured frames.
+
+The inverse pattern shall illuminate the marker bits while leaving the tile
+background and unused projector area black. Its decoded camera-response image
+shall be polarity-corrected before marker detection. This complementary
+capture addresses the alternating reflectance of light and dark chess
+squares; it does not increase projector intensity beyond 255.
+
+The inverse grid shall be staggered by half the 52-pixel tile pitch in both
+projector axes. The normal 40-pixel capture produced seven distinct inlier
+markers on the physical board but no support in the upper-left quadrant;
+reusing identical marker positions in the inverse capture duplicated evidence
+instead of sampling the missing square interiors.
+
+The staggered 40-pixel implementation was physically validated on the target
+camera/projector with the starting pieces present. It passed distinct-marker,
+RANSAC, projector-grid, and all-quadrant checks, completed both refinement
+iterations, and passed the nine-target validation with a 2.02 projector-pixel
+maximum error. The verified mapping was saved to `calibrations/latest.json`.
+
+Both captures shall be retained as diagnostics using valid hyphenated runtime
+image names, including `calibration-coded-inverse`.
 
 The visible coded-pattern interval should target 250 milliseconds or less.
 Actual timing shall be measured on hardware. Frame averaging may extend the
@@ -578,7 +614,7 @@ Hardware acceptance shall use:
 - Logitech Webcam C930e at 1920x1080.
 - MPR 600 projector at 1280x720.
 - Normal starting position.
-- Projector intensity 112 unless remeasured.
+- Projector intensity 255.
 
 The method shall demonstrate:
 
@@ -596,15 +632,21 @@ unchanged hardware setup.
 
 ## 21. Implementation Milestones
 
-The first experimental implementation uses a native-resolution field of
-`DICT_4X4_100` ArUco markers. It captures a black reference and one coded
-frame, rejects non-plane marker corners with RANSAC, and requires support in
-all four board quadrants.
+The experimental implementation uses a native-resolution 20x12 field of
+`DICT_4X4_250` ArUco markers. It captures a black reference plus normal and
+half-pitch-staggered inverse coded frames, rejects non-plane marker corners
+with RANSAC, and requires support in all four board quadrants.
 
 On a populated starting-position board, it detects a visible 7x5 block of
 physical chess intersections. The rough raster is used only to select its
 orientation and one of the possible five-rank spans. A projective equal-square
 9x9 lattice is then fitted to those measured intersections and transformed
+into projector coordinates. When the 7x5 search is obscured but the rough
+detection itself comes from internal corners with confidence at least `0.85`,
+grid alignment at least `0.8`, and reprojection error no greater than `1.1`
+camera pixels, the internal-corner grid is sufficiently verified to serve as
+the populated-board lattice. Independent projected-target validation remains
+mandatory.
 into projector coordinates. Hidden outer ranks are extrapolated from that
 fit. Rough outer-boundary observations may weakly anchor the extrapolation
 only when they remain within 20% of a square and the rough interior has no
@@ -661,10 +703,28 @@ continues to invoke the legacy Gray-code path.
   legacy Gray code.
 - Promote the coded method only after it is measurably superior.
 
+### Milestone 7: Adaptive marker sizing
+
+- Derive a target marker width from the detected camera-space square width in
+  the black-reference frame.
+- Select only from marker sizes whose complete optical pipeline has been
+  validated; retain the physically verified 40-projector-pixel layout as the
+  fallback.
+- Preserve enough camera resolution for reliable border and binary-cell
+  decoding, including perspective, blur, and the smallest supported board.
+- Adjust marker count, dictionary capacity, quiet zone, pitch, and stagger
+  together rather than shrinking marker artwork alone.
+- Validate each supported scale on representative large and small physical
+  boards, requiring four distinct markers, all-quadrant support, and the
+  unchanged independent target-validation threshold.
+- Record the selected marker size and measured camera-pixel marker width in
+  calibration diagnostics.
+
 ## 22. Open Decisions
 
 - Marker tiles versus De Bruijn lines versus asymmetric dot clusters.
 - Minimum projected feature width.
+- Supported board-size range and adaptive marker-size thresholds.
 - Whether one coded frame is sufficient or an inverse frame is justified.
 - Minimum number of unique decoded features.
 - Measurement-selection conditioning metric and regional quotas.

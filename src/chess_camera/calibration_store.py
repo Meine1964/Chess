@@ -217,6 +217,20 @@ class CalibrationStore:
                 f"Saved projector calibration in {source} is invalid: {error}"
             ) from error
 
+    def invalidate(self) -> Path | None:
+        source = self._root / "latest.json"
+        if not source.exists():
+            return None
+        timestamp = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%f%z")
+        destination = self._root / f"invalidated-{timestamp}.json"
+        try:
+            source.replace(destination)
+        except OSError as error:
+            raise OSError(
+                f"Could not invalidate projector calibration {source}: {error}"
+            ) from error
+        return destination
+
     def saved_projector_display(
         self,
     ) -> tuple[str, tuple[int, int]] | None:
