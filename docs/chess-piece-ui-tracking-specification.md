@@ -1,7 +1,7 @@
 # Chess-Piece UI Rendering and Move Synchronization Specification
 
-**Version:** 0.2  
-**Status:** Experimental ordinary-move implementation  
+**Version:** 0.3
+**Status:** Implemented ordinary-move and offline legal-game workflow
 **Platform:** Python on Windows  
 **Piece artwork:** Lichess `cburnett` SVG set  
 
@@ -409,6 +409,16 @@ Asset diagnostics shall include:
 - Reference metadata mismatches prevent restoration.
 - Explicit reset uses live occupancy rather than a cached pre-reference result.
 - Failed reset verification preserves the logical position and reference.
+- Offline legal mode rejects moves that are illegal for the authoritative FEN.
+- Rejection preserves both the accepted position and reference.
+- Restoring a rejected move clears its UI marker despite a small residual on
+  the authoritative source square.
+- The persistent turn indicator follows the authoritative side to move and is
+  unaffected by transient camera status.
+- A wide or tall released king is not mistaken for a hand.
+- An opposite-color adjacent piece whose base signature remains unchanged can
+  explain a third-square silhouette residual.
+- The same-color equivalent remains ambiguous.
 
 ## 18. Acceptance Criteria
 
@@ -433,7 +443,10 @@ The twelve pinned SVGs, checksum manifest, GPLv2-or-later text, and attribution
 notice are vendored with the application. The standard position model, Qt SVG
 rendering, reference-image one-source/one-destination synchronization,
 ambiguity handling, and explicit starting-position reset are implemented.
-Captures, special moves, and arbitrary-position setup remain future work.
+Offline legal authority, persistent turn indication, illegal-move correction,
+and targeted opposite-color residual resolution are also implemented. Physical
+captures, special-move signatures, and arbitrary-position setup remain future
+work.
 
 ### Milestone 1: Asset import
 
@@ -473,14 +486,24 @@ Implemented for non-capturing one-piece relocations.
 
 Implemented. Reset requires confirmed starting-position occupancy.
 
-### Milestone 5: Captures and legal moves
+### Milestone 5: Offline legal moves
 
-- Add destination appearance-change evidence.
-- Support captures and special moves.
+- Add authoritative FEN, side-to-move, legal-move generation, and game status.
+- Reject illegal physical moves without changing logical/reference state.
+- Add persistent turn and correction guidance.
+
+Implemented for ordinary non-capturing moves.
+
+### Milestone 6: Captures and special physical signatures
+
+- Add destination color-transition evidence for captures.
+- Support castling, en passant, and promotion workflows.
+- Reconcile multi-square physical signatures before atomic commit.
+
+Future work.
 
 ## 20. Open Decisions
 
 - Whether move history is persisted between application starts.
-- How ambiguous changes are presented for user correction.
 - Whether later arbitrary-position setup uses FEN entry, a graphical editor,
   or piece recognition.

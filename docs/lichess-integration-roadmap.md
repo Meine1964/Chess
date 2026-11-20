@@ -1,7 +1,7 @@
 # Lichess Physical-Board Integration Roadmap
 
-**Version:** 0.1  
-**Status:** Planning  
+**Version:** 0.2
+**Status:** Phase 1 implemented; Phases 2-8 planned
 **Platform:** Python on Windows  
 
 **Related specifications:**
@@ -130,6 +130,19 @@ Implemented. Physical capture, castling, en passant, and promotion evidence
 remain Phase 2 through Phase 4 work; the rules authority already generates and
 applies those move types.
 
+Phase 1 also includes the implemented ordinary-move reliability layer:
+
+- Candidate source/destination squares are localized before general obstruction
+  rejection, so a large released king or queen is not itself classified as a
+  hand.
+- Released-piece footprints allow the largest tested chess pieces while
+  retaining the hand-sized rejection bound.
+- A high-scoring adjacent square can be explained only when it contains an
+  opposite-color logical piece whose lower/base color signature still matches
+  the accepted reference.
+- Absolute occupancy remains available for initialization and reset, but does
+  not run as a competing authoritative move tracker.
+
 ## 5. Phase 2: Legal-Move Physical Signatures
 
 For each currently legal move, generate the physical changes expected after
@@ -179,6 +192,11 @@ For `e7e8q`:
 The visual matcher shall score all expected changed squares, vacancy evidence,
 piece-color evidence, unexpected third-square changes, and candidate
 dominance. It shall accept only a unique best legal explanation.
+
+The implemented Phase 1 adjacent-residual check is reusable evidence for this
+phase, but it is not a complete capture or per-square color classifier. Phase 2
+shall generalize that targeted reference evidence into legal physical
+signatures.
 
 ## 6. Phase 3: Physical Piece-Color Classification
 

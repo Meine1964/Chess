@@ -1,7 +1,7 @@
 # Reference-Image Chess Move Tracking Specification
 
-**Version:** 0.1  
-**Status:** Proposed replacement architecture  
+**Version:** 0.2
+**Status:** Implemented for ordinary one-piece relocations
 **Platform:** Python on Windows  
 
 **Related specifications:**
@@ -260,7 +260,9 @@ connected source and destination silhouettes are large. Candidate squares
 shall first be localized, then excluded from the general obstruction mask.
 Obstruction evidence elsewhere on the board shall continue to block the move.
 The released-piece footprint bound shall accommodate the largest normal chess
-piece while remaining below the tested hand-sized footprint.
+piece while remaining below the tested hand-sized footprint. The implemented
+profile permits up to 70% changed-pixel coverage within either candidate square;
+the hand-sized regression exceeds that bound.
 
 Skin-color detection shall not be required.
 
@@ -497,6 +499,13 @@ rejection.
 - Tall-piece silhouettes do not create a third authoritative square.
 - Small grid translations do not become candidate moves.
 - `Ng1-f3` remains detectable after a small perspective/grid remap.
+- A wide king crossing a square boundary is not classified as a multi-square
+  obstruction.
+- `Ke1-f1` remains detectable when the released king covers slightly more than
+  60% of its destination square.
+- `Qd2-h6` remains detectable when uncovering the opposite-color queen on d1
+  creates a strong adjacent residual but the d1 lower/base signature remains.
+- An equivalent same-color adjacent residual remains ambiguous.
 - Thin grid-edge residuals do not become a false multi-square obstruction.
 - Moderate global exposure changes normalize away.
 
@@ -543,6 +552,11 @@ The replacement tracker is accepted when:
 10. UI highlighting and optional physical projection use only accepted moves.
 11. Explicit reset succeeds from a verified physical starting setup and never
     resets from stale cached occupancy.
+12. Candidate source and destination squares are excluded from general
+    obstruction analysis only after localization; obstruction evidence
+    elsewhere still blocks acceptance.
+13. An adjacent opposite-color residual is suppressed only when its retained
+    lower/base signature matches the accepted reference.
 
 ## 22. Migration Plan
 
@@ -577,3 +591,8 @@ After reference tracking passes recorded and live acceptance tests:
 
 Superseded logic shall not remain active as a fallback because competing move
 trackers can produce contradictory state transitions.
+
+All four migration phases are implemented for ordinary non-capturing
+relocations. Absolute occupancy remains available for initialization, explicit
+reset verification, orientation, and future reconciliation rather than as a
+parallel post-initialization move trigger.
