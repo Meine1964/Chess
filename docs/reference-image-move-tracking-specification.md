@@ -403,12 +403,22 @@ The tracker shall reject, without changing the reference or logical position:
 - Weak or contradictory base-region vacancy evidence.
 - Candidate frames that do not agree.
 
-The UI shall report:
+The normal user-facing status line shall present stable, actionable guidance
+rather than every internal tracker transition. `activity`, `settling`, and
+`candidate` are short-lived processing phases and shall not overwrite the last
+useful instruction. The visible line shall change for durable or actionable
+states such as:
 
-- Tracker state.
-- Dominant changed squares and scores.
-- Source and destination vacancy evidence.
-- Rejection reason.
+- Move a hand or object away from the board.
+- Restore an unclear board change.
+- Complete a pending capture.
+- Correct an illegal move or removal.
+- Confirm an accepted move.
+- Confirm that the board matches the accepted reference.
+
+Tracker state, dominant changed squares and scores, source/destination evidence,
+and rejection details shall remain available to diagnostics rather than
+flashing through the normal UI.
 
 It shall not display raw absolute occupancy dots as authoritative move state
 after initialization. Diagnostic overlays may show difference scores.

@@ -1,7 +1,7 @@
 # Lichess Physical-Board Integration Roadmap
 
 **Version:** 0.5
-**Status:** Phase 2 and Phase 3 first slice live-accepted
+**Status:** Phase 2 and Phase 3 live-accepted; Phase 4 first slice implemented
 **Platform:** Python on Windows  
 
 **Related specifications:**
@@ -337,6 +337,34 @@ A destination-only removal is an incomplete capture. It shall not replace the
 reference. Later evidence shall still be compared with the original accepted
 reference until the capture is completed or reconciliation is requested.
 
+The tracker shall report a `pending-capture` state when a settled observation
+uniquely identifies one captured-piece destination, even if multiple eligible
+attacker sources could complete the capture. Pending evidence requires:
+
+- A capture or capture-promotion physical signature for the current side.
+- The signature destination to exceed the movement threshold and classify
+  empty.
+- Each candidate attacker source to remain below the movement threshold and
+  retain the mover's color.
+- No unexplained square above the normal residual limit.
+- No hand or multi-square obstruction.
+
+The pending state shall identify the removed destination and eligible source
+squares, but shall not change the FEN, logical position, turn, UI pieces, or
+accepted reference. Returning the captured piece shall return tracking to the
+accepted position. Moving an eligible attacker to the destination shall be
+evaluated as the original complete capture signature against the unchanged
+reference.
+
+If the only settled change is removal of a piece and the removal is not the
+captured-piece-first stage of a pseudo-legal capture, the tracker shall report
+an illegal removal rather than an ambiguous or unfinished change. This includes
+removing the side-to-move's own piece without placing it on a destination after
+the hand is withdrawn. The removed square shall be marked red on the UI and
+projected red when projection is available. The correction shall instruct the
+user to restore the piece. The FEN, logical position, turn, and accepted
+reference shall remain unchanged.
+
 The first capture slice supports a completed ordinary capture visible in one
 settled observation. When a unique legal capture signature matches, the
 application shall commit the complete authoritative post-move piece map and
@@ -345,7 +373,9 @@ method, because that method intentionally rejects occupied destinations.
 
 If legal application succeeds but logical/reference commit fails, the legal
 game shall roll back and all previously accepted state shall remain unchanged.
-Two-action captures remain pending until the later workflow described above.
+**Implementation status:** Single-action captures are live-accepted.
+Two-action captured-piece-first tracking is implemented and awaiting live
+acceptance.
 
 ### 7.2 Castling
 

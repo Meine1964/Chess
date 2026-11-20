@@ -70,7 +70,10 @@ from .projector_calibration import (
     bgr_to_gray,
     detect_board_orientation,
 )
-from .reference_move_tracker import ReferenceMoveTracker
+from .reference_move_tracker import (
+    ReferenceMoveTracker,
+    ReferenceTrackerUpdate,
+)
 from .reference_store import ReferenceImageStore
 
 _SETTINGS_ORGANIZATION = "ChessProject"
@@ -117,6 +120,13 @@ def _illegal_correction_message(
     source_name = square_name(source)
     destination_name = square_name(destination)
     turn = legal_game.status.turn.capitalize()
+    if source == destination:
+        return (
+            f"Illegal physical removal from {source_name} rejected. "
+            f"The accepted position requires the piece on {source_name}. "
+            f"{turn} to move. Return the piece to {source_name}, then make "
+            f"a {turn} move."
+        )
     legal_destinations = legal_game.legal_destinations(source)
     prefix = (
         f"Illegal physical move {source_name}-{destination_name} rejected. "
@@ -145,6 +155,21 @@ def _accepted_position_message(legal_game: LegalGame) -> str:
         "Board matches the accepted position. "
         f"{status.turn.capitalize()} to move."
     )
+
+
+def _reference_tracking_status_message(
+    update: ReferenceTrackerUpdate,
+) -> str | None:
+    if update.state in ("activity", "settling", "candidate"):
+        return None
+    if update.state == "waiting-for-clear":
+        return "Move your hand and other objects away from the board."
+    if update.state == "ambiguous":
+        return (
+            "Board change is unclear. Restore the accepted position, then "
+            "move one piece at a time."
+        )
+    return update.message
 
 
 def _is_external_camera(
@@ -1712,7 +1737,9 @@ class CameraWindow(QMainWindow):
                 f"Reference tracking unavailable: {error}"
             )
             return
-        self._occupancy_status.setText(update.message)
+        status_message = _reference_tracking_status_message(update)
+        if status_message is not None:
+            self._occupancy_status.setText(status_message)
         rejected_move = self._last_rejected_move
         correction_restored = (
             rejected_move is not None
@@ -1730,6 +1757,18 @@ class CameraWindow(QMainWindow):
             self._piece_status.setText(
                 _accepted_position_message(self._legal_game)
             )
+        if update.state == "illegal-removal" and update.move is not None:
+            square = update.move[0]
+            self._reference_move_tracker.reset_activity()
+            newly_marked = self._last_rejected_move != update.move
+            self._last_rejected_move = update.move
+            self._board_widget.set_illegal_source(square)
+            self._piece_status.setText(
+                _illegal_correction_message(update.move, self._legal_game)
+            )
+            if newly_marked:
+                self._project_illegal_move_correction(update.move)
+            return
         if update.state != "accepted" or update.move is None:
             return
         source, destination = update.move
@@ -1912,10 +1951,13 @@ class CameraWindow(QMainWindow):
         physical_source = self._physical_board_square(*source)
         physical_destination = self._physical_board_square(*destination)
         try:
-            self._projector_window.show_correction(
-                physical_source,
-                physical_destination,
-            )
+            if source == destination:
+                self._projector_window.show_illegal_square(*physical_source)
+            else:
+                self._projector_window.show_correction(
+                    physical_source,
+                    physical_destination,
+                )
         except (RuntimeError, ValueError) as error:
             self._projector_status.setText(
                 f"Illegal move marked on the UI, but projection failed: "
@@ -1924,7 +1966,9 @@ class CameraWindow(QMainWindow):
             return
         self._alignment_monitor.set_paused("illegal move indication")
         self._projector_status.setText(
-            "Projecting the illegal move source and destination in red "
+            f"Projecting the illegally removed square in red for 2 seconds."
+            if source == destination
+            else "Projecting the illegal move source and destination in red "
             "for 2 seconds."
         )
         QTimer.singleShot(2000, self._finish_illegal_move_projection)

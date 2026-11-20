@@ -277,6 +277,22 @@ piece colors; reference-image evidence must show a material destination change
 even though no empty-destination transition occurs. Regression cases include
 `a3xb4` and `Nb4xd3`.
 
+For a two-action capture, removing only the captured destination piece shall
+display pending-capture guidance naming the empty destination and every
+eligible attacker source. The UI pieces, FEN, turn, and accepted reference
+shall remain unchanged. Moving an eligible attacker to the destination shall
+complete the normal authoritative capture commit against the original
+reference. Restoring the captured piece instead shall return to the accepted
+position without requiring a reset.
+
+When the only settled change is removal of a piece and the removal is not the
+captured-piece-first stage of a pseudo-legal capture, the removed square shall
+be treated as an illegal physical removal. That square shall be marked red on
+the UI and projected red, and the persistent correction text shall require
+restoring the piece. A side-to-move piece lifted without being placed on a
+destination after the hand is withdrawn uses the same illegal-removal
+correction.
+
 Diagnostic movement mode shall retain its one-source/one-empty-destination
 contract; an occupied destination without legal-game authority remains
 ambiguous.
@@ -323,6 +339,12 @@ authoritative source before making a move with the correct side. Camera
 restabilization and alignment messages shall not replace this guidance. After
 restoration, the guidance shall confirm that the board matches the accepted
 position and state the side to move.
+
+User-facing tracking guidance shall remain readable. Short-lived internal
+`activity`, `settling`, and `candidate` phases shall not replace the last
+actionable message. Pending captures, obstructions, ambiguous board changes,
+illegal corrections, accepted moves, and restored-board confirmation shall
+remain visible until another durable or actionable state replaces them.
 
 The complete offline FEN is persisted. Offline legal mode is restored only
 when its piece map matches the persisted logical position. Visual signatures

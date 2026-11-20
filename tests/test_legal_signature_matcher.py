@@ -2,7 +2,9 @@ import numpy as np
 
 from src.chess_camera.legal_game import LegalGame
 from src.chess_camera.legal_signature_matcher import (
+    find_illegal_removed_piece,
     match_legal_move_signature,
+    match_pending_capture,
 )
 from src.chess_camera.piece_color_classifier import PieceColorClassification
 
@@ -94,6 +96,80 @@ def test_capture_requires_vacated_source_and_mover_color_destination() -> None:
     assert matched.signature is not None
     assert matched.signature.uci == "f3e5"
     assert rejected.signature is None
+
+
+def test_pending_capture_matches_removed_destination_with_attacker_retained() -> None:
+    game = LegalGame("4k3/8/8/3p4/4P3/8/8/4K3 w - - 0 1")
+    colors = {
+        (4, 4): PieceColorClassification("white", 0.01, 0.2),
+        (3, 3): PieceColorClassification("empty", 0.01, 0.2),
+    }
+
+    pending = match_pending_capture(
+        _scores(((3, 3), 0.2)),
+        game.physical_move_signatures,
+        colors,
+    )
+
+    assert pending.destination == (3, 3)
+    assert pending.sources == ((4, 4),)
+    assert tuple(signature.uci for signature in pending.signatures) == (
+        "e4d5",
+    )
+
+
+def test_uncapturable_opponent_removal_is_illegal() -> None:
+    game = LegalGame("4k3/8/8/4P3/1n6/8/8/4K3 w - - 0 1")
+    removed = (4, 1)
+    colors = {
+        removed: PieceColorClassification("empty", 0.01, 0.2),
+    }
+
+    illegal = find_illegal_removed_piece(
+        _scores((removed, 0.2)),
+        game.physical_move_signatures,
+        colors,
+        game.position,
+    )
+
+    assert illegal == removed
+
+
+def test_capturable_opponent_removal_is_not_illegal() -> None:
+    game = LegalGame("4k3/8/8/8/1n6/P7/8/4K3 w - - 0 1")
+    removed = (4, 1)
+    colors = {
+        removed: PieceColorClassification("empty", 0.01, 0.2),
+    }
+
+    illegal = find_illegal_removed_piece(
+        _scores((removed, 0.2)),
+        game.physical_move_signatures,
+        colors,
+        game.position,
+    )
+
+    assert illegal is None
+
+
+def test_side_to_move_piece_removed_without_destination_is_illegal() -> None:
+    game = LegalGame(
+        "rnbqkbnr/pppp1ppp/8/4p3/1P6/8/P1PPPPPP/"
+        "RNBQKBNR w KQkq - 0 2"
+    )
+    removed = (4, 1)
+    colors = {
+        removed: PieceColorClassification("empty", 0.01, 0.2),
+    }
+
+    illegal = find_illegal_removed_piece(
+        _scores((removed, 0.2)),
+        game.physical_move_signatures,
+        colors,
+        game.position,
+    )
+
+    assert illegal == removed
 
 
 def test_queen_is_the_only_generated_promotion_signature() -> None:

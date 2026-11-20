@@ -240,6 +240,168 @@ def test_legal_signature_tracker_accepts_ordinary_capture(
     assert signature.kind == "capture"
 
 
+def test_two_action_capture_waits_for_attacker_before_accepting() -> None:
+    game = LegalGame("4k3/8/8/8/1n6/P7/8/4K3 w - - 0 1")
+    source = (5, 0)
+    destination = (4, 1)
+    reference = _empty_board()
+    for square, piece in game.position.items():
+        _draw_piece(
+            reference,
+            square,
+            (225, 225, 225) if piece.isupper() else (20, 20, 20),
+        )
+    empty = _empty_board()
+    captured_piece_removed = reference.copy()
+    row, column = destination
+    captured_piece_removed[
+        row * 100 : (row + 1) * 100,
+        column * 100 : (column + 1) * 100,
+    ] = empty[
+        row * 100 : (row + 1) * 100,
+        column * 100 : (column + 1) * 100,
+    ]
+    tracker = ReferenceMoveTracker()
+    tracker.set_reference(reference, _camera_grid(), 0)
+
+    pending = _accepted_update(
+        tracker,
+        captured_piece_removed,
+        game.position,
+        game.physical_move_signatures,
+    )
+
+    assert pending.state == "pending-capture"
+    assert pending.move is None
+    assert "removed from b4" in pending.message
+    assert "from a3" in pending.message
+    assert game.fen == "4k3/8/8/8/1n6/P7/8/4K3 w - - 0 1"
+    np.testing.assert_array_equal(tracker.reference, reference)
+
+    restored = _accepted_update(
+        tracker,
+        reference,
+        game.position,
+        game.physical_move_signatures,
+    )
+
+    assert restored.state == "watching"
+    pending_again = _accepted_update(
+        tracker,
+        captured_piece_removed,
+        game.position,
+        game.physical_move_signatures,
+    )
+    assert pending_again.state == "pending-capture"
+
+    completed = captured_piece_removed.copy()
+    row, column = source
+    completed[
+        row * 100 : (row + 1) * 100,
+        column * 100 : (column + 1) * 100,
+    ] = empty[
+        row * 100 : (row + 1) * 100,
+        column * 100 : (column + 1) * 100,
+    ]
+    _draw_piece(completed, destination, (225, 225, 225))
+
+    accepted = _accepted_update(
+        tracker,
+        completed,
+        game.position,
+        game.physical_move_signatures,
+    )
+
+    assert accepted.state == "accepted"
+    assert accepted.move == (source, destination)
+
+
+def test_uncapturable_opponent_removal_is_marked_illegal() -> None:
+    game = LegalGame("4k3/8/8/4P3/1n6/8/8/4K3 w - - 0 1")
+    removed_square = (4, 1)
+    reference = _empty_board()
+    for square, piece in game.position.items():
+        _draw_piece(
+            reference,
+            square,
+            (225, 225, 225) if piece.isupper() else (20, 20, 20),
+        )
+    removed = reference.copy()
+    empty = _empty_board()
+    row, column = removed_square
+    removed[
+        row * 100 : (row + 1) * 100,
+        column * 100 : (column + 1) * 100,
+    ] = empty[
+        row * 100 : (row + 1) * 100,
+        column * 100 : (column + 1) * 100,
+    ]
+    tracker = ReferenceMoveTracker()
+    tracker.set_reference(reference, _camera_grid(), 0)
+
+    update = _accepted_update(
+        tracker,
+        removed,
+        game.position,
+        game.physical_move_signatures,
+    )
+
+    assert update.state == "illegal-removal"
+    assert update.move == (removed_square, removed_square)
+    assert "Illegal removal from b4" in update.message
+    np.testing.assert_array_equal(tracker.reference, reference)
+
+    restored = _accepted_update(
+        tracker,
+        reference,
+        game.position,
+        game.physical_move_signatures,
+    )
+
+    assert tracker.rejected_move_is_restored(
+        restored,
+        (removed_square, removed_square),
+    )
+
+
+def test_b4_removal_after_b4_e5_is_marked_illegal() -> None:
+    game = LegalGame(
+        "rnbqkbnr/pppp1ppp/8/4p3/1P6/8/P1PPPPPP/"
+        "RNBQKBNR w KQkq - 0 2"
+    )
+    removed_square = (4, 1)
+    reference = _empty_board()
+    for square, piece in game.position.items():
+        _draw_piece(
+            reference,
+            square,
+            (225, 225, 225) if piece.isupper() else (20, 20, 20),
+        )
+    removed = reference.copy()
+    empty = _empty_board()
+    row, column = removed_square
+    removed[
+        row * 100 : (row + 1) * 100,
+        column * 100 : (column + 1) * 100,
+    ] = empty[
+        row * 100 : (row + 1) * 100,
+        column * 100 : (column + 1) * 100,
+    ]
+    tracker = ReferenceMoveTracker()
+    tracker.set_reference(reference, _camera_grid(), 0)
+
+    update = _accepted_update(
+        tracker,
+        removed,
+        game.position,
+        game.physical_move_signatures,
+    )
+
+    assert update.state == "illegal-removal"
+    assert update.move == (removed_square, removed_square)
+    np.testing.assert_array_equal(tracker.reference, reference)
+
+
 def test_illegal_game_move_preserves_position_and_reference() -> None:
     source = (7, 6)
     destination = (5, 6)

@@ -7,7 +7,11 @@ import numpy as np
 from .board_detector import FloatArray, ImageArray
 from .chess_position import Position, Square, square_name
 from .legal_game import LegalMoveSignature
-from .legal_signature_matcher import match_legal_move_signature
+from .legal_signature_matcher import (
+    find_illegal_removed_piece,
+    match_legal_move_signature,
+    match_pending_capture,
+)
 from .piece_color_classifier import classify_piece_colors
 from .occupancy import rectify_board
 
@@ -18,6 +22,8 @@ ReferenceTrackerState = Literal[
     "waiting-for-clear",
     "settling",
     "candidate",
+    "pending-capture",
+    "illegal-removal",
     "accepted",
     "ambiguous",
 ]
@@ -203,18 +209,14 @@ class ReferenceMoveTracker:
                 scores,
             )
         move: tuple[Square, Square] | None = None
+        pending_capture_destination: Square | None = None
+        pending_capture_sources: tuple[Square, ...] = ()
+        illegal_removed_piece: Square | None = None
         if physical_signatures:
-            piece_colors = (
-                classify_piece_colors(
-                    self._reference,
-                    normalized,
-                    position,
-                )
-                if any(
-                    signature.kind in ("capture", "capture-promotion")
-                    for signature in physical_signatures
-                )
-                else None
+            piece_colors = classify_piece_colors(
+                self._reference,
+                normalized,
+                position,
             )
             explained_residuals = {
                 signature.uci: tuple(
@@ -243,6 +245,55 @@ class ReferenceMoveTracker:
                     legal_match.signature.source,
                     legal_match.signature.destination,
                 )
+            elif piece_colors is not None:
+                pending_capture = match_pending_capture(
+                    scores,
+                    physical_signatures,
+                    piece_colors,
+                    minimum_square_change=self._minimum_square_change,
+                )
+                pending_capture_destination = pending_capture.destination
+                pending_capture_sources = pending_capture.sources
+                if pending_capture_destination is None:
+                    illegal_removed_piece = find_illegal_removed_piece(
+                        scores,
+                        physical_signatures,
+                        piece_colors,
+                        position,
+                        minimum_square_change=self._minimum_square_change,
+                    )
+        if (
+            move is None
+            and pending_capture_destination is not None
+            and not has_large_obstruction
+        ):
+            self._candidate_move = None
+            self._candidate_count = 0
+            source_names = ", ".join(
+                square_name(source) for source in pending_capture_sources
+            )
+            return ReferenceTrackerUpdate(
+                "pending-capture",
+                None,
+                f"Captured piece removed from "
+                f"{square_name(pending_capture_destination)}; complete the "
+                f"capture from {source_names}.",
+                scores,
+            )
+        if (
+            move is None
+            and illegal_removed_piece is not None
+            and not has_large_obstruction
+        ):
+            self._candidate_move = None
+            self._candidate_count = 0
+            return ReferenceTrackerUpdate(
+                "illegal-removal",
+                (illegal_removed_piece, illegal_removed_piece),
+                f"Illegal removal from {square_name(illegal_removed_piece)}; "
+                "restore the piece to the marked square.",
+                scores,
+            )
         if move is None:
             move = self._select_move(
                 scores,

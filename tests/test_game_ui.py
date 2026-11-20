@@ -1,9 +1,14 @@
 from src.chess_camera.camera_app import (
     _accepted_position_message,
     _illegal_correction_message,
+    _reference_tracking_status_message,
     _turn_indicator_state,
 )
 from src.chess_camera.legal_game import LegalGame
+from src.chess_camera.reference_move_tracker import (
+    ReferenceTrackerState,
+    ReferenceTrackerUpdate,
+)
 
 
 def test_turn_indicator_is_hidden_in_diagnostic_mode() -> None:
@@ -62,6 +67,14 @@ def test_illegal_correction_names_squares_legal_choices_and_turn() -> None:
         "has no legal move now. Return it from d5 to d7, then make a White "
         "move."
     )
+    assert _illegal_correction_message(
+        ((4, 1), (4, 1)),
+        game,
+    ) == (
+        "Illegal physical removal from b4 rejected. The accepted position "
+        "requires the piece on b4. White to move. Return the piece to b4, "
+        "then make a White move."
+    )
 
 
 def test_accepted_position_message_includes_authoritative_turn() -> None:
@@ -70,3 +83,49 @@ def test_accepted_position_message_includes_authoritative_turn() -> None:
     assert _accepted_position_message(game) == (
         "Board matches the accepted position. White to move."
     )
+
+
+def test_transient_tracking_phases_do_not_replace_visible_guidance() -> None:
+    states: tuple[ReferenceTrackerState, ...] = (
+        "activity",
+        "settling",
+        "candidate",
+    )
+    for state in states:
+        assert (
+            _reference_tracking_status_message(
+                ReferenceTrackerUpdate(
+                    state,
+                    None,
+                    "Internal phase detail.",
+                )
+            )
+            is None
+        )
+
+
+def test_tracking_status_uses_stable_actionable_guidance() -> None:
+    assert _reference_tracking_status_message(
+        ReferenceTrackerUpdate(
+            "waiting-for-clear",
+            None,
+            "Technical obstruction detail.",
+        )
+    ) == "Move your hand and other objects away from the board."
+    assert _reference_tracking_status_message(
+        ReferenceTrackerUpdate(
+            "ambiguous",
+            None,
+            "Technical square scores.",
+        )
+    ) == (
+        "Board change is unclear. Restore the accepted position, then move "
+        "one piece at a time."
+    )
+    assert _reference_tracking_status_message(
+        ReferenceTrackerUpdate(
+            "pending-capture",
+            None,
+            "Captured piece removed from b4; complete the capture from a3.",
+        )
+    ) == "Captured piece removed from b4; complete the capture from a3."
