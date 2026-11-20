@@ -118,7 +118,7 @@ def test_controller_does_not_replay_long_existing_game_on_attach() -> None:
     assert update.pending_moves == ()
 
 
-def test_controller_stages_capture_support() -> None:
+def test_controller_queues_and_confirms_remote_capture() -> None:
     controller = _controller()
     controller.accept_server_history(())
     controller.accept_server_history(("e2e4", "d7d5"))
@@ -129,5 +129,54 @@ def test_controller_stages_capture_support() -> None:
         ("e2e4", "d7d5", "e4d5")
     )
 
-    assert update.state == "reconciliation-required"
+    assert update.state == "guidance"
     assert update.pending_moves == ("e4d5",)
+    assert controller.expected_signature is not None
+    assert controller.expected_signature.kind == "capture"
+
+    confirmed = controller.confirm_expected_move(((4, 4), (3, 3)))
+
+    assert confirmed.state == "synchronized"
+    assert controller.physical_position == controller.server_position
+
+
+def test_controller_prepares_and_commits_local_capture() -> None:
+    controller = _controller()
+    controller.accept_server_history(())
+    controller.commit_local_move(((6, 4), (4, 4)))
+    controller.accept_server_history(("e2e4", "d7d5"))
+    controller.confirm_expected_move(((1, 3), (3, 3)))
+
+    signature = next(
+        signature
+        for signature in controller.local_move_signatures
+        if signature.uci == "e4d5"
+    )
+    uci, preview = controller.prepare_local_move(
+        (signature.source, signature.destination)
+    )
+
+    assert signature.kind == "capture"
+    assert uci == "e4d5"
+    assert preview.position[(3, 3)] == "P"
+    committed = controller.commit_local_move(
+        (signature.source, signature.destination)
+    )
+    assert committed.fen == preview.fen
+    assert controller.server_moves == ("e2e4", "d7d5", "e4d5")
+    assert controller.physical_fen == controller.server_fen
+
+
+def test_controller_keeps_promotion_in_reconciliation() -> None:
+    controller = LichessGameController(
+        "game1234",
+        "4k3/P7/8/8/8/8/8/4K3 w - - 0 1",
+        "white",
+        "Stockfish level 1",
+    )
+    controller.accept_server_history(())
+
+    update = controller.accept_server_history(("a7a8q",))
+
+    assert update.state == "reconciliation-required"
+    assert controller.expected_signature is None

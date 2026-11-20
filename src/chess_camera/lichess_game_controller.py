@@ -104,7 +104,7 @@ class LichessGameController:
                 signature
                 for signature in self._physical_game.legal_move_signatures
                 if signature.uci == expected_uci
-                and signature.kind == "ordinary"
+                and signature.kind in ("ordinary", "capture")
             ),
             None,
         )
@@ -132,7 +132,7 @@ class LichessGameController:
         return tuple(
             signature
             for signature in self._physical_game.legal_move_signatures
-            if signature.kind == "ordinary"
+            if signature.kind in ("ordinary", "capture")
         )
 
     def prepare_local_move(
@@ -263,7 +263,7 @@ class LichessGameController:
             return self._update(
                 (),
                 "The pending Lichess move is not supported by the ordinary "
-                "move synchronization slice.",
+                "move and capture synchronization slice.",
             )
         expected = (signature.source, signature.destination)
         if move != expected:
@@ -298,8 +298,8 @@ class LichessGameController:
             self._state = "reconciliation-required"
             return self._update(
                 appended,
-                "The next Lichess move requires a capture or special-move "
-                "Phase 7 slice that is not implemented yet.",
+                "The next Lichess move requires a special-move Phase 7 "
+                "slice that is not implemented yet.",
             )
         self._state = "guidance"
         actor = (

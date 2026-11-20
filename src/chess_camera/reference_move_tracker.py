@@ -12,7 +12,10 @@ from .legal_signature_matcher import (
     match_legal_move_signature,
     match_pending_capture,
 )
-from .piece_color_classifier import classify_piece_colors
+from .piece_color_classifier import (
+    PieceColorClassification,
+    classify_piece_colors,
+)
 from .occupancy import rectify_board
 
 ReferenceTrackerState = Literal[
@@ -172,6 +175,7 @@ class ReferenceMoveTracker:
             if (
                 float(np.mean(difference)) > 2.5
                 and float(np.mean(difference > 12)) > 0.015
+                and not physical_signatures
             ):
                 self._previous_motion_image = motion_image
                 self._clear_pending()
@@ -234,13 +238,27 @@ class ReferenceMoveTracker:
             explained_residuals = {
                 signature.uci: tuple(
                     square
-                    for square in position
+                    for square in (
+                        (row, column)
+                        for row in range(8)
+                        for column in range(8)
+                    )
+                    if square not in (
+                        signature.source,
+                        signature.destination,
+                    )
                     if _is_retained_opposite_piece_residual(
                         self._reference,
                         normalized,
                         square,
                         signature.source,
                         position,
+                    )
+                    or _matches_signature_result_state(
+                        square,
+                        signature,
+                        position,
+                        piece_colors,
                     )
                 )
                 for signature in physical_signatures
@@ -307,7 +325,7 @@ class ReferenceMoveTracker:
                 "restore the piece to the marked square.",
                 scores,
             )
-        if move is None:
+        if move is None and not physical_signatures:
             move = self._select_move(
                 scores,
                 position,
@@ -742,6 +760,28 @@ def _is_retained_opposite_piece_residual(
         np.mean(cv2.absdiff(reference_base, candidate_base)) / 255
     )
     return base_difference <= 0.055
+
+
+def _matches_signature_result_state(
+    square: Square,
+    signature: LegalMoveSignature,
+    position: Position,
+    piece_colors: dict[Square, PieceColorClassification],
+) -> bool:
+    piece = position.get(square)
+    for change in signature.changes:
+        if change.square == square:
+            piece = change.after
+            break
+    expected = (
+        "empty"
+        if piece is None
+        else "white"
+        if piece.isupper()
+        else "black"
+    )
+    classification = piece_colors.get(square)
+    return classification is not None and classification.label == expected
 
 
 def square_change_scores(

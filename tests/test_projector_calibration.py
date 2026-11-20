@@ -518,6 +518,36 @@ def test_parity_detection_does_not_persist_incomplete_orientation() -> None:
     window._settings.sync.assert_not_called()
 
 
+def test_parity_detection_preserves_matching_complete_orientation() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    window = SimpleNamespace(
+        _board_orientation_needs_detection=True,
+        _latest_frame=np.zeros((20, 20, 3), dtype=np.uint8),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(
+                camera_grid=np.zeros((9, 9, 2), dtype=np.float32)
+            )
+        ),
+        _board_quarter_turns=2,
+        _settings=MagicMock(),
+    )
+
+    with patch(
+        "src.chess_camera.camera_app.detect_board_orientation",
+        return_value=0,
+    ):
+        CameraWindow._detect_current_board_orientation(window)
+
+    assert window._board_quarter_turns == 2
+    assert window._board_orientation_needs_detection is False
+    window._settings.setValue.assert_not_called()
+    window._settings.sync.assert_not_called()
+
+
 def test_square_projection_waits_for_white_side_orientation() -> None:
     from types import SimpleNamespace
     from unittest.mock import MagicMock
@@ -813,6 +843,8 @@ def test_reconciliation_adopts_current_lichess_position_and_history() -> None:
         _lichess_sync_status=MagicMock(),
         _reconcile_button=MagicMock(),
         _reconciliation_requested=True,
+        _reconciliation_blackout_pending=False,
+        _reconciliation_blackout_generation=0,
         _game_mode="diagnostic",
         _legal_game=LegalGame(),
         _persist_piece_position=MagicMock(),
@@ -883,6 +915,54 @@ def test_reconciliation_projects_and_draws_every_mismatch(
     projector.show_reconciliation.assert_called_once_with(
         ((6, 1), (4, 1))
     )
+
+
+def test_reconciliation_waits_after_red_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow, QTimer
+
+    callback: Callable[[], None] | None = None
+
+    def capture_timer(
+        milliseconds: int,
+        pending_callback: Callable[[], None],
+    ) -> None:
+        nonlocal callback
+        assert milliseconds == 1000
+        callback = pending_callback
+
+    monkeypatch.setattr(QTimer, "singleShot", capture_timer)
+    detector = MagicMock()
+    window = SimpleNamespace(
+        _projector_window=SimpleNamespace(
+            output_mode="reconciliation",
+            show_black=MagicMock(),
+        ),
+        _alignment_monitor=MagicMock(),
+        _occupancy_detector=detector,
+        _projector_status=MagicMock(),
+        _reconciliation_requested=True,
+        _reconciliation_blackout_pending=False,
+        _reconciliation_blackout_generation=0,
+        _finish_reconciliation_blackout=lambda generation: (
+            CameraWindow._finish_reconciliation_blackout(
+                window,
+                generation,
+            )
+        ),
+    )
+
+    CameraWindow._finish_reconciliation_projection(window)
+
+    assert window._reconciliation_blackout_pending
+    assert callback is not None
+    callback()
+    assert not window._reconciliation_blackout_pending
+    assert detector.reset.call_count == 2
 
 
 def test_lichess_attachment_mismatch_starts_live_reconciliation() -> None:

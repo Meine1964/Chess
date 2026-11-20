@@ -459,6 +459,8 @@ class CameraWindow(QMainWindow):
         ) = None
         self._reset_to_start_requested = False
         self._reconciliation_requested = False
+        self._reconciliation_blackout_pending = False
+        self._reconciliation_blackout_generation = 0
         self._last_rejected_move: (
             tuple[tuple[int, int], tuple[int, int]] | None
         ) = None
@@ -2023,6 +2025,12 @@ class CameraWindow(QMainWindow):
                 "to settle."
             )
             return
+        if self._reconciliation_blackout_pending:
+            self._occupancy_status.setText(
+                "Reconciliation marks removed; waiting for projector black "
+                "to settle."
+            )
+            return
         if (
             not self._camera_only_calibration
             and self._alignment_monitor.output_mode != "black"
@@ -2469,6 +2477,12 @@ class CameraWindow(QMainWindow):
             self._lichess_sync_status.setText(synchronization.message)
             self._clear_pending_lichess_local_move()
             return
+        if self._lichess_worker is not None:
+            self._lichess_worker.note_local_move(
+                game_id,
+                uci,
+                controller.server_fen,
+            )
         self._board_widget.set_pieces(position_update.position)
         self._board_widget.set_occupied_squares(position_update.position)
         self._board_widget.set_illegal_source(None)
@@ -2905,6 +2919,8 @@ class CameraWindow(QMainWindow):
     def _toggle_physical_reconciliation(self) -> None:
         if self._reconciliation_requested:
             self._reconciliation_requested = False
+            self._reconciliation_blackout_pending = False
+            self._reconciliation_blackout_generation += 1
             self._reconcile_button.setText("Reconcile physical board")
             self._black_projector()
             self._occupancy_detector.reset()
@@ -2933,6 +2949,8 @@ class CameraWindow(QMainWindow):
         occupancy_message: str,
     ) -> None:
         self._reconciliation_requested = True
+        self._reconciliation_blackout_pending = False
+        self._reconciliation_blackout_generation += 1
         self._reconcile_button.setText("Cancel reconciliation")
         self._board_widget.set_illegal_source(None)
         self._board_widget.set_guidance_move(None)
@@ -3040,6 +3058,8 @@ class CameraWindow(QMainWindow):
                 self._lichess_sync_status.setText(update.message)
             self._persist_move_reference()
             self._reconciliation_requested = False
+            self._reconciliation_blackout_pending = False
+            self._reconciliation_blackout_generation += 1
             self._reconcile_button.setText("Reconcile physical board")
             self._board_widget.set_reconciliation_squares(())
             self._occupancy_status.setText(
@@ -3095,11 +3115,31 @@ class CameraWindow(QMainWindow):
     def _finish_reconciliation_projection(self) -> None:
         if self._projector_window.output_mode != "reconciliation":
             return
+        self._reconciliation_blackout_generation += 1
+        generation = self._reconciliation_blackout_generation
+        self._reconciliation_blackout_pending = True
         self._projector_window.show_black()
         self._alignment_monitor.set_black()
         self._occupancy_detector.reset()
         self._projector_status.setText(
-            "Reconciliation projection finished; checking occupancy again."
+            "Reconciliation projection finished; waiting for projector black "
+            "to settle."
+        )
+        QTimer.singleShot(
+            1000,
+            lambda: self._finish_reconciliation_blackout(generation),
+        )
+
+    def _finish_reconciliation_blackout(self, generation: int) -> None:
+        if (
+            generation != self._reconciliation_blackout_generation
+            or not self._reconciliation_requested
+        ):
+            return
+        self._reconciliation_blackout_pending = False
+        self._occupancy_detector.reset()
+        self._projector_status.setText(
+            "Projector is black; checking reconciliation occupancy again."
         )
 
     def _physical_board_square(
@@ -3859,13 +3899,17 @@ class CameraWindow(QMainWindow):
         ):
             return
         try:
-            turns = detect_board_orientation(
+            detected_turns = detect_board_orientation(
                 bgr_to_gray(self._latest_frame),
                 self._calibration_result.mapping.camera_grid,
             )
         except (CalibrationError, ValueError):
             return
-        self._board_quarter_turns = turns
+        if (
+            self._board_quarter_turns % 2
+            != detected_turns % 2
+        ):
+            self._board_quarter_turns = detected_turns
         self._board_orientation_needs_detection = False
 
     def _restore_remembered_square(self) -> None:

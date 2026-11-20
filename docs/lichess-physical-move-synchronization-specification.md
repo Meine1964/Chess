@@ -1,7 +1,7 @@
 # Lichess Physical Move Synchronization Specification
 
-**Version:** 0.2
-**Status:** Incoming and outgoing ordinary-move slices implemented; live acceptance pending
+**Version:** 0.3
+**Status:** Ordinary moves live-accepted; capture slices implemented and awaiting live acceptance
 **Platform:** Python on Windows
 
 **Related specifications:**
@@ -13,9 +13,10 @@
 
 ## 1. Purpose
 
-This specification defines the ordinary-move slices of Phases 7 and 8 of the
-Lichess physical-board integration: synchronizing moves already accepted by
-Lichess onto the physical board and submitting local physical moves.
+This specification defines the ordinary-move and capture slices of Phases 7
+and 8 of the Lichess physical-board integration: synchronizing moves already
+accepted by Lichess onto the physical board and submitting local physical
+moves.
 
 When Lichess advances the remote game, the application shall:
 
@@ -86,8 +87,8 @@ The first implementation shall support:
 - Complete move-history prefix validation.
 - One or more newly reported moves in a single update.
 - An ordered queue of moves not yet confirmed physically.
-- Ordinary moves for both colors.
-- Browser-first reproduction of the local player's moves.
+- Ordinary moves and non-promotion captures for both colors.
+- Direct submission of the local player's ordinary moves and captures.
 - Opponent-move projection and physical confirmation.
 - Durable UI guidance.
 - Incorrect physical-action correction.
@@ -98,10 +99,9 @@ The first implementation shall support:
 
 ### 3.2 Staged extensions
 
-After ordinary moves are live-accepted, the same state machine shall be
-extended to:
+After ordinary moves and captures are live-accepted, the same state machine
+shall be extended to:
 
-- Captures.
 - Castling.
 - En passant.
 - Queen promotion.
@@ -113,9 +113,8 @@ additional acceptance testing.
 
 ### 3.3 Excluded
 
-Phase 7 shall not:
+The implemented ordinary/capture slice shall not:
 
-- Submit moves to Lichess.
 - Create or accept challenges.
 - Offer or accept draws.
 - Abort or resign games.
@@ -299,6 +298,12 @@ classification shall not create a discrepancy. A same-color incorrect piece
 type is intentionally undetectable and shall be accepted as the authoritative
 Lichess identity.
 
+After projected red reconciliation marks return to black, the application
+shall discard occupancy and color observations for one second, reset occupancy
+stabilization, and only then evaluate the board again. Red projector light and
+the camera's resulting exposure transition shall not create a subsequent
+reconciliation discrepancy.
+
 When no discrepancy remains, reconciliation shall replace the stale physical
 piece map with the complete Lichess map, capture the settled live image as the
 accepted reference, initialize the synchronization cursor at the current
@@ -378,7 +383,7 @@ preceding physical position.
 
 ### 10.1 Guidance presentation
 
-For an ordinary move, the projector shall identify:
+For an ordinary move or capture, the projector shall identify:
 
 - Source square.
 - Destination square.
@@ -427,11 +432,16 @@ Guidance may be shown again when:
 - The user requests the instruction again.
 - A correction was restored and the expected move remains pending.
 
+Captures shall support both complete single-action evidence and
+captured-piece-first handling. Removing only the captured piece shall preserve
+the authoritative state and display durable instructions to complete the move
+from the expected source. Moving the attacker to the destination shall then
+confirm the capture against the original reference.
+
 ### 10.3 Special-move projection
 
 Later slices shall derive involved squares from the expected signature:
 
-- Capture: source and destination.
 - Castling: king source/destination and rook source/destination.
 - En passant: source, destination, and captured-pawn square.
 - Promotion: source and destination plus queen-replacement guidance.
@@ -448,8 +458,22 @@ Acceptance shall require:
 - All expected changed squares satisfy their evidence requirements.
 - Source vacancy is confirmed.
 - Destination occupancy and mover color are confirmed where required.
-- No unexplained changed square exceeds the allowed residual policy.
+- No unexplained changed square exceeds the allowed residual policy. A visual
+  residual is explained when the color classifier confidently confirms that
+  the square still has the occupancy and piece color required by the
+  authoritative position after the candidate move.
 - The board is unobstructed and settled.
+
+When legal physical signatures are available, the tracker shall accept only a
+matching signature. If no signature matches, it shall report ambiguous or
+correction evidence rather than falling back to an unrestricted source and
+destination inferred from visual change scores.
+
+Whole-board inter-frame motion is advisory for legal-signature tracking and
+shall not prevent evaluation of a clear final position. Hand safety for this
+path is enforced by settled observations, large-obstruction rejection,
+released-piece-footprint checks, and exact signature evidence. Diagnostic
+tracking without legal signatures remains gated by inter-frame motion.
 
 ### 11.2 Commit
 
@@ -496,11 +520,11 @@ The user may:
 After restoration, the application shall resume guidance for the same pending
 move. After an exact expected final position, it may commit normally.
 
-## 13. Local Ordinary-Move Submission
+## 13. Local Ordinary-Move and Capture Submission
 
 Local submission is available only when the physical and server positions are
 synchronized, it is the configured player's turn, and the camera identifies a
-unique ordinary non-capturing legal move.
+unique ordinary move or non-promotion capture.
 
 The application shall use a two-phase commit:
 
@@ -530,6 +554,13 @@ invalid, the submission worker shall fetch the authoritative game snapshot:
 Polling fallback remains capable of submitting moves. Polling affects only how
 authoritative game updates are received; it does not make a valid Board API
 session read-only.
+
+After Lichess accepts a local submission, the application shall advance the
+polling cursor through that move after verifying that it transforms the
+cursor's prior FEN into the committed server FEN. This update shall occur
+before a later opponent poll is interpreted, so an immediate reply reported as
+`lastMove` remains a verifiable one-ply transition rather than appearing to
+shorten or rewrite history.
 
 ## 14. Reconnection and Polling
 
@@ -739,7 +770,7 @@ Phase 7 slices are declared complete.
 
 ## 21. Implementation Status
 
-The first ordinary-move slice is implemented:
+The ordinary-move and non-promotion capture slices are implemented:
 
 - A pure synchronization controller validates complete history prefixes.
 - Server and physical legal cursors advance independently.
@@ -762,10 +793,14 @@ The first ordinary-move slice is implemented:
 - Correct physical evidence commits the physical position and reference.
 - Premature and incorrect physical moves enter durable red correction without
   changing the authoritative state.
-- Captures and special moves explicitly enter reconciliation until their staged
-  slices are implemented.
+- Incoming and local captures use the same two-phase authority boundaries as
+  ordinary moves, including one-action and captured-piece-first camera
+  evidence.
+- Promotions, castling, en passant, and capture-promotions explicitly enter
+  reconciliation until their staged slices are implemented.
 
-The validated automated suite contains 220 passing tests. Live ordinary-move,
+The validated automated suite contains 228 passing tests. Live ordinary-move,
 polling, reconciliation, and guidance acceptance has been exercised on the
-target camera/projector setup. Captures, promotions, and other special moves
-remain staged limitations.
+target camera/projector setup. Lichess capture behavior is automated-test
+validated and awaits live acceptance. Promotions, castling, en passant, and
+capture-promotions remain staged limitations.

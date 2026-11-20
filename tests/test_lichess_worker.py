@@ -507,3 +507,41 @@ def test_polling_cursor_appends_authoritative_last_move() -> None:
     assert current.game.state.moves == ("c7c6",)
     assert current.game.state.fen == board.fen()
     assert current.game.state.turn == "white"
+
+
+def test_local_move_advances_polling_cursor_before_opponent_reply() -> None:
+    worker = LichessConnectionWorker(
+        cast(LichessReadOnlyClient, MultiplePollingGamesClient())
+    )
+    board = chess.Board()
+    before = OngoingGame(
+        "jgWZLWs6",
+        "jgWZLWs6abcd",
+        "white",
+        board.fen(),
+        "Stockfish level 1",
+        True,
+        None,
+    )
+    worker._polling_snapshot(before)
+
+    board.push_uci("e2e4")
+    assert worker.note_local_move(
+        "jgWZLWs6",
+        "e2e4",
+        board.fen(),
+    )
+    board.push_uci("e7e5")
+    after = OngoingGame(
+        "jgWZLWs6",
+        "jgWZLWs6abcd",
+        "white",
+        board.fen(),
+        "Stockfish level 1",
+        True,
+        "e7e5",
+    )
+    current = worker._polling_snapshot(after)
+
+    assert current.game.state.moves == ("e2e4", "e7e5")
+    assert current.game.state.fen == board.fen()

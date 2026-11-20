@@ -253,6 +253,13 @@ shall remain transient and shall not overwrite the persisted complete
 quarter-turn orientation. Square projection shall remain unavailable while the
 White-side ambiguity is unresolved.
 
+When parity detection agrees with the persisted orientation modulo 180
+degrees, the application shall retain the persisted complete orientation
+rather than collapsing it to the parity detector's `0` or `1` representative.
+This preserves the known White-side direction during midgame restart, when the
+starting-rank piece evidence needed to resolve the 180-degree ambiguity is no
+longer available.
+
 ## 7. Move Tracking
 
 Post-initialization move inference is defined exclusively by

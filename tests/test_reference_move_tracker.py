@@ -11,8 +11,10 @@ from src.chess_camera.reference_move_tracker import (
     ReferenceMoveTracker,
     ReferenceTrackerUpdate,
     _has_large_obstruction,
+    _matches_signature_result_state,
     square_change_scores,
 )
+from src.chess_camera.piece_color_classifier import PieceColorClassification
 
 
 def _camera_grid(size: int = 800) -> np.ndarray:
@@ -314,6 +316,117 @@ def test_two_action_capture_waits_for_attacker_before_accepting() -> None:
 
     assert accepted.state == "accepted"
     assert accepted.move == (source, destination)
+
+
+def test_capture_explains_residuals_that_preserve_authoritative_state() -> None:
+    game = LegalGame(
+        "r1bqk1nr/pp1n1ppp/2p1p3/1Bb5/4p3/"
+        "P1NP1NP1/1PP2P1P/R1BQK2R w KQkq - 0 8"
+    )
+    signature = next(
+        signature
+        for signature in game.physical_move_signatures
+        if signature.uci == "d3e4"
+    )
+    colors = {
+        (3, 3): PieceColorClassification("empty", 0.01, 0.2),
+        (3, 2): PieceColorClassification("black", 0.01, 0.2),
+        (7, 7): PieceColorClassification("white", 0.01, 0.2),
+    }
+
+    assert _matches_signature_result_state(
+        (3, 3),
+        signature,
+        game.position,
+        colors,
+    )
+    assert _matches_signature_result_state(
+        (3, 2),
+        signature,
+        game.position,
+        colors,
+    )
+    assert _matches_signature_result_state(
+        (7, 7),
+        signature,
+        game.position,
+        colors,
+    )
+
+
+def test_legal_capture_is_not_reset_by_whole_board_motion_gate() -> None:
+    game = LegalGame("4k3/8/8/8/1n6/P7/8/4K3 w - - 0 1")
+    source = (5, 0)
+    destination = (4, 1)
+    reference = _empty_board()
+    for square, piece in game.position.items():
+        _draw_piece(
+            reference,
+            square,
+            (225, 225, 225) if piece.isupper() else (20, 20, 20),
+        )
+    captured = _empty_board()
+    for square, piece in game.position.items():
+        if square not in (source, destination):
+            _draw_piece(
+                captured,
+                square,
+                (225, 225, 225) if piece.isupper() else (20, 20, 20),
+            )
+    _draw_piece(captured, destination, (225, 225, 225))
+    tracker = ReferenceMoveTracker()
+    tracker.set_reference(reference, _camera_grid(), 0)
+    tracker._previous_motion_image = np.zeros((100, 100), dtype=np.uint8)
+
+    updates = [
+        tracker.observe(
+            captured,
+            _camera_grid(),
+            0,
+            game.position,
+            game.physical_move_signatures,
+        )
+        for _index in range(3)
+    ]
+
+    assert all(update.state != "activity" for update in updates)
+    assert updates[-1].state == "accepted"
+    assert updates[-1].move == (source, destination)
+
+
+def test_legal_signatures_disable_unrestricted_move_fallback() -> None:
+    game = LegalGame("4k3/8/8/3p4/4P3/8/8/4K3 w - - 0 1")
+    reference = _empty_board()
+    for square, piece in game.position.items():
+        _draw_piece(
+            reference,
+            square,
+            (225, 225, 225) if piece.isupper() else (20, 20, 20),
+        )
+    source = (3, 3)
+    destination = (2, 3)
+    changed = reference.copy()
+    empty = _empty_board()
+    changed[
+        source[0] * 100 : (source[0] + 1) * 100,
+        source[1] * 100 : (source[1] + 1) * 100,
+    ] = empty[
+        source[0] * 100 : (source[0] + 1) * 100,
+        source[1] * 100 : (source[1] + 1) * 100,
+    ]
+    _draw_piece(changed, destination, (20, 20, 20))
+    tracker = ReferenceMoveTracker()
+    tracker.set_reference(reference, _camera_grid(), 0)
+
+    update = _accepted_update(
+        tracker,
+        changed,
+        game.position,
+        game.physical_move_signatures,
+    )
+
+    assert update.state == "ambiguous"
+    assert update.move is None
 
 
 def test_uncapturable_opponent_removal_is_marked_illegal() -> None:

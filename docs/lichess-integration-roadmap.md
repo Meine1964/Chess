@@ -581,14 +581,17 @@ adopted its authenticated current FEN, verified subsequent authoritative
 Detailed behavior is defined in the
 [Lichess physical move synchronization specification](./lichess-physical-move-synchronization-specification.md).
 
-**Implementation status:** The first ordinary-move synchronization slice is
-implemented and live-accepted. It maintains separate server and physical legal
-cursors, validates streamed history prefixes and verified polling transitions,
+**Implementation status:** The ordinary-move synchronization slice is
+implemented and live-accepted. Incoming and locally submitted non-promotion
+captures are implemented and automated-test validated, including complete
+single-action and captured-piece-first evidence, and await live acceptance.
+The synchronization flow maintains separate server and physical legal cursors,
+validates streamed history prefixes and verified polling transitions,
 queues one or more reported moves in server order, shows one pending move at a
 time in white on the physical UI board and projector, and commits the physical
 position and camera reference only after exact expected evidence. It also
 supports explicit game selection, automatic current-position reconciliation,
-and ordinary local move submission. Captures, promotions, castling, en passant,
+and ordinary/capture local move submission. Promotions, castling, en passant,
 and other special-move synchronization remain staged work.
 
 When Lichess reports an opponent move:

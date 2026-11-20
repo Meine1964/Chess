@@ -116,6 +116,7 @@ class LichessConnectionWorker(QObject):
         self._polling_initial_fen: str | None = None
         self._polling_fen: str | None = None
         self._polling_moves: tuple[str, ...] = ()
+        self._polling_lock = Lock()
         self._wait = (
             self._stop_requested.wait if wait is None else wait
         )
@@ -131,6 +132,36 @@ class LichessConnectionWorker(QObject):
     def _selected_game(self) -> str | None:
         with self._selection_lock:
             return self._selected_game_id
+
+    def note_local_move(
+        self,
+        game_id: str,
+        uci: str,
+        resulting_fen: str,
+    ) -> bool:
+        try:
+            resulting_board = chess.Board(resulting_fen)
+        except ValueError:
+            return False
+        normalized_result = resulting_board.fen()
+        with self._polling_lock:
+            if self._polling_game_id != game_id:
+                return False
+            if self._polling_fen == normalized_result:
+                return True
+            if self._polling_fen is None:
+                return False
+            try:
+                previous_board = chess.Board(self._polling_fen)
+                move = previous_board.parse_uci(uci)
+                previous_board.push(move)
+            except ValueError:
+                return False
+            if previous_board.fen() != normalized_result:
+                return False
+            self._polling_moves = (*self._polling_moves, move.uci())
+            self._polling_fen = normalized_result
+            return True
 
     @Slot()
     def run(self) -> None:
@@ -290,6 +321,13 @@ class LichessConnectionWorker(QObject):
         self,
         game: OngoingGame,
     ) -> LichessPollingSnapshot:
+        with self._polling_lock:
+            return self._polling_snapshot_locked(game)
+
+    def _polling_snapshot_locked(
+        self,
+        game: OngoingGame,
+    ) -> LichessPollingSnapshot:
         try:
             current_board = chess.Board(game.current_fen)
         except ValueError as error:
@@ -361,10 +399,11 @@ class LichessConnectionWorker(QObject):
         self._polling_moves = ()
 
     def _reset_polling_cursor(self) -> None:
-        self._polling_game_id = None
-        self._polling_initial_fen = None
-        self._polling_fen = None
-        self._polling_moves = ()
+        with self._polling_lock:
+            self._polling_game_id = None
+            self._polling_initial_fen = None
+            self._polling_fen = None
+            self._polling_moves = ()
 
     def _wait_for_active_game(
         self,
