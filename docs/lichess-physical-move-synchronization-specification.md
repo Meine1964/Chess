@@ -69,6 +69,12 @@ Failure in the second commit shall not roll back or alter Lichess state.
 Colored guidance may change the observed appearance of squares. The projector
 shall be black while frames are evaluated for physical confirmation.
 
+Pending legal-move source and destination squares shall be shown in white on
+both the physical-position UI board and the projector. Red is reserved for
+illegal correction and reconciliation discrepancies. The physical UI guidance
+shall remain visible while the projector is black for move verification and
+shall clear only when the move is confirmed, replaced, or enters correction.
+
 ## 3. Scope
 
 ### 3.1 First implementation
@@ -174,6 +180,21 @@ The controller shall not own:
 
 It should be a pure, directly testable state machine.
 
+### 5.1 Active-game selection
+
+When polling reports exactly one ongoing game, the application shall select it
+automatically. When polling reports multiple ongoing games, the application
+shall not assume that the first API result is the game visible in the user's
+browser. It shall display all ongoing games in an explicit selector and pause
+game snapshots, board updates, and physical synchronization until the user
+selects one.
+
+The selector shall identify each game by opponent, player color, turn state,
+and game ID. Changing the selection shall discard the prior game's
+synchronization controller before the selected game's snapshot is applied.
+If the selected game is no longer ongoing, polling shall return to the
+selection-required state.
+
 ## 6. Runtime States
 
 ### 6.1 `disconnected`
@@ -238,18 +259,51 @@ Attachment is safe when either:
    or
 3. The current server and accepted physical legal positions match exactly and
    the server position can safely initialize the synchronization cursor.
+4. During current-position reconciliation, stable live occupancy exactly matches the
+   current server position and no occupied square has a confidently detected
+   opposite-color piece. In this case, reconciliation may adopt the
+   authoritative Lichess piece map even though individual same-color piece
+   types cannot be verified optically.
 
 ### 7.2 Unsafe attachment
 
 If the positions differ and there is no verified move-history relationship,
 the application shall enter `reconciliation-required`.
 
-It shall not:
+Without stable live reconciliation, it shall not:
 
 - Queue the entire historical game automatically.
 - Replace the accepted reference with the latest camera frame.
 - Infer piece identity from occupancy.
 - Assume that a matching occupied-square set means the positions are equal.
+
+### 7.3 Current-position adoption
+
+When attachment requires reconciliation and calibrated live observation is
+available, the application shall automatically black the projector, reset
+occupancy stabilization, and compare stable live observations with the current
+authoritative Lichess piece map rather than with a stale persisted physical
+map. **Reconcile physical board** remains available to restart or repeat this
+process manually.
+
+Discrepancies are:
+
+- A Lichess-occupied square observed empty.
+- A Lichess-empty square observed occupied.
+- A square occupied in both positions where appearance classification
+  confidently reports the opposite piece color.
+
+All discrepancy squares shall be marked red simultaneously on the physical UI
+board and, when available, on the projected board. Uncertain color
+classification shall not create a discrepancy. A same-color incorrect piece
+type is intentionally undetectable and shall be accepted as the authoritative
+Lichess identity.
+
+When no discrepancy remains, reconciliation shall replace the stale physical
+piece map with the complete Lichess map, capture the settled live image as the
+accepted reference, initialize the synchronization cursor at the current
+server history, clear every red mark, and continue from the current position
+without replaying historical moves.
 
 The first live acceptance shall use a fresh Lichess game and a physical board
 in the standard starting position.
@@ -293,6 +347,15 @@ Polling or reconnection may reveal multiple new plies.
 They shall be queued and confirmed physically in server order. Only the first
 pending move may be active in the projector and camera workflow.
 
+Polling shall obtain the current FEN and authoritative last move from the
+authenticated ongoing-games endpoint. The first observation establishes a
+current-position baseline. Later observations append `lastMove` only when that
+legal move transforms the prior FEN into the newly reported FEN. A transition
+that cannot be verified as one legal move shall establish a new baseline and
+require physical reconciliation rather than inventing missing history. The
+public game-export endpoint shall not be used for live synchronization because
+Lichess deliberately delays ongoing-game exports by multiple moves.
+
 ## 9. Expected Physical Move
 
 For the first pending UCI move, the controller shall:
@@ -327,11 +390,31 @@ For a move made by the local player in the browser:
 Reproduce your Lichess move e2-e4 on the physical board.
 ```
 
+Opponent-move guidance shall remain projected until the camera confirms that a
+hand or similarly large moving object has approached the physical board. It
+shall not use a fixed display timeout.
+
+Intent detection shall cover the calibrated 8x8 board plus a
+perspective-aware one-square margin around every edge. Motion elsewhere in the
+camera image shall be ignored. This margin ensures that a hand approaching a
+piece on the nearest rank or an outer file can trigger blackout even when only
+fingertips enter the 64-square board area.
+
+The intent detector may compare frames captured under the same static guidance
+projection, but its output shall only request projector blackout. Its frames
+and scores shall never update occupancy, infer a chess move, or replace the
+accepted reference. The detector shall arm only after one second of static
+projected observations so projector startup cannot be mistaken for hand
+activity. It shall then require a material connected changed region and
+confirmation in consecutive frames.
+
 ### 10.2 Camera observation
 
-The guidance projection shall be removed and the projector returned to black
-before the camera evaluates change scores, color evidence, obstruction, or
-settling.
+After intent is detected, the guidance projection shall be removed and the
+projector returned to black. The application shall discard frames during a
+one-second projector-settling interval, reset transient tracker activity, and
+only then evaluate change scores, color evidence, obstruction, or settling.
+The durable UI guidance shall remain visible during physical confirmation.
 
 Guidance may be shown again when:
 
@@ -655,16 +738,27 @@ The first ordinary-move slice is implemented:
 - Server and physical legal cursors advance independently.
 - Up to two moves discovered during initial fresh-game attachment may queue.
 - Later polling updates may append multiple moves in server order.
+- Multiple ongoing games require explicit selection; a single game is selected
+  automatically.
+- Polling maintains a current-position legal cursor from authenticated FEN and
+  `lastMove` observations without using delayed public game exports.
 - The Lichess board advances immediately while the physical board remains
   unchanged.
+- Stable live occupancy can adopt the authoritative current Lichess position,
+  with confident opposite-color discrepancies marked red.
 - The active ordinary signature is the only legal signature offered to the
   reference tracker.
-- Guidance is projected for two seconds and the projector returns to black
-  before camera evaluation resumes.
+- Guidance remains projected until confirmed board-or-halo activity, then the
+  projector returns to black and settles before camera evaluation resumes.
+- Pending legal guidance remains white on both the physical UI board and
+  projector; red remains reserved for correction and reconciliation.
 - Correct physical evidence commits the physical position and reference.
 - Premature and incorrect physical moves enter durable red correction without
   changing the authoritative state.
 - Captures and special moves explicitly enter reconciliation until their staged
   slices are implemented.
 
-Live acceptance and restart persistence remain pending.
+The validated automated suite contains 220 passing tests. Live ordinary-move,
+polling, reconciliation, and guidance acceptance has been exercised on the
+target camera/projector setup. Captures, promotions, and other special moves
+remain staged limitations.

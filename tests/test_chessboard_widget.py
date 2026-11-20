@@ -1,9 +1,11 @@
 import os
+from typing import cast
 
 import pytest
 from PySide6.QtCore import QPointF
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QComboBox
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -16,6 +18,7 @@ from src.chess_camera.chessboard_widget import (
     square_at_position,
 )
 from src.chess_camera.chess_position import standard_position
+from src.chess_camera.lichess_client import OngoingGame
 
 
 @pytest.fixture(scope="module")
@@ -150,3 +153,98 @@ def test_widget_marks_illegal_source_without_moving_piece(
     with pytest.raises(ValueError, match="inside the 8x8 board"):
         widget.set_illegal_source((8, 0))
     widget.close()
+
+
+def test_widget_marks_multiple_reconciliation_squares(
+    application: QApplication,
+) -> None:
+    widget = ChessboardWidget()
+    widget.resize(320, 320)
+    widget.set_reconciliation_squares({(0, 0), (7, 7)})
+    widget.show()
+    application.processEvents()
+
+    image = widget.grab().toImage()
+
+    assert widget.reconciliation_squares == frozenset({(0, 0), (7, 7)})
+    assert QColor(image.pixel(20, 20)).name() == LICHESS_ILLEGAL.name()
+    assert QColor(image.pixel(300, 300)).name() == LICHESS_ILLEGAL.name()
+    with pytest.raises(ValueError, match="inside the 8x8 board"):
+        widget.set_reconciliation_squares({(8, 0)})
+    widget.close()
+
+
+def test_widget_shows_pending_legal_move_in_white(
+    application: QApplication,
+) -> None:
+    widget = ChessboardWidget()
+    widget.resize(320, 320)
+    widget.set_guidance_move(((1, 1), (3, 2)))
+    widget.show()
+    application.processEvents()
+
+    image = widget.grab().toImage()
+
+    assert widget.guidance_move == ((1, 1), (3, 2))
+    assert QColor(image.pixel(60, 60)).name() == "#ffffff"
+    assert QColor(image.pixel(100, 140)).name() == "#ffffff"
+    widget.set_guidance_move(None)
+    assert widget.guidance_move is None
+    with pytest.raises(ValueError, match="inside the 8x8 board"):
+        widget.set_guidance_move(((1, 1), (8, 2)))
+    widget.close()
+
+
+def test_multiple_ongoing_games_require_explicit_ui_selection(
+    application: QApplication,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    games = (
+        OngoingGame(
+            "oldGame1",
+            "oldGame1abcd",
+            "black",
+            "unused",
+            "Older opponent",
+            True,
+        ),
+        OngoingGame(
+            "jgWZLWs6",
+            "jgWZLWs6abcd",
+            "white",
+            "unused",
+            "Stockfish level 1",
+            False,
+        ),
+    )
+    selector = QComboBox()
+    selector.addItem("Waiting for ongoing games...", None)
+    worker = MagicMock()
+    window = cast(
+        CameraWindow,
+        SimpleNamespace(
+            _lichess_game_selector=selector,
+            _lichess_worker=worker,
+            _lichess_status=MagicMock(),
+        ),
+    )
+
+    CameraWindow._lichess_ongoing_games_received(window, games)
+
+    assert selector.isEnabled()
+    assert selector.count() == 3
+    assert selector.currentData() is None
+    worker.select_game.assert_called_once_with(None)
+
+    selector.setCurrentIndex(selector.findData("jgWZLWs6"))
+    CameraWindow._lichess_game_selection_changed(
+        window,
+        selector.currentIndex(),
+    )
+
+    worker.select_game.assert_called_with("jgWZLWs6")
+    selector.close()

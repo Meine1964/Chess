@@ -1,6 +1,7 @@
 from collections.abc import Callable, Iterator
-from threading import Event
+from threading import Event, Lock
 
+import chess
 from PySide6.QtCore import QObject, Signal, Slot
 
 from .lichess_client import (
@@ -8,10 +9,14 @@ from .lichess_client import (
     GameStreamEvent,
     LichessConnectionError,
     LichessError,
+    LichessGameFull,
     LichessGameState,
     LichessHTTPError,
+    LichessPlayer,
+    LichessPollingSnapshot,
     LichessProtocolError,
     LichessReadOnlyClient,
+    OngoingGame,
     reconnect_delays,
 )
 
@@ -92,6 +97,7 @@ class LichessConnectionWorker(QObject):
     status_changed = Signal(str)
     account_event_received = Signal(object)
     game_event_received = Signal(object)
+    ongoing_games_received = Signal(object)
     failed = Signal(str)
     finished = Signal()
 
@@ -104,12 +110,27 @@ class LichessConnectionWorker(QObject):
         super().__init__()
         self._client = client
         self._stop_requested = Event()
+        self._selection_lock = Lock()
+        self._selected_game_id: str | None = None
+        self._polling_game_id: str | None = None
+        self._polling_initial_fen: str | None = None
+        self._polling_fen: str | None = None
+        self._polling_moves: tuple[str, ...] = ()
         self._wait = (
             self._stop_requested.wait if wait is None else wait
         )
 
     def request_stop(self) -> None:
         self._stop_requested.set()
+
+    def select_game(self, game_id: str | None) -> None:
+        selected = None if game_id is None else game_id.strip() or None
+        with self._selection_lock:
+            self._selected_game_id = selected
+
+    def _selected_game(self) -> str | None:
+        with self._selection_lock:
+            return self._selected_game_id
 
     @Slot()
     def run(self) -> None:
@@ -183,13 +204,15 @@ class LichessConnectionWorker(QObject):
                         polling_mode = True
                         reconnect_attempt = 0
                         self.status_changed.emit(
-                            f"{error} Using read-only polling instead."
+                            "Live Lichess stream unavailable; using "
+                            "current-position polling instead."
                         )
                         continue
                     delay = delays[min(reconnect_attempt, len(delays) - 1)]
                     reconnect_attempt += 1
                     self.status_changed.emit(
-                        f"{error} Retrying polling in {delay} seconds."
+                        f"Current-position polling failed: {error} "
+                        f"Retrying in {delay} seconds."
                     )
                     if self._wait(delay):
                         break
@@ -218,19 +241,35 @@ class LichessConnectionWorker(QObject):
         self,
         previous_game_id: str | None,
     ) -> str | None:
-        if previous_game_id is not None:
-            snapshot = self._client.get_game_snapshot(previous_game_id)
-            self.game_event_received.emit(snapshot)
-            if snapshot.game.state.status not in ("created", "started"):
-                return None
-            return previous_game_id
         games = self._client.get_ongoing_games()
+        self.ongoing_games_received.emit(games)
         if not games:
+            self.select_game(None)
+            self._reset_polling_cursor()
             self.status_changed.emit(
                 "Connected to Lichess by polling; waiting for a game."
             )
             return None
-        game = games[0]
+        selected_game_id = self._selected_game()
+        if len(games) == 1:
+            game = games[0]
+            self.select_game(game.game_id)
+        else:
+            game = next(
+                (
+                    candidate
+                    for candidate in games
+                    if candidate.game_id == selected_game_id
+                ),
+                None,
+            )
+            if game is None:
+                self.select_game(None)
+                self._reset_polling_cursor()
+                self.status_changed.emit(
+                    "Multiple ongoing Lichess games found; select a game."
+                )
+                return None
         if game.game_id != previous_game_id:
             self.account_event_received.emit(
                 AccountGameEvent(
@@ -243,9 +282,89 @@ class LichessConnectionWorker(QObject):
                     game.is_my_turn,
                 )
             )
-        snapshot = self._client.get_game_snapshot(game.game_id)
+        snapshot = self._polling_snapshot(game)
         self.game_event_received.emit(snapshot)
         return game.game_id
+
+    def _polling_snapshot(
+        self,
+        game: OngoingGame,
+    ) -> LichessPollingSnapshot:
+        try:
+            current_board = chess.Board(game.current_fen)
+        except ValueError as error:
+            raise LichessProtocolError(
+                "The ongoing Lichess game has an invalid current FEN."
+            ) from error
+        current_fen = current_board.fen()
+        if self._polling_game_id != game.game_id:
+            self._set_polling_baseline(game.game_id, current_fen)
+        elif current_fen != self._polling_fen:
+            advanced = False
+            if self._polling_fen is not None and game.last_move is not None:
+                try:
+                    previous_board = chess.Board(self._polling_fen)
+                    move = previous_board.parse_uci(game.last_move)
+                    previous_board.push(move)
+                except ValueError:
+                    pass
+                else:
+                    if previous_board.fen() == current_fen:
+                        self._polling_moves = (
+                            *self._polling_moves,
+                            move.uci(),
+                        )
+                        self._polling_fen = current_fen
+                        advanced = True
+            if not advanced:
+                self._set_polling_baseline(game.game_id, current_fen)
+        initial_fen = self._polling_initial_fen
+        if initial_fen is None:
+            raise RuntimeError("Polling baseline was not initialized.")
+        local_player = LichessPlayer(game.color, "Me", None)
+        opponent_color = "black" if game.color == "white" else "white"
+        opponent = LichessPlayer(
+            opponent_color,
+            game.opponent_name,
+            None,
+        )
+        return LichessPollingSnapshot(
+            LichessGameFull(
+                game.game_id,
+                initial_fen,
+                local_player if game.color == "white" else opponent,
+                opponent if game.color == "white" else local_player,
+                LichessGameState(
+                    self._polling_moves,
+                    current_fen,
+                    "white" if current_board.turn == chess.WHITE else "black",
+                    0,
+                    0,
+                    0,
+                    0,
+                    "started",
+                    None,
+                    "*",
+                ),
+            ),
+            False,
+        )
+
+    def _set_polling_baseline(
+        self,
+        game_id: str,
+        fen: str,
+    ) -> None:
+        self._polling_game_id = game_id
+        self._polling_initial_fen = fen
+        self._polling_fen = fen
+        self._polling_moves = ()
+
+    def _reset_polling_cursor(self) -> None:
+        self._polling_game_id = None
+        self._polling_initial_fen = None
+        self._polling_fen = None
+        self._polling_moves = ()
 
     def _wait_for_active_game(
         self,

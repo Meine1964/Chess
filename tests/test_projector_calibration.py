@@ -740,12 +740,292 @@ def test_black_action_opens_and_raises_projector_before_clearing_marker() -> Non
         _open_projector=MagicMock(return_value=True),
         _suspend_selected_square=MagicMock(),
         _projector_status=MagicMock(),
+        _lichess_guidance_projection_active=False,
     )
 
     CameraWindow._black_projector(window)
 
     window._open_projector.assert_called_once_with()
     window._suspend_selected_square.assert_called_once_with()
+
+
+def test_reconciliation_adopts_current_lichess_position_and_history() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+    from src.chess_camera.chess_position import (
+        PiecePositionSynchronizer,
+        standard_position,
+    )
+    from src.chess_camera.legal_game import LegalGame
+    from src.chess_camera.lichess_client import (
+        LichessGameFull,
+        LichessGameState,
+        LichessPlayer,
+    )
+
+    server_game = LegalGame()
+    moved = server_game.apply_move((6, 4), (4, 4))
+    state = LichessGameState(
+        ("e2e4",),
+        moved.fen,
+        "black",
+        0,
+        0,
+        0,
+        0,
+        "started",
+        None,
+        "*",
+    )
+    game = LichessGameFull(
+        "game1234",
+        "startpos",
+        LichessPlayer("white", "Local", 1500),
+        LichessPlayer("black", "Remote", 1500),
+        state,
+    )
+    synchronizer = PiecePositionSynchronizer()
+    synchronizer.restore(standard_position())
+    tracker = MagicMock()
+    tracker.reference = None
+    board_widget = MagicMock()
+    window = SimpleNamespace(
+        _latest_lichess_game=game,
+        _lichess_game_id=game.game_id,
+        _physical_reconciliation_target=MagicMock(
+            return_value=(server_game.position, game)
+        ),
+        _lichess_player_color="white",
+        _lichess_opponent_name="Remote",
+        _lichess_game_controller=None,
+        _piece_synchronizer=synchronizer,
+        _reference_move_tracker=tracker,
+        _latest_frame=np.zeros((20, 20, 3), dtype=np.uint8),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(camera_grid=np.zeros((9, 9, 2)))
+        ),
+        _board_quarter_turns=0,
+        _board_widget=board_widget,
+        _piece_status=MagicMock(),
+        _occupancy_status=MagicMock(),
+        _lichess_sync_status=MagicMock(),
+        _reconcile_button=MagicMock(),
+        _reconciliation_requested=True,
+        _game_mode="diagnostic",
+        _legal_game=LegalGame(),
+        _persist_piece_position=MagicMock(),
+        _persist_move_reference=MagicMock(),
+    )
+
+    CameraWindow._update_physical_reconciliation(
+        window,
+        frozenset(server_game.position),
+    )
+
+    assert synchronizer.position == server_game.position
+    assert window._lichess_game_controller is not None
+    assert window._lichess_game_controller.server_moves == ("e2e4",)
+    assert window._lichess_game_controller.physical_fen == moved.fen
+    assert window._lichess_game_controller.state == "synchronized"
+    board_widget.set_pieces.assert_called_once_with(server_game.position)
+    board_widget.set_reconciliation_squares.assert_called_with(())
+    window._persist_piece_position.assert_called_once_with(server_game.position)
+    window._persist_move_reference.assert_called_once_with()
+    assert window._reconciliation_requested is False
+
+
+def test_reconciliation_projects_and_draws_every_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow, QTimer
+    from src.chess_camera.chess_position import standard_position
+
+    position = standard_position()
+    physical = set(position)
+    physical.remove((6, 1))
+    physical.add((4, 1))
+    board_widget = MagicMock()
+    projector = MagicMock()
+    window = SimpleNamespace(
+        _physical_reconciliation_target=MagicMock(
+            return_value=(position, None)
+        ),
+        _reference_move_tracker=SimpleNamespace(reference=None),
+        _latest_frame=None,
+        _calibration_result=object(),
+        _piece_synchronizer=SimpleNamespace(position=position),
+        _board_widget=board_widget,
+        _piece_status=MagicMock(),
+        _occupancy_status=MagicMock(),
+        _camera_only_calibration=False,
+        _open_projector=MagicMock(return_value=True),
+        _physical_board_square=lambda row, column: (row, column),
+        _projector_window=projector,
+        _alignment_monitor=MagicMock(),
+        _projector_status=MagicMock(),
+        _finish_reconciliation_projection=MagicMock(),
+    )
+    monkeypatch.setattr(QTimer, "singleShot", MagicMock())
+
+    CameraWindow._update_physical_reconciliation(
+        window,
+        frozenset(physical),
+    )
+
+    board_widget.set_reconciliation_squares.assert_called_once_with(
+        ((6, 1), (4, 1))
+    )
+    projector.show_reconciliation.assert_called_once_with(
+        ((6, 1), (4, 1))
+    )
+
+
+def test_lichess_attachment_mismatch_starts_live_reconciliation() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+    from src.chess_camera.chess_position import PiecePositionSynchronizer
+    from src.chess_camera.legal_game import LegalGame
+    from src.chess_camera.lichess_client import (
+        LichessGameFull,
+        LichessGameState,
+        LichessPlayer,
+    )
+
+    server_game = LegalGame()
+    moves = ("e2e4", "e7e6", "g1f3", "d7d5", "b1c3", "c7c6")
+    stale_game = LegalGame()
+    for uci in moves[:-1]:
+        stale_game.apply_move(
+            (8 - int(uci[1]), ord(uci[0]) - ord("a")),
+            (8 - int(uci[3]), ord(uci[2]) - ord("a")),
+        )
+    for uci in moves:
+        server_game.apply_move(
+            (8 - int(uci[1]), ord(uci[0]) - ord("a")),
+            (8 - int(uci[3]), ord(uci[2]) - ord("a")),
+        )
+    state = LichessGameState(
+        moves,
+        server_game.fen,
+        "white",
+        0,
+        0,
+        0,
+        0,
+        "started",
+        None,
+        "*",
+    )
+    game = LichessGameFull(
+        "jgWZLWs6",
+        LegalGame().fen,
+        LichessPlayer("white", "Local", 1500),
+        LichessPlayer("black", "Stockfish level 1", None),
+        state,
+    )
+    synchronizer = PiecePositionSynchronizer()
+    synchronizer.restore(stale_game.position)
+    start_reconciliation = MagicMock()
+    window = SimpleNamespace(
+        _latest_lichess_game=None,
+        _lichess_game_id=game.game_id,
+        _lichess_player_color="white",
+        _lichess_game_controller=None,
+        _reference_move_tracker=SimpleNamespace(initialized=True),
+        _piece_synchronizer=synchronizer,
+        _lichess_sync_status=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
+        _start_automatic_lichess_reconciliation=start_reconciliation,
+    )
+
+    CameraWindow._update_lichess_synchronization(window, game)
+
+    assert window._latest_lichess_game == game
+    start_reconciliation.assert_called_once_with()
+
+
+def test_automatic_reconciliation_waits_for_safe_live_inputs() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    begin = MagicMock()
+    window = SimpleNamespace(
+        _reconciliation_requested=False,
+        _reset_to_start_requested=False,
+        _calibration_result=object(),
+        _piece_synchronizer=SimpleNamespace(initialized=True),
+        _reference_move_tracker=SimpleNamespace(initialized=True),
+        _begin_physical_reconciliation=begin,
+    )
+
+    CameraWindow._start_automatic_lichess_reconciliation(window)
+
+    begin.assert_called_once_with(
+        "Lichess reconciliation started automatically; checking stable "
+        "physical occupancy."
+    )
+    begin.reset_mock()
+    window._reference_move_tracker.initialized = False
+
+    CameraWindow._start_automatic_lichess_reconciliation(window)
+
+    begin.assert_not_called()
+
+
+def test_polling_rebaseline_restarts_physical_reconciliation() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+    from src.chess_camera.legal_game import LegalGame
+    from src.chess_camera.lichess_client import LichessGameState
+    from src.chess_camera.lichess_game_controller import LichessGameController
+
+    moved_game = LegalGame()
+    moved = moved_game.apply_move((6, 4), (4, 4))
+    controller = LichessGameController(
+        "jgWZLWs6",
+        LegalGame().fen,
+        "white",
+        "Stockfish level 1",
+        physical_fen=moved.fen,
+    )
+    controller.accept_server_history(("e2e4",))
+    start_reconciliation = MagicMock()
+    window = SimpleNamespace(
+        _lichess_game_controller=controller,
+        _pending_lichess_local_uci=None,
+        _lichess_sync_status=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
+        _start_automatic_lichess_reconciliation=start_reconciliation,
+        _last_projected_lichess_uci=None,
+    )
+    rebased = LichessGameState(
+        (),
+        moved.fen,
+        "black",
+        0,
+        0,
+        0,
+        0,
+        "started",
+        None,
+        "*",
+    )
+
+    CameraWindow._update_lichess_synchronization_state(window, rebased)
+
+    assert controller.state == "reconciliation-required"
+    start_reconciliation.assert_called_once_with()
 
 
 def test_missing_remembered_projector_falls_back_to_primary() -> None:

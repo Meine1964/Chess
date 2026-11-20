@@ -339,6 +339,13 @@ except the authoritative source must be below the normal movement threshold,
 while the source may retain a small lighting residual. This tolerance does not
 change ordinary move detection.
 
+Physical reconciliation may mark multiple squares red simultaneously. Missing
+expected pieces, unexpected pieces, and confidently opposite-color pieces
+shall remain marked until a stable observation matches the reconciliation
+target. These reconciliation marks are independent of the single-square
+illegal-move marker and clear atomically when the authoritative position is
+adopted.
+
 An otherwise clear illegal relocation shall still reach this correction
 workflow when unrelated settled differences are classified as board-edge
 camera-remap residuals. Such residuals shall not suppress the red authoritative

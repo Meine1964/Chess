@@ -102,6 +102,7 @@ class OngoingGame:
     current_fen: str
     opponent_name: str
     is_my_turn: bool
+    last_move: str | None = None
 
 
 @dataclass(frozen=True)
@@ -384,12 +385,23 @@ class LichessReadOnlyClient:
         game_id: str,
     ) -> LichessPollingSnapshot:
         normalized_game_id = _normalize_game_id(game_id)
-        payload = self._transport.get_json(
-            f"/game/export/{normalized_game_id}"
-            "?clocks=true&evals=false&literate=false",
-            {**self._headers, "Accept": "application/json"},
-        )
-        return _parse_game_snapshot(payload, normalized_game_id)
+        events = self.stream_game(normalized_game_id)
+        try:
+            try:
+                first_event = next(events)
+            except StopIteration as error:
+                raise LichessProtocolError(
+                    "The Board API game stream closed before gameFull."
+                ) from error
+            if not isinstance(first_event, LichessGameFull):
+                raise LichessProtocolError(
+                    "The Board API game stream did not begin with gameFull."
+                )
+            return LichessPollingSnapshot(first_event, True)
+        finally:
+            close = getattr(events, "close", None)
+            if callable(close):
+                close()
 
     def submit_move(self, game_id: str, uci: str) -> None:
         normalized_game_id = _normalize_game_id(game_id)
@@ -482,6 +494,7 @@ def _parse_ongoing_game(payload: object) -> OngoingGame:
         )
     game = cast(Mapping[str, object], payload)
     opponent = _required_mapping(game, "opponent")
+    last_move = _required_string(game, "lastMove")
     return OngoingGame(
         _required_string(game, "gameId"),
         _required_string(game, "fullId"),
@@ -489,139 +502,8 @@ def _parse_ongoing_game(payload: object) -> OngoingGame:
         _required_string(game, "fen"),
         _required_string(opponent, "username"),
         _required_bool(game, "isMyTurn"),
+        last_move or None,
     )
-
-
-def _parse_game_snapshot(
-    payload: Mapping[str, object],
-    expected_game_id: str,
-) -> LichessPollingSnapshot:
-    game_id = _required_string(payload, "id")
-    if game_id != expected_game_id:
-        raise LichessProtocolError(
-            "The game export returned a different game ID."
-        )
-    variant = payload.get("variant")
-    if variant != "standard":
-        raise LichessProtocolError(
-            "Only standard chess games are supported."
-        )
-    initial_value = payload.get("initialFen", "startpos")
-    if not isinstance(initial_value, str):
-        raise LichessProtocolError(
-            "The game export initial FEN is invalid."
-        )
-    initial_fen = _normalize_initial_fen(initial_value)
-    moves_text = _required_string(payload, "moves")
-    san_moves = tuple(moves_text.split()) if moves_text else ()
-    board = chess.Board(initial_fen)
-    uci_moves: list[str] = []
-    try:
-        for san in san_moves:
-            move = board.parse_san(san)
-            uci_moves.append(move.uci())
-            board.push(move)
-    except ValueError as error:
-        raise LichessProtocolError(
-            "The exported Lichess move list is invalid."
-        ) from error
-    players = _required_mapping(payload, "players")
-    white = _parse_export_player(
-        _required_mapping(players, "white"),
-        "white",
-    )
-    black = _parse_export_player(
-        _required_mapping(players, "black"),
-        "black",
-    )
-    status = _required_string(payload, "status")
-    winner_value = payload.get("winner")
-    winner = (
-        cast(PlayerColor, winner_value)
-        if winner_value in ("white", "black")
-        else None
-    )
-    if winner_value is not None and winner is None:
-        raise LichessProtocolError(
-            "The exported Lichess winner value is invalid."
-        )
-    white_time, black_time, white_increment, black_increment, clocks_available = (
-        _export_clock_state(payload, len(uci_moves))
-    )
-    state = LichessGameState(
-        tuple(uci_moves),
-        board.fen(),
-        "white" if board.turn == chess.WHITE else "black",
-        white_time,
-        black_time,
-        white_increment,
-        black_increment,
-        status,
-        winner,
-        _game_result(status, winner),
-    )
-    return LichessPollingSnapshot(
-        LichessGameFull(
-            game_id,
-            initial_fen,
-            white,
-            black,
-            state,
-        ),
-        clocks_available,
-    )
-
-
-def _parse_export_player(
-    payload: Mapping[str, object],
-    color: PlayerColor,
-) -> LichessPlayer:
-    rating = payload.get("rating")
-    if rating is not None and (
-        not isinstance(rating, int) or isinstance(rating, bool)
-    ):
-        raise LichessProtocolError(
-            "An exported player rating must be an integer."
-        )
-    user = payload.get("user")
-    if isinstance(user, dict):
-        name = _required_string(
-            cast(Mapping[str, object], user),
-            "name",
-        )
-    else:
-        ai_level = payload.get("aiLevel")
-        if not isinstance(ai_level, int) or isinstance(ai_level, bool):
-            raise LichessProtocolError(
-                "An exported player identity is invalid."
-            )
-        name = f"Stockfish level {ai_level}"
-    return LichessPlayer(color, name, rating)
-
-
-def _export_clock_state(
-    payload: Mapping[str, object],
-    move_count: int,
-) -> tuple[int, int, int, int, bool]:
-    clock = payload.get("clock")
-    clocks = payload.get("clocks")
-    if not isinstance(clock, dict) or not isinstance(clocks, list):
-        return 0, 0, 0, 0, False
-    clock_mapping = cast(Mapping[str, object], clock)
-    initial_ms = _required_int(clock_mapping, "initial") * 1000
-    increment_ms = _required_int(clock_mapping, "increment") * 1000
-    white_time = initial_ms
-    black_time = initial_ms
-    for index, value in enumerate(clocks[:move_count]):
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            raise LichessProtocolError(
-                "An exported Lichess clock value is invalid."
-            )
-        if index % 2 == 0:
-            white_time = value * 10
-        else:
-            black_time = value * 10
-    return white_time, black_time, increment_ms, increment_ms, True
 
 
 def _parse_game_full(payload: Mapping[str, object]) -> LichessGameFull:

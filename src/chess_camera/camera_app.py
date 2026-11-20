@@ -60,6 +60,7 @@ from .chess_position import (
 )
 from .chessboard_widget import ChessboardWidget, rotate_square
 from .diagnostics import DiagnosticStore, RuntimeDiagnosticLog
+from .guidance_activity import GuidanceActivityDetector
 from .legal_game import GameMode, LegalGame, LegalMoveResult
 from .lichess_client import (
     AccountGameEvent,
@@ -68,6 +69,7 @@ from .lichess_client import (
     LichessGameState,
     LichessPollingSnapshot,
     LichessReadOnlyClient,
+    OngoingGame,
     PlayerColor,
 )
 from .lichess_game_controller import LichessGameController
@@ -79,6 +81,7 @@ from .occupancy import (
     SquareOccupancyDetector,
     detect_starting_position_orientation,
 )
+from .piece_color_classifier import PieceColorLabel, classify_piece_colors
 from .projector import ProjectorWindow, focus_pattern
 from .projector_calibration import (
     CalibrationError,
@@ -228,6 +231,14 @@ def _lichess_polling_snapshot_message(
         f"{state.turn.capitalize()} to move; {clock_text}"
         f"status {state.status}; result {state.result}. "
         "Connected by polling."
+    )
+
+
+def _ongoing_game_label(game: OngoingGame) -> str:
+    turn = "your turn" if game.is_my_turn else "opponent's turn"
+    return (
+        f"{game.opponent_name} - playing {game.color.capitalize()}, "
+        f"{turn} - {game.game_id}"
     )
 
 
@@ -412,6 +423,7 @@ class CameraWindow(QMainWindow):
             self._camera_grid_checked
         )
         self._occupancy_detector = SquareOccupancyDetector()
+        self._guidance_activity_detector = GuidanceActivityDetector()
         self._reference_move_tracker = ReferenceMoveTracker()
         self._piece_synchronizer = PiecePositionSynchronizer()
         self._legal_game = LegalGame()
@@ -435,7 +447,11 @@ class CameraWindow(QMainWindow):
         self._lichess_opponent_name = ""
         self._lichess_game_controller: LichessGameController | None = None
         self._last_projected_lichess_uci: str | None = None
+        self._lichess_guidance_projection_active = False
+        self._lichess_guidance_blackout_pending = False
+        self._lichess_guidance_generation = 0
         self._latest_lichess_state: LichessGameState | None = None
+        self._latest_lichess_game: LichessGameFull | None = None
         self._last_runtime_tracker_state: str | None = None
         self._runtime_diagnostics_error: str | None = None
         self._latest_stable_occupied_ui: (
@@ -553,6 +569,16 @@ class CameraWindow(QMainWindow):
         self._lichess_button.clicked.connect(
             self._toggle_lichess_connection
         )
+        self._lichess_game_selector = QComboBox()
+        self._lichess_game_selector.setMaximumWidth(520)
+        self._lichess_game_selector.addItem(
+            "Waiting for ongoing games...",
+            None,
+        )
+        self._lichess_game_selector.setEnabled(False)
+        self._lichess_game_selector.currentIndexChanged.connect(
+            self._lichess_game_selection_changed
+        )
         button_layout = QGridLayout()
         button_layout.addWidget(self._snapshot_button, 0, 0)
         button_layout.addWidget(self._resume_button, 0, 1)
@@ -560,6 +586,12 @@ class CameraWindow(QMainWindow):
         button_layout.addWidget(self._reset_pieces_button, 1, 0)
         button_layout.addWidget(self._reconcile_button, 1, 1)
         button_layout.addWidget(self._lichess_button, 1, 2)
+        lichess_game_layout = QHBoxLayout()
+        lichess_game_layout.addWidget(QLabel("Lichess game:"))
+        lichess_game_layout.addWidget(
+            self._lichess_game_selector,
+            stretch=1,
+        )
 
         self._screens = list(QGuiApplication.screens())
         self._projector_selector = QComboBox()
@@ -801,6 +833,7 @@ class CameraWindow(QMainWindow):
         interaction_layout = QVBoxLayout()
         interaction_layout.addLayout(camera_layout)
         interaction_layout.addLayout(button_layout)
+        interaction_layout.addLayout(lichess_game_layout)
         interaction_layout.addLayout(projector_display_layout)
         interaction_layout.addLayout(projector_actions_layout)
         interaction_layout.addLayout(calibration_layout)
@@ -1352,11 +1385,15 @@ class CameraWindow(QMainWindow):
             )
 
     def _black_projector(self) -> None:
+        lichess_guidance_active = self._lichess_guidance_projection_active
         if self._calibrator.active:
             self._calibrator.cancel()
         if not self._open_projector():
             return
         self._suspend_selected_square()
+        if lichess_guidance_active:
+            self._begin_lichess_guidance_observation()
+            return
         self._projector_status.setText(
             "Projector is black; the selected board square is remembered."
         )
@@ -1977,6 +2014,15 @@ class CameraWindow(QMainWindow):
                 "Occupancy waiting for camera-grid verification."
             )
             return
+        if self._lichess_guidance_projection_active:
+            self._observe_lichess_guidance_activity()
+            return
+        if self._lichess_guidance_blackout_pending:
+            self._occupancy_status.setText(
+                "Opponent-move guidance removed; waiting for projector black "
+                "to settle."
+            )
+            return
         if (
             not self._camera_only_calibration
             and self._alignment_monitor.output_mode != "black"
@@ -2301,6 +2347,7 @@ class CameraWindow(QMainWindow):
         self._board_widget.set_pieces(position_update.position)
         self._board_widget.set_occupied_squares(position_update.position)
         self._board_widget.set_illegal_source(None)
+        self._board_widget.set_guidance_move(None)
         self._last_rejected_move = None
         self._board_widget.set_last_move(update.move)
         self._persist_piece_position(position_update.position)
@@ -2646,6 +2693,8 @@ class CameraWindow(QMainWindow):
         signature = controller.expected_signature
         if signature is None:
             self._last_projected_lichess_uci = None
+            self._board_widget.set_guidance_move(None)
+            self._cancel_lichess_guidance_activity()
             return
         self._last_projected_lichess_uci = signature.uci
         self._project_lichess_move_guidance(
@@ -2658,6 +2707,9 @@ class CameraWindow(QMainWindow):
     ) -> None:
         source, destination = move
         move_name = f"{square_name(source)}-{square_name(destination)}"
+        self._board_widget.set_illegal_source(None)
+        self._board_widget.set_reconciliation_squares(())
+        self._board_widget.set_guidance_move(move)
         if self._camera_only_calibration:
             self._projector_status.setText(
                 f"Lichess move {move_name} is pending; physical projection "
@@ -2683,10 +2735,71 @@ class CameraWindow(QMainWindow):
             )
             return
         self._alignment_monitor.set_paused("Lichess move guidance")
+        self._lichess_guidance_generation += 1
+        self._lichess_guidance_projection_active = True
+        self._lichess_guidance_blackout_pending = False
+        self._guidance_activity_detector.reset()
         self._projector_status.setText(
-            f"Projecting pending Lichess move {move_name} for 2 seconds."
+            f"Projecting pending Lichess move {move_name} until hand "
+            "movement is detected."
         )
-        QTimer.singleShot(2000, self._finish_move_projection)
+
+    def _observe_lichess_guidance_activity(self) -> None:
+        if (
+            self._latest_frame is None
+            or self._calibration_result is None
+            or not self._lichess_guidance_projection_active
+        ):
+            return
+        try:
+            activity_detected = self._guidance_activity_detector.observe(
+                self._latest_frame,
+                self._calibration_result.mapping.camera_grid,
+            )
+        except (ValueError, RuntimeError, cv2.error) as error:
+            self._projector_status.setText(
+                f"Opponent-move hand detection unavailable: {error}"
+            )
+            return
+        if activity_detected:
+            self._begin_lichess_guidance_observation()
+
+    def _begin_lichess_guidance_observation(self) -> None:
+        if not self._lichess_guidance_projection_active:
+            return
+        generation = self._lichess_guidance_generation
+        self._lichess_guidance_projection_active = False
+        self._lichess_guidance_blackout_pending = True
+        self._guidance_activity_detector.reset()
+        self._projector_window.show_black()
+        self._alignment_monitor.set_black()
+        self._reference_move_tracker.reset_activity()
+        self._projector_status.setText(
+            "Hand movement detected; projector returned to black and is "
+            "settling before move verification."
+        )
+        QTimer.singleShot(
+            1000,
+            lambda: self._finish_lichess_guidance_blackout(generation),
+        )
+
+    def _finish_lichess_guidance_blackout(self, generation: int) -> None:
+        if (
+            generation != self._lichess_guidance_generation
+            or self._lichess_guidance_projection_active
+        ):
+            return
+        self._lichess_guidance_blackout_pending = False
+        self._reference_move_tracker.reset_activity()
+        self._projector_status.setText(
+            "Projector is black; verifying the pending physical move."
+        )
+
+    def _cancel_lichess_guidance_activity(self) -> None:
+        self._lichess_guidance_generation += 1
+        self._lichess_guidance_projection_active = False
+        self._lichess_guidance_blackout_pending = False
+        self._guidance_activity_detector.reset()
 
     def _reject_unconfirmed_lichess_move(
         self,
@@ -2694,6 +2807,7 @@ class CameraWindow(QMainWindow):
     ) -> None:
         controller = self._lichess_game_controller
         self._reference_move_tracker.reset_activity()
+        self._board_widget.set_guidance_move(None)
         newly_marked = self._last_rejected_move != move
         self._last_rejected_move = move
         self._board_widget.set_illegal_source(move[0])
@@ -2795,6 +2909,7 @@ class CameraWindow(QMainWindow):
             self._black_projector()
             self._occupancy_detector.reset()
             self._reference_move_tracker.reset_activity()
+            self._board_widget.set_reconciliation_squares(())
             self._occupancy_status.setText(
                 "Physical-board reconciliation cancelled."
             )
@@ -2809,43 +2924,124 @@ class CameraWindow(QMainWindow):
                 "A calibrated board and accepted position are required.",
             )
             return
+        self._begin_physical_reconciliation(
+            "Reconciliation started; checking stable physical occupancy."
+        )
+
+    def _begin_physical_reconciliation(
+        self,
+        occupancy_message: str,
+    ) -> None:
         self._reconciliation_requested = True
         self._reconcile_button.setText("Cancel reconciliation")
         self._board_widget.set_illegal_source(None)
+        self._board_widget.set_guidance_move(None)
+        self._board_widget.set_reconciliation_squares(())
         self._last_rejected_move = None
         self._black_projector()
         self._occupancy_detector.reset()
         self._reference_move_tracker.reset_activity()
-        self._occupancy_status.setText(
-            "Reconciliation started; checking stable physical occupancy."
-        )
+        self._occupancy_status.setText(occupancy_message)
         self._piece_status.setText(
             "Keep the board clear while mismatching squares are checked."
+        )
+
+    def _start_automatic_lichess_reconciliation(self) -> None:
+        if (
+            self._reconciliation_requested
+            or self._reset_to_start_requested
+            or self._calibration_result is None
+            or not self._piece_synchronizer.initialized
+            or not self._reference_move_tracker.initialized
+        ):
+            return
+        self._begin_physical_reconciliation(
+            "Lichess reconciliation started automatically; checking stable "
+            "physical occupancy."
         )
 
     def _update_physical_reconciliation(
         self,
         physically_occupied: frozenset[tuple[int, int]],
     ) -> None:
+        target_position, lichess_game = self._physical_reconciliation_target()
+        observed_colors: (
+            dict[tuple[int, int], PieceColorLabel] | None
+        ) = None
+        reference = self._reference_move_tracker.reference
+        if (
+            reference is not None
+            and self._latest_frame is not None
+            and self._calibration_result is not None
+        ):
+            current = self._reference_move_tracker.canonical_frame(
+                self._latest_frame,
+                self._calibration_result.mapping.camera_grid,
+                self._board_quarter_turns,
+            )
+            observed_colors = {
+                square: classification.label
+                for square, classification in classify_piece_colors(
+                    reference,
+                    current,
+                    self._piece_synchronizer.position,
+                ).items()
+            }
         result = compare_physical_occupancy(
-            self._piece_synchronizer.position,
+            target_position,
             physically_occupied,
+            observed_colors,
         )
         self._board_widget.set_occupied_squares(physically_occupied)
+        self._board_widget.set_reconciliation_squares(
+            result.mismatch_squares
+        )
         self._piece_status.setText(result.message)
         if result.matches:
             if self._latest_frame is None or self._calibration_result is None:
                 raise RuntimeError(
                     "Reconciliation matched without a calibrated frame."
                 )
+            adopted_controller: LichessGameController | None = None
+            if lichess_game is not None:
+                if self._lichess_player_color is None:
+                    self._occupancy_status.setText(
+                        "Lichess game metadata is not available yet; "
+                        "reconciliation will retry."
+                    )
+                    return
+                adopted_controller = LichessGameController(
+                    lichess_game.game_id,
+                    lichess_game.initial_fen,
+                    self._lichess_player_color,
+                    self._lichess_opponent_name,
+                    physical_fen=lichess_game.state.fen,
+                )
+                update = adopted_controller.accept_server_history(
+                    lichess_game.state.moves
+                )
+                if update.state not in ("synchronized", "game-complete"):
+                    raise RuntimeError(
+                        "The reconciled Lichess history did not attach: "
+                        f"{update.message}"
+                    )
             self._reference_move_tracker.set_reference(
                 self._latest_frame,
                 self._calibration_result.mapping.camera_grid,
                 self._board_quarter_turns,
             )
+            if lichess_game is not None and adopted_controller is not None:
+                self._piece_synchronizer.restore(target_position)
+                self._legal_game = LegalGame(lichess_game.state.fen)
+                self._lichess_game_controller = adopted_controller
+                self._board_widget.set_pieces(target_position)
+                self._board_widget.set_occupied_squares(target_position)
+                self._persist_piece_position(target_position)
+                self._lichess_sync_status.setText(update.message)
             self._persist_move_reference()
             self._reconciliation_requested = False
             self._reconcile_button.setText("Reconcile physical board")
+            self._board_widget.set_reconciliation_squares(())
             self._occupancy_status.setText(
                 "Reconciliation complete; accepted reference replaced."
             )
@@ -2886,6 +3082,15 @@ class CameraWindow(QMainWindow):
             "Projecting all occupancy mismatches in red for 2 seconds."
         )
         QTimer.singleShot(2000, self._finish_reconciliation_projection)
+
+    def _physical_reconciliation_target(
+        self,
+    ) -> tuple[Position, LichessGameFull | None]:
+        game = self._latest_lichess_game
+        if game is not None and game.game_id == self._lichess_game_id:
+            position, _ = _lichess_board_state(game.state)
+            return position, game
+        return self._piece_synchronizer.position, None
 
     def _finish_reconciliation_projection(self) -> None:
         if self._projector_window.output_mode != "reconciliation":
@@ -3039,6 +3244,9 @@ class CameraWindow(QMainWindow):
         worker.game_event_received.connect(
             self._lichess_game_event_received
         )
+        worker.ongoing_games_received.connect(
+            self._lichess_ongoing_games_received
+        )
         worker.failed.connect(self._lichess_connection_failed)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
@@ -3055,6 +3263,62 @@ class CameraWindow(QMainWindow):
             "Connecting to Lichess.",
         )
         thread.start()
+
+    def _lichess_ongoing_games_received(self, value: object) -> None:
+        if not isinstance(value, tuple) or not all(
+            isinstance(game, OngoingGame) for game in value
+        ):
+            raise TypeError("Ongoing Lichess games must be a tuple.")
+        games = cast(tuple[OngoingGame, ...], value)
+        previous = self._lichess_game_selector.currentData()
+        self._lichess_game_selector.blockSignals(True)
+        self._lichess_game_selector.clear()
+        if not games:
+            self._lichess_game_selector.addItem(
+                "No ongoing games",
+                None,
+            )
+            self._lichess_game_selector.setEnabled(False)
+            selected: str | None = None
+        elif len(games) == 1:
+            game = games[0]
+            self._lichess_game_selector.addItem(
+                _ongoing_game_label(game),
+                game.game_id,
+            )
+            self._lichess_game_selector.setEnabled(False)
+            selected = game.game_id
+        else:
+            self._lichess_game_selector.addItem(
+                "Select an ongoing game...",
+                None,
+            )
+            for game in games:
+                self._lichess_game_selector.addItem(
+                    _ongoing_game_label(game),
+                    game.game_id,
+                )
+            matching_index = self._lichess_game_selector.findData(previous)
+            if matching_index > 0:
+                self._lichess_game_selector.setCurrentIndex(matching_index)
+                selected = cast(str, previous)
+            else:
+                selected = None
+            self._lichess_game_selector.setEnabled(True)
+        self._lichess_game_selector.blockSignals(False)
+        if self._lichess_worker is not None:
+            self._lichess_worker.select_game(selected)
+
+    def _lichess_game_selection_changed(self, index: int) -> None:
+        game_id = self._lichess_game_selector.itemData(index)
+        if self._lichess_worker is not None:
+            self._lichess_worker.select_game(
+                game_id if isinstance(game_id, str) else None
+            )
+        if isinstance(game_id, str):
+            self._lichess_status.setText(
+                f"Selected Lichess game {game_id}; awaiting snapshot."
+            )
 
     def _lichess_connection_status_changed(self, message: str) -> None:
         self._lichess_status.setText(message)
@@ -3076,6 +3340,7 @@ class CameraWindow(QMainWindow):
         if event.event_type == "gameStart":
             if event.game_id != self._lichess_game_id:
                 self._lichess_game_controller = None
+                self._latest_lichess_game = None
                 self._last_projected_lichess_uci = None
             self._lichess_game_id = event.game_id
             self._lichess_player_color = event.color
@@ -3124,6 +3389,14 @@ class CameraWindow(QMainWindow):
 
     def _update_lichess_board(self, state: LichessGameState) -> None:
         self._latest_lichess_state = state
+        if (
+            self._latest_lichess_game is not None
+            and self._latest_lichess_game.game_id == self._lichess_game_id
+        ):
+            self._latest_lichess_game = replace(
+                self._latest_lichess_game,
+                state=state,
+            )
         position, last_move = _lichess_board_state(state)
         self._lichess_board_widget.set_pieces(position)
         self._lichess_board_widget.set_occupied_squares(position)
@@ -3134,6 +3407,7 @@ class CameraWindow(QMainWindow):
         self,
         game: LichessGameFull,
     ) -> None:
+        self._latest_lichess_game = game
         if (
             self._lichess_game_id != game.game_id
             or self._lichess_player_color is None
@@ -3153,15 +3427,15 @@ class CameraWindow(QMainWindow):
                 or self._piece_synchronizer.position != initial_position
             ):
                 self._lichess_sync_status.setText(
-                    "Physical reconciliation required: Phase 7 currently "
-                    "attaches only when the accepted physical board matches "
-                    "the Lichess initial position."
+                    "Physical reconciliation required: compare the live "
+                    "board with the current Lichess position."
                 )
                 self._record_runtime_diagnostic(
                     "lichess-reconciliation-required",
                     self._lichess_sync_status.text(),
                     include_images=True,
                 )
+                self._start_automatic_lichess_reconciliation()
                 return
             self._lichess_game_controller = LichessGameController(
                 game.game_id,
@@ -3197,6 +3471,9 @@ class CameraWindow(QMainWindow):
             "lichess-synchronization",
             update.message,
         )
+        if update.state == "reconciliation-required":
+            self._start_automatic_lichess_reconciliation()
+            return
         signature = controller.expected_signature
         if signature is None:
             self._last_projected_lichess_uci = None

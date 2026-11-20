@@ -65,6 +65,12 @@ class ChessboardWidget(QWidget):
         self._selected_square: tuple[int, int] | None = None
         self._last_move: tuple[tuple[int, int], tuple[int, int]] | None = None
         self._illegal_source: tuple[int, int] | None = None
+        self._guidance_move: (
+            tuple[tuple[int, int], tuple[int, int]] | None
+        ) = None
+        self._reconciliation_squares: frozenset[
+            tuple[int, int]
+        ] = frozenset()
         self._occupied_squares: frozenset[tuple[int, int]] = frozenset()
         self._pieces: Position = {}
         self._piece_renderers: dict[PieceCode, QSvgRenderer] = {}
@@ -132,6 +138,46 @@ class ChessboardWidget(QWidget):
         if square == self._illegal_source:
             return
         self._illegal_source = square
+        self.update()
+
+    @property
+    def guidance_move(
+        self,
+    ) -> tuple[tuple[int, int], tuple[int, int]] | None:
+        return self._guidance_move
+
+    def set_guidance_move(
+        self,
+        move: tuple[tuple[int, int], tuple[int, int]] | None,
+    ) -> None:
+        if move is not None:
+            for row, column in move:
+                if not 0 <= row < 8 or not 0 <= column < 8:
+                    raise ValueError(
+                        "Guidance squares must be inside the 8x8 board."
+                    )
+        if move == self._guidance_move:
+            return
+        self._guidance_move = move
+        self.update()
+
+    @property
+    def reconciliation_squares(self) -> frozenset[tuple[int, int]]:
+        return self._reconciliation_squares
+
+    def set_reconciliation_squares(
+        self,
+        squares: Collection[tuple[int, int]],
+    ) -> None:
+        reconciliation_squares = frozenset(squares)
+        for row, column in reconciliation_squares:
+            if not 0 <= row < 8 or not 0 <= column < 8:
+                raise ValueError(
+                    "Reconciliation squares must be inside the 8x8 board."
+                )
+        if reconciliation_squares == self._reconciliation_squares:
+            return
+        self._reconciliation_squares = reconciliation_squares
         self.update()
 
     @property
@@ -229,7 +275,19 @@ class ChessboardWidget(QWidget):
                         QPen(QColor("#c62828"), max(2.0, square_size * 0.05))
                     )
                     painter.drawRect(rectangle.adjusted(2, 2, -2, -2))
-                if self._illegal_source == (row, column):
+                if (
+                    self._guidance_move is not None
+                    and (row, column) in self._guidance_move
+                ):
+                    painter.fillRect(rectangle, QColor("#ffffff"))
+                    painter.setPen(
+                        QPen(QColor("#eeeeee"), max(2.0, square_size * 0.05))
+                    )
+                    painter.drawRect(rectangle.adjusted(2, 2, -2, -2))
+                if (
+                    self._illegal_source == (row, column)
+                    or (row, column) in self._reconciliation_squares
+                ):
                     painter.fillRect(rectangle, LICHESS_ILLEGAL)
                     painter.setPen(
                         QPen(QColor("#b71c1c"), max(2.0, square_size * 0.07))

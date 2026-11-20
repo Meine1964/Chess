@@ -1,4 +1,5 @@
 from src.chess_camera.camera_app import (
+    CameraWindow,
     _accepted_position_message,
     _format_lichess_clock,
     _illegal_correction_message,
@@ -6,6 +7,7 @@ from src.chess_camera.camera_app import (
     _lichess_game_state_message,
     _lichess_polling_snapshot_message,
     _lichess_turn_indicator_state,
+    _ongoing_game_label,
     _reference_tracking_status_message,
     _turn_indicator_state,
 )
@@ -15,6 +17,7 @@ from src.chess_camera.lichess_client import (
     LichessGameState,
     LichessPlayer,
     LichessPollingSnapshot,
+    OngoingGame,
 )
 from src.chess_camera.reference_move_tracker import (
     ReferenceTrackerState,
@@ -104,6 +107,21 @@ def test_polling_message_reports_unavailable_correspondence_clocks() -> None:
     )
 
 
+def test_ongoing_game_label_identifies_selection() -> None:
+    game = OngoingGame(
+        "jgWZLWs6",
+        "jgWZLWs6abcd",
+        "white",
+        "unused",
+        "Stockfish level 1",
+        True,
+    )
+
+    assert _ongoing_game_label(game) == (
+        "Stockfish level 1 - playing White, your turn - jgWZLWs6"
+    )
+
+
 def test_lichess_board_state_uses_remote_fen_and_last_move() -> None:
     game = LegalGame()
     result = game.apply_move((6, 4), (4, 4))
@@ -125,6 +143,56 @@ def test_lichess_board_state_uses_remote_fen_and_last_move() -> None:
     assert (6, 4) not in position
     assert position[(4, 4)] == "P"
     assert last_move == ((6, 4), (4, 4))
+
+
+def test_lichess_board_update_keeps_reconciliation_target_current() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    original = LichessGameState(
+        (),
+        LegalGame().fen,
+        "white",
+        0,
+        0,
+        0,
+        0,
+        "started",
+        None,
+        "*",
+    )
+    legal_game = LegalGame()
+    moved = legal_game.apply_move((6, 4), (4, 4))
+    current = LichessGameState(
+        ("e2e4",),
+        moved.fen,
+        "black",
+        0,
+        0,
+        0,
+        0,
+        "started",
+        None,
+        "*",
+    )
+    full = LichessGameFull(
+        "game1234",
+        "startpos",
+        LichessPlayer("white", "Local", 1500),
+        LichessPlayer("black", "Remote", 1500),
+        original,
+    )
+    window = SimpleNamespace(
+        _latest_lichess_state=None,
+        _latest_lichess_game=full,
+        _lichess_game_id=full.game_id,
+        _lichess_board_widget=MagicMock(),
+        _update_turn_indicator=MagicMock(),
+    )
+
+    CameraWindow._update_lichess_board(window, current)
+
+    assert window._latest_lichess_game.state == current
 
 
 def test_turn_indicator_tracks_authoritative_side_to_move() -> None:

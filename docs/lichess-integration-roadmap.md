@@ -546,13 +546,13 @@ after a socket or SSL read timeout. A successfully opened stream resets the
 backoff sequence. Disconnect checks include blank keep-alive lines so an idle
 stream can stop cooperatively.
 
-If the network path blocks long-lived HTTP response headers, the worker falls
-back to read-only polling. It discovers games through
-`GET /api/account/playing` and reconstructs the active game from
-`GET /game/export/{gameId}` every five seconds, while keeping only one request
-active at a time. Streaming remains preferred because polling exports do not
-provide live clock values for correspondence games. The UI explicitly reports
-when polling is active and when clocks are unavailable.
+If the network path blocks the idle account-event stream, the worker falls
+back to polling. It discovers games through `GET /api/account/playing` and
+uses that authenticated response's current FEN and authoritative `lastMove`
+to maintain a legal cursor every five seconds. Unverifiable jumps establish a
+new current-position baseline and require physical reconciliation. The public
+game-export endpoint is not suitable because Lichess deliberately delays
+ongoing-game exports.
 
 The Lichess state is displayed for observation only and does not yet change the
 local legal game, physical reference, or projector.

@@ -252,8 +252,21 @@ def test_game_stream_reconstructs_position_and_clocks() -> None:
 
 
 def test_polling_fallback_discovers_and_reconstructs_ai_game() -> None:
+    game_full = {
+        "type": "gameFull",
+        "id": "oozTO3xk",
+        "variant": {"key": "standard"},
+        "initialFen": "startpos",
+        "white": {"name": "Meine", "rating": 1500},
+        "black": {"name": "Stockfish level 1"},
+        "state": _state("e2e4 e7e6 g1f3 d7d5 b1c3 c7c6"),
+    }
     transport = FakeTransport(
-        {},
+        {
+            "/api/board/game/stream/oozTO3xk": (
+                _line(game_full),
+            )
+        },
         {
             "/api/account/playing?nb=10": {
                 "nowPlaying": [
@@ -262,6 +275,7 @@ def test_polling_fallback_discovers_and_reconstructs_ai_game() -> None:
                         "fullId": "oozTO3xkabcd",
                         "color": "white",
                         "fen": chess.STARTING_FEN,
+                        "lastMove": "",
                         "opponent": {
                             "username": "Stockfish level 1",
                         },
@@ -269,22 +283,6 @@ def test_polling_fallback_discovers_and_reconstructs_ai_game() -> None:
                     }
                 ],
                 "nbMyTurn": 1,
-            },
-            (
-                "/game/export/oozTO3xk"
-                "?clocks=true&evals=false&literate=false"
-            ): {
-                "id": "oozTO3xk",
-                "variant": "standard",
-                "moves": "e4 e5 Nf3",
-                "players": {
-                    "white": {
-                        "user": {"name": "Meine"},
-                        "rating": 1500,
-                    },
-                    "black": {"aiLevel": 1},
-                },
-                "status": "started",
             },
         },
     )
@@ -296,9 +294,19 @@ def test_polling_fallback_discovers_and_reconstructs_ai_game() -> None:
     assert games[0].opponent_name == "Stockfish level 1"
     assert isinstance(snapshot, LichessPollingSnapshot)
     assert snapshot.game.black.name == "Stockfish level 1"
-    assert snapshot.game.state.moves == ("e2e4", "e7e5", "g1f3")
-    assert snapshot.game.state.turn == "black"
-    assert not snapshot.clocks_available
+    assert snapshot.game.state.moves == (
+        "e2e4",
+        "e7e6",
+        "g1f3",
+        "d7d5",
+        "b1c3",
+        "c7c6",
+    )
+    assert snapshot.game.state.turn == "white"
+    assert snapshot.clocks_available
+    assert transport.requests[-1][0] == (
+        "/api/board/game/stream/oozTO3xk"
+    )
 
 
 def test_invalid_game_move_list_is_rejected() -> None:

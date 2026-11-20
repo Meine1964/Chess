@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QApplication
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from src.chess_camera.projector import (
+    PROJECTED_LEGAL_MOVE,
     PROJECTED_ON_DARK_SQUARE,
     PROJECTED_ILLEGAL_MOVE,
     PROJECTED_ON_LIGHT_SQUARE,
@@ -109,8 +110,8 @@ def test_projector_renders_patterns_and_calibrated_squares(
     )
     application.processEvents()
     move_image = window.grab().toImage()
-    assert move_image.pixelColor(115, 64) == PROJECTED_ON_LIGHT_SQUARE
-    assert move_image.pixelColor(205, 99) == PROJECTED_ON_DARK_SQUARE
+    assert move_image.pixelColor(115, 64) == PROJECTED_LEGAL_MOVE
+    assert move_image.pixelColor(205, 99) == PROJECTED_LEGAL_MOVE
     assert move_image.pixelColor(145, 64).red() == 0
 
     window.show_illegal_square(2, 3)

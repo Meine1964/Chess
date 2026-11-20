@@ -1,6 +1,8 @@
 from dataclasses import dataclass
+from typing import Mapping
 
 from .chess_position import PieceCode, Position, Square, square_name
+from .piece_color_classifier import PieceColorLabel
 
 _PIECE_NAMES = {
     "K": "white king",
@@ -23,6 +25,7 @@ class OccupancyDiscrepancy:
     square: Square
     expected_piece: PieceCode | None
     physically_occupied: bool
+    observed_color: PieceColorLabel | None = None
 
 
 @dataclass(frozen=True)
@@ -42,6 +45,7 @@ class ReconciliationResult:
 def compare_physical_occupancy(
     position: Position,
     physically_occupied: frozenset[Square],
+    observed_colors: Mapping[Square, PieceColorLabel] | None = None,
 ) -> ReconciliationResult:
     expected = frozenset(position)
     missing = tuple(sorted(expected - physically_occupied))
@@ -53,6 +57,26 @@ def compare_physical_occupancy(
         OccupancyDiscrepancy(square, None, True)
         for square in unexpected
     )
+    wrong_colors: tuple[Square, ...] = ()
+    if observed_colors is not None:
+        wrong_colors = tuple(
+            square
+            for square in sorted(expected & physically_occupied)
+            if (
+                observed_colors.get(square) in ("white", "black")
+                and observed_colors[square]
+                != ("white" if position[square].isupper() else "black")
+            )
+        )
+        discrepancies += tuple(
+            OccupancyDiscrepancy(
+                square,
+                position[square],
+                True,
+                observed_colors[square],
+            )
+            for square in wrong_colors
+        )
     if not discrepancies:
         return ReconciliationResult(
             (),
@@ -65,6 +89,12 @@ def compare_physical_occupancy(
     instructions.extend(
         f"remove the unexpected piece from {square_name(square)}"
         for square in unexpected
+    )
+    instructions.extend(
+        f"replace the {observed_colors[square]} piece on "
+        f"{square_name(square)} with {_PIECE_NAMES[position[square]]}"
+        for square in wrong_colors
+        if observed_colors is not None
     )
     return ReconciliationResult(
         discrepancies,

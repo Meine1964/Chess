@@ -29,6 +29,7 @@ DisplayMode = Literal[
 ]
 PROJECTED_ON_LIGHT_SQUARE = QColor("#007fff")
 PROJECTED_ON_DARK_SQUARE = QColor("#00ffff")
+PROJECTED_LEGAL_MOVE = QColor("#ffffff")
 PROJECTED_ILLEGAL_MOVE = QColor("#ff0000")
 
 
@@ -288,12 +289,9 @@ class ProjectorWindow(QWidget):
             polygons = square_polygons(self._projector_grid)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             painter.setPen(Qt.PenStyle.NoPen)
-            for row, column, is_light in self._move_squares:
-                painter.setBrush(
-                    PROJECTED_ON_LIGHT_SQUARE
-                    if is_light
-                    else PROJECTED_ON_DARK_SQUARE
-                )
+            for move_square in self._move_squares:
+                row, column = move_square[:2]
+                painter.setBrush(PROJECTED_LEGAL_MOVE)
                 painter.drawPolygon(
                     self._polygon(polygons[row * 8 + column])
                 )

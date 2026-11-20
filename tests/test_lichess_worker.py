@@ -149,33 +149,29 @@ class PollingFallbackClient:
             ),
         )
 
-    def get_game_snapshot(
-        self,
-        game_id: str,
-    ) -> LichessPollingSnapshot:
-        assert game_id == "oozTO3xk"
-        state = LichessGameState(
-            (),
-            chess.STARTING_FEN,
-            "white",
-            0,
-            0,
-            0,
-            0,
-            "started",
-            None,
-            "*",
-        )
-        return LichessPollingSnapshot(
-            LichessGameFull(
-                game_id,
+class MultiplePollingGamesClient:
+    def __init__(self) -> None:
+        self.games = (
+            OngoingGame(
+                "oldGame1",
+                "oldGame1abcd",
+                "black",
                 chess.STARTING_FEN,
-                LichessPlayer("white", "Meine", 1500),
-                LichessPlayer("black", "Stockfish level 1", None),
-                state,
+                "Older opponent",
+                True,
             ),
-            False,
+            OngoingGame(
+                "newGame2",
+                "newGame2abcd",
+                "white",
+                chess.STARTING_FEN,
+                "Selected opponent",
+                False,
+            ),
         )
+
+    def get_ongoing_games(self) -> tuple[OngoingGame, ...]:
+        return self.games
 
 
 class SubmissionClient:
@@ -419,8 +415,8 @@ def test_worker_reports_when_account_stream_closes() -> None:
     assert statuses == [
         "Connected to Lichess; waiting for an active game.",
         (
-            "The Lichess account stream closed. "
-            "Using read-only polling instead."
+            "Live Lichess stream unavailable; using current-position "
+            "polling instead."
         ),
         "Connected to Lichess by polling; waiting for a game.",
     ]
@@ -441,7 +437,73 @@ def test_worker_falls_back_to_read_only_polling() -> None:
     worker.run()
 
     assert statuses == [
-        "Could not connect to Lichess. Using read-only polling instead."
+        "Live Lichess stream unavailable; using current-position polling "
+        "instead."
     ]
     assert account_events[0].game_id == "oozTO3xk"
     assert isinstance(game_events[0], LichessPollingSnapshot)
+
+
+def test_polling_waits_for_selection_when_multiple_games_are_active() -> None:
+    client = MultiplePollingGamesClient()
+    worker = LichessConnectionWorker(cast(LichessReadOnlyClient, client))
+    statuses: list[str] = []
+    ongoing: list[tuple[OngoingGame, ...]] = []
+    account_events: list[AccountGameEvent] = []
+    game_events: list[object] = []
+    worker.status_changed.connect(statuses.append)
+    worker.ongoing_games_received.connect(ongoing.append)
+    worker.account_event_received.connect(account_events.append)
+    worker.game_event_received.connect(game_events.append)
+
+    assert worker._poll_ongoing_game(None) is None
+
+    assert ongoing == [client.games]
+    assert game_events == []
+    assert account_events == []
+    assert statuses == [
+        "Multiple ongoing Lichess games found; select a game."
+    ]
+
+    worker.select_game("newGame2")
+
+    assert worker._poll_ongoing_game(None) == "newGame2"
+    assert isinstance(game_events[-1], LichessPollingSnapshot)
+    assert game_events[-1].game.game_id == "newGame2"
+    assert account_events[-1].game_id == "newGame2"
+
+
+def test_polling_cursor_appends_authoritative_last_move() -> None:
+    worker = LichessConnectionWorker(
+        cast(LichessReadOnlyClient, MultiplePollingGamesClient())
+    )
+    board = chess.Board()
+    for uci in ("e2e4", "e7e6", "g1f3", "d7d5", "b1c3"):
+        board.push_uci(uci)
+    before = OngoingGame(
+        "jgWZLWs6",
+        "jgWZLWs6abcd",
+        "white",
+        board.fen(),
+        "Stockfish level 1",
+        False,
+        "b1c3",
+    )
+
+    initial = worker._polling_snapshot(before)
+    board.push_uci("c7c6")
+    after = OngoingGame(
+        "jgWZLWs6",
+        "jgWZLWs6abcd",
+        "white",
+        board.fen(),
+        "Stockfish level 1",
+        True,
+        "c7c6",
+    )
+    current = worker._polling_snapshot(after)
+
+    assert initial.game.state.moves == ()
+    assert current.game.state.moves == ("c7c6",)
+    assert current.game.state.fen == board.fen()
+    assert current.game.state.turn == "white"

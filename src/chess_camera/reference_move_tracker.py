@@ -103,6 +103,19 @@ class ReferenceMoveTracker:
         self._camera_grid_remapped = False
         self.reset_activity()
 
+    def canonical_frame(
+        self,
+        frame: ImageArray,
+        camera_grid: FloatArray,
+        ui_quarter_turns: int,
+    ) -> ImageArray:
+        return _canonical_ui_board(
+            frame,
+            camera_grid,
+            ui_quarter_turns,
+            self._canonical_size,
+        )
+
     def set_canonical_reference(self, reference: ImageArray) -> None:
         if (
             reference.ndim != 3
