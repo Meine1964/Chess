@@ -310,6 +310,17 @@ accepted reference, initialize the synchronization cursor at the current
 server history, clear every red mark, and continue from the current position
 without replaying historical moves.
 
+While reconciliation is active, the reconciliation control shall read
+**Stop reconciliation**. Pressing it is an explicit user confirmation that the
+physical board visibly matches the authoritative Lichess position even when
+automatic camera comparison has not converged. The application shall then
+perform the same current-position adoption as an automatic match, using the
+current camera frame as the accepted reference, clearing red marks, and
+continuing synchronization from the current server history. If no calibrated
+current frame or required Lichess metadata is available, the application shall
+keep reconciliation active and report that manual acceptance cannot yet
+complete.
+
 The first live acceptance shall use a fresh Lichess game and a physical board
 in the standard starting position.
 
@@ -802,6 +813,9 @@ The ordinary-move, non-promotion capture, and castling slices are implemented:
   unchanged.
 - Stable live occupancy can adopt the authoritative current Lichess position,
   with confident opposite-color discrepancies marked red.
+- **Stop reconciliation** lets the user explicitly confirm a visibly matching
+  board and perform the same authoritative current-position adoption when
+  automatic camera comparison does not converge.
 - The active ordinary signature is the only legal signature offered to the
   reference tracker.
 - Guidance remains projected until confirmed board-or-halo activity, then the
@@ -819,7 +833,7 @@ The ordinary-move, non-promotion capture, and castling slices are implemented:
 - Promotions, en passant, and capture-promotions explicitly enter
   reconciliation until their staged slices are implemented.
 
-The validated automated suite contains 234 passing tests. Live ordinary-move,
+The validated automated suite contains 237 passing tests. Live ordinary-move,
 polling, reconciliation, and guidance acceptance has been exercised on the
 target camera/projector setup. Lichess capture and castling behavior is automated-test validated and awaits
 live acceptance. Promotions, en passant, and capture-promotions remain staged

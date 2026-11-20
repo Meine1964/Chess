@@ -593,6 +593,8 @@ queues one or more reported moves in server order, shows one pending move at a
 time in white on the physical UI board and projector, and commits the physical
 position and camera reference only after exact expected evidence. It also
 supports explicit game selection, automatic current-position reconciliation,
+manual trusted acceptance through **Stop reconciliation** when the visible
+board already matches Lichess,
 and ordinary/capture/castling local move submission. Promotions, en passant,
 and other special-move synchronization remain staged work.
 

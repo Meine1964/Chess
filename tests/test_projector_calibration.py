@@ -849,6 +849,18 @@ def test_reconciliation_adopts_current_lichess_position_and_history() -> None:
         _legal_game=LegalGame(),
         _persist_piece_position=MagicMock(),
         _persist_move_reference=MagicMock(),
+        _black_projector=MagicMock(),
+        _occupancy_detector=MagicMock(),
+    )
+    window._complete_physical_reconciliation = (
+        lambda target_position, lichess_game, completion_message: (
+            CameraWindow._complete_physical_reconciliation(
+                window,
+                target_position,
+                lichess_game,
+                completion_message,
+            )
+        )
     )
 
     CameraWindow._update_physical_reconciliation(
@@ -866,6 +878,79 @@ def test_reconciliation_adopts_current_lichess_position_and_history() -> None:
     window._persist_piece_position.assert_called_once_with(server_game.position)
     window._persist_move_reference.assert_called_once_with()
     assert window._reconciliation_requested is False
+
+
+def test_stop_reconciliation_accepts_current_authoritative_position() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    target_position = {(0, 4): "k", (7, 4): "K"}
+    lichess_game = object()
+    complete = MagicMock()
+    window = SimpleNamespace(
+        _physical_reconciliation_target=MagicMock(
+            return_value=(target_position, lichess_game)
+        ),
+        _latest_frame=np.zeros((20, 20, 3), dtype=np.uint8),
+        _calibration_result=object(),
+        _lichess_player_color="white",
+        _complete_physical_reconciliation=complete,
+    )
+
+    CameraWindow._accept_current_physical_reconciliation(window)
+
+    complete.assert_called_once_with(
+        target_position,
+        lichess_game,
+        "Reconciliation stopped by user; current position accepted.",
+    )
+
+
+def test_active_reconciliation_button_stops_instead_of_restarting() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    accept = MagicMock()
+    window = SimpleNamespace(
+        _reconciliation_requested=True,
+        _accept_current_physical_reconciliation=accept,
+    )
+
+    CameraWindow._toggle_physical_reconciliation(window)
+
+    accept.assert_called_once_with()
+
+
+def test_reconciliation_button_changes_to_stop_action() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    window = SimpleNamespace(
+        _reconciliation_requested=False,
+        _reconciliation_blackout_pending=False,
+        _reconciliation_blackout_generation=0,
+        _reconcile_button=MagicMock(),
+        _board_widget=MagicMock(),
+        _last_rejected_move=object(),
+        _black_projector=MagicMock(),
+        _occupancy_detector=MagicMock(),
+        _reference_move_tracker=MagicMock(),
+        _occupancy_status=MagicMock(),
+        _piece_status=MagicMock(),
+    )
+
+    CameraWindow._begin_physical_reconciliation(window, "Starting.")
+
+    window._reconcile_button.setText.assert_called_once_with(
+        "Stop reconciliation"
+    )
+    assert window._reconciliation_requested is True
 
 
 def test_reconciliation_projects_and_draws_every_mismatch(

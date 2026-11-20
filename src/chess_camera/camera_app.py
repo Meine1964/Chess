@@ -2943,17 +2943,7 @@ class CameraWindow(QMainWindow):
 
     def _toggle_physical_reconciliation(self) -> None:
         if self._reconciliation_requested:
-            self._reconciliation_requested = False
-            self._reconciliation_blackout_pending = False
-            self._reconciliation_blackout_generation += 1
-            self._reconcile_button.setText("Reconcile physical board")
-            self._black_projector()
-            self._occupancy_detector.reset()
-            self._reference_move_tracker.reset_activity()
-            self._board_widget.set_reconciliation_squares(())
-            self._occupancy_status.setText(
-                "Physical-board reconciliation cancelled."
-            )
+            self._accept_current_physical_reconciliation()
             return
         if (
             self._calibration_result is None
@@ -2969,6 +2959,30 @@ class CameraWindow(QMainWindow):
             "Reconciliation started; checking stable physical occupancy."
         )
 
+    def _accept_current_physical_reconciliation(self) -> None:
+        target_position, lichess_game = self._physical_reconciliation_target()
+        if self._latest_frame is None or self._calibration_result is None:
+            QMessageBox.warning(
+                self,
+                "Stop reconciliation",
+                "A calibrated current camera frame is required before the "
+                "board can be accepted.",
+            )
+            return
+        if lichess_game is not None and self._lichess_player_color is None:
+            QMessageBox.warning(
+                self,
+                "Stop reconciliation",
+                "Lichess game metadata is not available yet. Wait for the "
+                "connection update, then try again.",
+            )
+            return
+        self._complete_physical_reconciliation(
+            target_position,
+            lichess_game,
+            "Reconciliation stopped by user; current position accepted.",
+        )
+
     def _begin_physical_reconciliation(
         self,
         occupancy_message: str,
@@ -2976,7 +2990,7 @@ class CameraWindow(QMainWindow):
         self._reconciliation_requested = True
         self._reconciliation_blackout_pending = False
         self._reconciliation_blackout_generation += 1
-        self._reconcile_button.setText("Cancel reconciliation")
+        self._reconcile_button.setText("Stop reconciliation")
         self._board_widget.set_illegal_source(None)
         self._board_widget.set_guidance_move(None)
         self._board_widget.set_reconciliation_squares(())
@@ -3045,7 +3059,6 @@ class CameraWindow(QMainWindow):
                 raise RuntimeError(
                     "Reconciliation matched without a calibrated frame."
                 )
-            adopted_controller: LichessGameController | None = None
             if lichess_game is not None:
                 if self._lichess_player_color is None:
                     self._occupancy_status.setText(
@@ -3053,47 +3066,10 @@ class CameraWindow(QMainWindow):
                         "reconciliation will retry."
                     )
                     return
-                adopted_controller = LichessGameController(
-                    lichess_game.game_id,
-                    lichess_game.initial_fen,
-                    self._lichess_player_color,
-                    self._lichess_opponent_name,
-                    physical_fen=lichess_game.state.fen,
-                )
-                update = adopted_controller.accept_server_history(
-                    lichess_game.state.moves
-                )
-                if update.state not in ("synchronized", "game-complete"):
-                    raise RuntimeError(
-                        "The reconciled Lichess history did not attach: "
-                        f"{update.message}"
-                    )
-            self._reference_move_tracker.set_reference(
-                self._latest_frame,
-                self._calibration_result.mapping.camera_grid,
-                self._board_quarter_turns,
-            )
-            if lichess_game is not None and adopted_controller is not None:
-                self._piece_synchronizer.restore(target_position)
-                self._legal_game = LegalGame(lichess_game.state.fen)
-                self._lichess_game_controller = adopted_controller
-                self._board_widget.set_pieces(target_position)
-                self._board_widget.set_occupied_squares(target_position)
-                self._persist_piece_position(target_position)
-                self._lichess_sync_status.setText(update.message)
-            self._persist_move_reference()
-            self._reconciliation_requested = False
-            self._reconciliation_blackout_pending = False
-            self._reconciliation_blackout_generation += 1
-            self._reconcile_button.setText("Reconcile physical board")
-            self._board_widget.set_reconciliation_squares(())
-            self._occupancy_status.setText(
-                "Reconciliation complete; accepted reference replaced."
-            )
-            self._piece_status.setText(
-                _accepted_position_message(self._legal_game)
-                if self._game_mode == "offline-game"
-                else "Physical and UI piece positions are synchronized."
+            self._complete_physical_reconciliation(
+                target_position,
+                lichess_game,
+                "Reconciliation complete; accepted reference replaced.",
             )
             return
         self._occupancy_status.setText(
@@ -3127,6 +3103,69 @@ class CameraWindow(QMainWindow):
             "Projecting all occupancy mismatches in red for 2 seconds."
         )
         QTimer.singleShot(2000, self._finish_reconciliation_projection)
+
+    def _complete_physical_reconciliation(
+        self,
+        target_position: Position,
+        lichess_game: LichessGameFull | None,
+        completion_message: str,
+    ) -> None:
+        if self._latest_frame is None or self._calibration_result is None:
+            raise RuntimeError(
+                "Reconciliation completed without a calibrated frame."
+            )
+        adopted_controller: LichessGameController | None = None
+        synchronization_message: str | None = None
+        if lichess_game is not None:
+            if self._lichess_player_color is None:
+                raise RuntimeError(
+                    "Reconciliation completed without Lichess player metadata."
+                )
+            adopted_controller = LichessGameController(
+                lichess_game.game_id,
+                lichess_game.initial_fen,
+                self._lichess_player_color,
+                self._lichess_opponent_name,
+                physical_fen=lichess_game.state.fen,
+            )
+            update = adopted_controller.accept_server_history(
+                lichess_game.state.moves
+            )
+            if update.state not in ("synchronized", "game-complete"):
+                raise RuntimeError(
+                    "The reconciled Lichess history did not attach: "
+                    f"{update.message}"
+                )
+            synchronization_message = update.message
+        self._reference_move_tracker.set_reference(
+            self._latest_frame,
+            self._calibration_result.mapping.camera_grid,
+            self._board_quarter_turns,
+        )
+        if lichess_game is not None and adopted_controller is not None:
+            self._piece_synchronizer.restore(target_position)
+            self._legal_game = LegalGame(lichess_game.state.fen)
+            self._lichess_game_controller = adopted_controller
+            self._board_widget.set_pieces(target_position)
+            self._board_widget.set_occupied_squares(target_position)
+            self._persist_piece_position(target_position)
+            if synchronization_message is not None:
+                self._lichess_sync_status.setText(synchronization_message)
+        self._persist_move_reference()
+        self._reconciliation_requested = False
+        self._reconciliation_blackout_pending = False
+        self._reconciliation_blackout_generation += 1
+        self._reconcile_button.setText("Reconcile physical board")
+        self._black_projector()
+        self._occupancy_detector.reset()
+        self._reference_move_tracker.reset_activity()
+        self._board_widget.set_reconciliation_squares(())
+        self._occupancy_status.setText(completion_message)
+        self._piece_status.setText(
+            _accepted_position_message(self._legal_game)
+            if self._game_mode == "offline-game"
+            else "Physical and UI piece positions are synchronized."
+        )
 
     def _physical_reconciliation_target(
         self,
