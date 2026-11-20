@@ -10,6 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from src.chess_camera.chessboard_widget import (
     ChessboardWidget,
     LICHESS_DARK,
+    LICHESS_ILLEGAL,
     LICHESS_LIGHT,
     rotate_square,
     square_at_position,
@@ -120,4 +121,32 @@ def test_widget_persists_last_move_source_and_destination_highlight(
     assert widget.last_move is None
     with pytest.raises(ValueError, match="inside the 8x8 board"):
         widget.set_last_move(((4, 4), (8, 4)))
+    widget.close()
+
+
+def test_widget_marks_illegal_source_without_moving_piece(
+    application: QApplication,
+) -> None:
+    widget = ChessboardWidget()
+    widget.resize(320, 320)
+    position = standard_position()
+    widget.set_pieces(position)
+    widget.set_illegal_source((7, 6))
+    widget.show()
+    application.processEvents()
+
+    image = widget.grab().toImage()
+    marked_square_colors = {
+        QColor(image.pixel(x, y)).name()
+        for x in range(240, 280)
+        for y in range(280, 320)
+    }
+
+    assert widget.illegal_source == (7, 6)
+    assert widget.pieces == position
+    assert LICHESS_ILLEGAL.name() in marked_square_colors
+    widget.set_illegal_source(None)
+    assert widget.illegal_source is None
+    with pytest.raises(ValueError, match="inside the 8x8 board"):
+        widget.set_illegal_source((8, 0))
     widget.close()

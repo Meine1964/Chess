@@ -8,7 +8,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from src.chess_camera.projector import (
     PROJECTED_ON_DARK_SQUARE,
+    PROJECTED_ILLEGAL_MOVE,
     PROJECTED_ON_LIGHT_SQUARE,
+    PROJECTED_CORRECT_SQUARE,
     ProjectorWindow,
     focus_pattern,
     target_rectangle,
@@ -140,4 +142,17 @@ def test_projector_renders_patterns_and_calibrated_squares(
     assert move_image.pixelColor(115, 64) == PROJECTED_ON_LIGHT_SQUARE
     assert move_image.pixelColor(205, 99) == PROJECTED_ON_DARK_SQUARE
     assert move_image.pixelColor(145, 64).red() == 0
+
+    window.show_illegal_square(2, 3)
+    application.processEvents()
+    illegal_image = window.grab().toImage()
+    assert illegal_image.pixelColor(145, 64) == PROJECTED_ILLEGAL_MOVE
+    assert illegal_image.pixelColor(175, 64).red() == 0
+
+    window.show_correction((2, 3), (4, 5))
+    application.processEvents()
+    correction_image = window.grab().toImage()
+    assert correction_image.pixelColor(145, 64) == PROJECTED_ILLEGAL_MOVE
+    assert correction_image.pixelColor(205, 99) == PROJECTED_CORRECT_SQUARE
+    assert correction_image.pixelColor(175, 64).red() == 0
     window.close()

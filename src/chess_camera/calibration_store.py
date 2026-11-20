@@ -216,3 +216,35 @@ class CalibrationStore:
             raise ValueError(
                 f"Saved projector calibration in {source} is invalid: {error}"
             ) from error
+
+    def saved_projector_display(
+        self,
+    ) -> tuple[str, tuple[int, int]] | None:
+        source = self._root / "latest.json"
+        if not source.exists():
+            return None
+        try:
+            metadata = json.loads(source.read_text(encoding="utf-8"))
+            if metadata["schema_version"] != 1:
+                raise ValueError("Unsupported calibration schema version.")
+            projector = metadata["projector"]
+            name = str(projector["name"])
+            resolution = (
+                int(projector["width"]),
+                int(projector["height"]),
+            )
+            if not name or resolution[0] <= 0 or resolution[1] <= 0:
+                raise ValueError(
+                    "Saved projector display metadata is invalid."
+                )
+            return name, resolution
+        except (
+            OSError,
+            json.JSONDecodeError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as error:
+            raise ValueError(
+                f"Saved projector calibration in {source} is invalid: {error}"
+            ) from error

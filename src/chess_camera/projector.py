@@ -24,9 +24,13 @@ DisplayMode = Literal[
     "squares",
     "selected_square",
     "move",
+    "illegal",
+    "correction",
 ]
 PROJECTED_ON_LIGHT_SQUARE = QColor("#007fff")
 PROJECTED_ON_DARK_SQUARE = QColor("#00ffff")
+PROJECTED_ILLEGAL_MOVE = QColor("#ff0000")
+PROJECTED_CORRECT_SQUARE = QColor("#ffffff")
 
 
 def focus_pattern(
@@ -97,6 +101,11 @@ class ProjectorWindow(QWidget):
         self._projector_grid: NDArray[np.float32] | None = None
         self._selected_square: tuple[int, int] | None = None
         self._selected_square_is_light: bool | None = None
+        self._illegal_square: tuple[int, int] | None = None
+        self._correction_squares: tuple[
+            tuple[int, int],
+            tuple[int, int],
+        ] | None = None
         self._move_squares: tuple[
             tuple[int, int, bool],
             tuple[int, int, bool],
@@ -221,6 +230,35 @@ class ProjectorWindow(QWidget):
         self._display_mode = "move"
         self.update()
 
+    def show_illegal_square(
+        self,
+        row: int,
+        column: int,
+    ) -> None:
+        if self._projector_grid is None:
+            raise RuntimeError("No calibrated projector grid is available.")
+        if not 0 <= row < 8 or not 0 <= column < 8:
+            raise ValueError("Projected square must be inside the 8x8 board.")
+        self._illegal_square = (row, column)
+        self._display_mode = "illegal"
+        self.update()
+
+    def show_correction(
+        self,
+        incorrect: tuple[int, int],
+        correct: tuple[int, int],
+    ) -> None:
+        if self._projector_grid is None:
+            raise RuntimeError("No calibrated projector grid is available.")
+        for row, column in (incorrect, correct):
+            if not 0 <= row < 8 or not 0 <= column < 8:
+                raise ValueError(
+                    "Projected correction squares must be inside the board."
+                )
+        self._correction_squares = (incorrect, correct)
+        self._display_mode = "correction"
+        self.update()
+
     def paintEvent(self, event: QPaintEvent) -> None:
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor(0, 0, 0))
@@ -292,6 +330,34 @@ class ProjectorWindow(QWidget):
                 painter.drawPolygon(
                     self._polygon(polygons[row * 8 + column])
                 )
+        elif (
+            self._display_mode == "illegal"
+            and self._projector_grid is not None
+            and self._illegal_square is not None
+        ):
+            row, column = self._illegal_square
+            polygon = square_polygons(self._projector_grid)[row * 8 + column]
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(PROJECTED_ILLEGAL_MOVE)
+            painter.drawPolygon(self._polygon(polygon))
+        elif (
+            self._display_mode == "correction"
+            and self._projector_grid is not None
+            and self._correction_squares is not None
+        ):
+            incorrect, correct = self._correction_squares
+            polygons = square_polygons(self._projector_grid)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(PROJECTED_ILLEGAL_MOVE)
+            painter.drawPolygon(
+                self._polygon(polygons[incorrect[0] * 8 + incorrect[1]])
+            )
+            painter.setBrush(PROJECTED_CORRECT_SQUARE)
+            painter.drawPolygon(
+                self._polygon(polygons[correct[0] * 8 + correct[1]])
+            )
         painter.end()
         event.accept()
 

@@ -18,6 +18,7 @@ from .chess_position import PieceCode, Position, piece_asset_filename
 LICHESS_LIGHT = QColor("#f0d9b5")
 LICHESS_DARK = QColor("#b58863")
 LICHESS_SELECTED = QColor("#d7da4f")
+LICHESS_ILLEGAL = QColor("#ef5350")
 _LAST_MOVE_LIGHTENING = 135
 _PIECE_ASSET_DIRECTORY = (
     Path(__file__).resolve().parent / "assets" / "pieces" / "cburnett"
@@ -63,6 +64,7 @@ class ChessboardWidget(QWidget):
         super().__init__()
         self._selected_square: tuple[int, int] | None = None
         self._last_move: tuple[tuple[int, int], tuple[int, int]] | None = None
+        self._illegal_source: tuple[int, int] | None = None
         self._occupied_squares: frozenset[tuple[int, int]] = frozenset()
         self._pieces: Position = {}
         self._piece_renderers: dict[PieceCode, QSvgRenderer] = {}
@@ -111,6 +113,25 @@ class ChessboardWidget(QWidget):
         if move == self._last_move:
             return
         self._last_move = move
+        self.update()
+
+    @property
+    def illegal_source(self) -> tuple[int, int] | None:
+        return self._illegal_source
+
+    def set_illegal_source(
+        self,
+        square: tuple[int, int] | None,
+    ) -> None:
+        if square is not None:
+            row, column = square
+            if not 0 <= row < 8 or not 0 <= column < 8:
+                raise ValueError(
+                    "Illegal-move source must be inside the 8x8 board."
+                )
+        if square == self._illegal_source:
+            return
+        self._illegal_source = square
         self.update()
 
     @property
@@ -206,6 +227,12 @@ class ChessboardWidget(QWidget):
                     painter.fillRect(rectangle, LICHESS_SELECTED)
                     painter.setPen(
                         QPen(QColor("#c62828"), max(2.0, square_size * 0.05))
+                    )
+                    painter.drawRect(rectangle.adjusted(2, 2, -2, -2))
+                if self._illegal_source == (row, column):
+                    painter.fillRect(rectangle, LICHESS_ILLEGAL)
+                    painter.setPen(
+                        QPen(QColor("#b71c1c"), max(2.0, square_size * 0.07))
                     )
                     painter.drawRect(rectangle.adjusted(2, 2, -2, -2))
                 piece = self._pieces.get((row, column))

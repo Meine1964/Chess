@@ -669,6 +669,10 @@ The current interface contains:
 - **Focus pattern** action showing a native-resolution black/white checkerboard
   with a central cross for manual optical focus adjustment.
 - Remembered projector display and target settings.
+- Live display-list refresh when a screen is connected or disconnected.
+- Automatic reselection and calibration reactivation when the saved projector
+  identity and resolution return. A display selected while that projector was
+  absent shall not take precedence over the calibrated display.
 - **Full projector calibration** and cancel actions.
 - Calibration phase, progress, success, and failure status.
 - **Project 8x8 grid** and **Project all 64 squares** actions.

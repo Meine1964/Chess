@@ -9,6 +9,7 @@
 - [Projector/camera chessboard system](./projector-camera-chessboard-specification.md)
 - [Chess-square occupancy and UI marking](./chess-square-occupancy-ui-specification.md)
 - [Chess-piece UI rendering and move synchronization](./chess-piece-ui-tracking-specification.md)
+- [Lichess physical-board integration roadmap](./lichess-integration-roadmap.md)
 
 ## 1. Purpose
 
@@ -242,6 +243,25 @@ small camera-grid remap shall be removed. Those residuals shall not be joined
 into a false board-sized obstruction. The shape filter shall retain broad,
 filled regions produced by a hand, arm, or other real obstruction.
 
+A component shall count as covering a square only when a meaningful fraction
+of that square's pixels belongs to the component. Its rectangular bounding box
+shall not determine the covered-square count, because a wide piece silhouette
+may slightly cross a neighboring square boundary without occupying that square.
+
+A sufficiently large filled region spanning two adjacent squares shall also
+remain obstructed. Before accepting a candidate, source and destination change
+footprints shall be compatible with a released physical piece. A hand-sized
+single-square footprint or a destination footprint grossly larger than the
+vacated source shall remain `waiting-for-clear`. These checks shall not add a
+fixed post-motion delay.
+
+Obstruction classification shall not reject a settled frame solely because the
+connected source and destination silhouettes are large. Candidate squares
+shall first be localized, then excluded from the general obstruction mask.
+Obstruction evidence elsewhere on the board shall continue to block the move.
+The released-piece footprint bound shall accommodate the largest normal chess
+piece while remaining below the tested hand-sized footprint.
+
 Skin-color detection shall not be required.
 
 ## 9. Board-Clear Detection
@@ -314,7 +334,12 @@ A candidate one-piece relocation requires:
 No chess movement rule shall constrain the source/destination pair.
 
 If more than two squares remain materially changed after normalization and
-boundary suppression, the observation shall be ambiguous.
+boundary suppression, the observation shall normally be ambiguous. A
+high-scoring square adjacent to the provisional source may be treated as a
+silhouette residual only when it is logically occupied by the opposite color
+and its current lower/base color signature still matches the accepted
+reference. This targeted check confirms that the competing piece remains in
+place; logical color alone shall not suppress the ambiguity.
 
 ## 13. Targeted Vacancy Tests
 

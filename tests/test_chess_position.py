@@ -40,6 +40,16 @@ def test_synchronizer_moves_one_piece_from_source_to_destination() -> None:
     assert moved.message == "Moved e2-e4."
 
 
+def test_synchronizer_diagnostic_move_does_not_require_legality() -> None:
+    synchronizer = PiecePositionSynchronizer()
+    synchronizer.observe(starting_occupied_squares())
+
+    moved = synchronizer.accept_move((7, 6), (5, 6))
+
+    assert moved.move == ((7, 6), (5, 6))
+    assert moved.position[(5, 6)] == "N"
+
+
 def test_synchronizer_rejects_source_only_capture_evidence() -> None:
     synchronizer = PiecePositionSynchronizer()
     starting = starting_occupied_squares()

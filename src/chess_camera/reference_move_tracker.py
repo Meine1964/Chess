@@ -151,16 +151,20 @@ class ReferenceMoveTracker:
                 )
         self._previous_motion_image = motion_image
 
-        if _has_large_obstruction(self._reference, normalized):
-            self._clear_pending()
-            return ReferenceTrackerUpdate(
-                "waiting-for-clear",
-                None,
-                "A hand or object still obscures multiple board squares.",
-            )
+        has_large_obstruction = _has_large_obstruction(
+            self._reference,
+            normalized,
+        )
 
         self._settled_count += 1
         if self._settled_count < self._settled_observations:
+            if has_large_obstruction:
+                return ReferenceTrackerUpdate(
+                    "waiting-for-clear",
+                    None,
+                    "A hand or object may still obscure multiple board squares; "
+                    "confirming the settled image.",
+                )
             return ReferenceTrackerUpdate(
                 "settling",
                 None,
@@ -169,6 +173,14 @@ class ReferenceMoveTracker:
 
         scores = square_change_scores(self._reference, normalized)
         if float(np.max(scores)) < self._minimum_square_change:
+            if has_large_obstruction:
+                self._clear_pending()
+                return ReferenceTrackerUpdate(
+                    "waiting-for-clear",
+                    None,
+                    "A hand or object still obscures multiple board squares.",
+                    scores,
+                )
             self._clear_pending()
             return ReferenceTrackerUpdate(
                 "watching",
@@ -176,14 +188,50 @@ class ReferenceMoveTracker:
                 "Board matches the accepted reference.",
                 scores,
             )
-        move = self._select_move(scores, position)
+        move = self._select_move(
+            scores,
+            position,
+            self._reference,
+            normalized,
+        )
         if move is None:
             self._candidate_move = None
             self._candidate_count = 0
+            if has_large_obstruction:
+                return ReferenceTrackerUpdate(
+                    "waiting-for-clear",
+                    None,
+                    "A hand or object still obscures multiple board squares.",
+                    scores,
+                )
             return ReferenceTrackerUpdate(
                 "ambiguous",
                 None,
                 _ambiguous_change_message(scores),
+                scores,
+            )
+        if _has_large_obstruction(
+            self._reference,
+            normalized,
+            ignored_squares=move,
+        ):
+            self._clear_pending()
+            return ReferenceTrackerUpdate(
+                "waiting-for-clear",
+                None,
+                "A hand or object still obscures multiple board squares.",
+                scores,
+            )
+        if not _has_released_piece_footprint(
+            self._reference,
+            normalized,
+            move,
+        ):
+            self._clear_pending()
+            return ReferenceTrackerUpdate(
+                "waiting-for-clear",
+                None,
+                "A hand or object still covers the moved piece.",
                 scores,
             )
         if move == self._candidate_move:
@@ -218,10 +266,34 @@ class ReferenceMoveTracker:
         self.reset_activity()
         self._reference = accepted_reference
 
+    def rejected_move_is_restored(
+        self,
+        update: ReferenceTrackerUpdate,
+        move: tuple[Square, Square],
+    ) -> bool:
+        if (
+            update.state not in ("watching", "ambiguous")
+            or update.change_scores is None
+        ):
+            return False
+        source, _destination = move
+        scores = np.asarray(update.change_scores, dtype=np.float32).copy()
+        if scores.shape != (8, 8):
+            raise ValueError("Change scores must describe an 8x8 board.")
+        source_score = float(scores[source])
+        scores[source] = 0
+        return (
+            source_score
+            < self._minimum_square_change * 1.5
+            and float(np.max(scores)) < self._minimum_square_change
+        )
+
     def _select_move(
         self,
         scores: FloatArray,
         position: Position,
+        reference: ImageArray,
+        candidate: ImageArray,
     ) -> tuple[Square, Square] | None:
         occupied = set(position)
         if not occupied:
@@ -261,11 +333,24 @@ class ReferenceMoveTracker:
         remaining = scores.copy()
         remaining[source] = 0
         remaining[destination] = 0
-        if float(np.max(remaining)) > max(
+        remaining_limit = max(
             self._minimum_square_change,
             min(source_score, destination_score) * 0.75,
-        ):
-            return None
+        )
+        for row in range(8):
+            for column in range(8):
+                square = (row, column)
+                if (
+                    float(remaining[square]) > remaining_limit
+                    and not _is_retained_opposite_piece_residual(
+                        reference,
+                        candidate,
+                        square,
+                        source,
+                        position,
+                    )
+                ):
+                    return None
         return source, destination
 
     def _clear_pending(self) -> None:
@@ -350,12 +435,19 @@ def _register_small_translation(
 def _has_large_obstruction(
     reference: ImageArray,
     candidate: ImageArray,
+    ignored_squares: tuple[Square, ...] = (),
 ) -> bool:
     difference = cv2.absdiff(
         cv2.cvtColor(reference, cv2.COLOR_BGR2GRAY),
         cv2.cvtColor(candidate, cv2.COLOR_BGR2GRAY),
     )
     mask = np.asarray(difference > 24, dtype=np.uint8) * 255
+    square_size = reference.shape[0] // 8
+    for row, column in ignored_squares:
+        mask[
+            row * square_size : (row + 1) * square_size,
+            column * square_size : (column + 1) * square_size,
+        ] = 0
     mask = cv2.morphologyEx(
         mask,
         cv2.MORPH_OPEN,
@@ -366,19 +458,106 @@ def _has_large_obstruction(
         cv2.MORPH_CLOSE,
         np.ones((9, 9), dtype=np.uint8),
     )
-    component_count, _labels, statistics, _centroids = (
+    component_count, labels, statistics, _centroids = (
         cv2.connectedComponentsWithStats(mask)
     )
-    square_size = reference.shape[0] / 8
+    minimum_square_pixels = square_size * square_size * 0.15
     for component in range(1, component_count):
-        x, y, width, height, area = statistics[component]
-        columns = int(np.ceil((x + width) / square_size) - x // square_size)
-        rows = int(np.ceil((y + height) / square_size) - y // square_size)
-        if area >= reference.shape[0] * reference.shape[1] * 0.0125 and (
-            rows * columns >= 3
+        area = statistics[component, cv2.CC_STAT_AREA]
+        covered_squares = sum(
+            np.count_nonzero(
+                labels[
+                    row * square_size : (row + 1) * square_size,
+                    column * square_size : (column + 1) * square_size,
+                ]
+                == component
+            )
+            >= minimum_square_pixels
+            for row in range(8)
+            for column in range(8)
+        )
+        board_area = reference.shape[0] * reference.shape[1]
+        if (
+            area >= board_area * 0.0125
+            and covered_squares >= 3
+        ) or (
+            area >= board_area * 0.02
+            and covered_squares >= 2
         ):
             return True
     return False
+
+
+def _has_released_piece_footprint(
+    reference: ImageArray,
+    candidate: ImageArray,
+    move: tuple[Square, Square],
+) -> bool:
+    difference = cv2.absdiff(
+        cv2.cvtColor(reference, cv2.COLOR_BGR2GRAY),
+        cv2.cvtColor(candidate, cv2.COLOR_BGR2GRAY),
+    )
+    mask = np.asarray(difference > 24, dtype=np.uint8)
+    mask = cv2.morphologyEx(
+        mask,
+        cv2.MORPH_OPEN,
+        np.ones((3, 3), dtype=np.uint8),
+    )
+    square_size = reference.shape[0] // 8
+    changed_fractions: list[float] = []
+    for row, column in move:
+        region = mask[
+            row * square_size : (row + 1) * square_size,
+            column * square_size : (column + 1) * square_size,
+        ]
+        changed_fractions.append(float(np.mean(region)))
+    source_fraction, destination_fraction = changed_fractions
+    if source_fraction <= 0 or destination_fraction <= 0:
+        return False
+    if max(source_fraction, destination_fraction) > 0.7:
+        return False
+    ratio = destination_fraction / source_fraction
+    return 0.33 <= ratio <= 3.0
+
+
+def _is_retained_opposite_piece_residual(
+    reference: ImageArray,
+    candidate: ImageArray,
+    square: Square,
+    source: Square,
+    position: Position,
+) -> bool:
+    retained_piece = position.get(square)
+    moving_piece = position.get(source)
+    if (
+        retained_piece is None
+        or moving_piece is None
+        or retained_piece.isupper() == moving_piece.isupper()
+        or max(
+            abs(square[0] - source[0]),
+            abs(square[1] - source[1]),
+        )
+        > 1
+    ):
+        return False
+    square_size = reference.shape[0] // 8
+    row, column = square
+    top = row * square_size
+    left = column * square_size
+    reference_lab = cv2.cvtColor(reference, cv2.COLOR_BGR2LAB)
+    candidate_lab = cv2.cvtColor(candidate, cv2.COLOR_BGR2LAB)
+    reference_base = reference_lab[
+        top + round(square_size * 0.55) : top + round(square_size * 0.9),
+        left + round(square_size * 0.25) : left + round(square_size * 0.75),
+    ]
+    candidate_base = candidate_lab[
+        top + round(square_size * 0.55) : top + round(square_size * 0.9),
+        left + round(square_size * 0.25) : left + round(square_size * 0.75),
+    ]
+    base_difference = float(
+        np.mean(cv2.absdiff(reference_base, candidate_base)) / 255
+    )
+    return base_difference <= 0.055
 
 
 def square_change_scores(

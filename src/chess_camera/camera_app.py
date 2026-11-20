@@ -53,10 +53,12 @@ from .chess_position import (
     PieceCode,
     PiecePositionSynchronizer,
     Position,
+    square_name,
     starting_occupied_squares,
 )
 from .chessboard_widget import ChessboardWidget, rotate_square
 from .diagnostics import DiagnosticStore
+from .legal_game import GameMode, LegalGame, LegalMoveResult
 from .occupancy import (
     SquareOccupancyDetector,
     detect_starting_position_orientation,
@@ -79,6 +81,8 @@ _PROJECTOR_X_SETTING = "projector/target_x_percent"
 _PROJECTOR_Y_SETTING = "projector/target_y_percent"
 _PROJECTOR_SIZE_SETTING = "projector/target_size_percent"
 _PIECE_POSITION_SETTING = "pieces/accepted_position"
+_GAME_MODE_SETTING = "game/mode"
+_LEGAL_GAME_FEN_SETTING = "game/offline_fen"
 _BOARD_ORIENTATION_SETTING = "board/automatic_clockwise_quarter_turns"
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _INTEGRATED_CAMERA_TERMS = (
@@ -89,6 +93,58 @@ _INTEGRATED_CAMERA_TERMS = (
     "internal",
     "user facing",
 )
+
+
+def _turn_indicator_state(
+    game_mode: GameMode,
+    legal_game: LegalGame,
+) -> tuple[str, str] | None:
+    if game_mode != "offline-game":
+        return None
+    status = legal_game.status
+    if status.is_game_over:
+        return "#808080", f"Game over: {status.result}"
+    if status.turn == "white":
+        return "#ffffff", "White to move"
+    return "#000000", "Black to move"
+
+
+def _illegal_correction_message(
+    move: tuple[tuple[int, int], tuple[int, int]],
+    legal_game: LegalGame,
+) -> str:
+    source, destination = move
+    source_name = square_name(source)
+    destination_name = square_name(destination)
+    turn = legal_game.status.turn.capitalize()
+    legal_destinations = legal_game.legal_destinations(source)
+    prefix = (
+        f"Illegal physical move {source_name}-{destination_name} rejected. "
+        f"The physical piece is on {destination_name}; the accepted position "
+        f"requires it on {source_name}. {turn} to move. "
+    )
+    if not legal_destinations:
+        return (
+            f"{prefix}This piece has no legal move now. Return it from "
+            f"{destination_name} to {source_name}, then make a {turn} move."
+        )
+    destination_list = ", ".join(
+        square_name(square) for square in legal_destinations
+    )
+    return (
+        f"{prefix}Move it from {destination_name} back to {source_name}, "
+        f"or directly to a legal destination: {destination_list}."
+    )
+
+
+def _accepted_position_message(legal_game: LegalGame) -> str:
+    status = legal_game.status
+    if status.is_game_over:
+        return f"Board matches the accepted position. Game over: {status.result}."
+    return (
+        "Board matches the accepted position. "
+        f"{status.turn.capitalize()} to move."
+    )
 
 
 def _is_external_camera(
@@ -236,10 +292,15 @@ class CameraWindow(QMainWindow):
         self._occupancy_detector = SquareOccupancyDetector()
         self._reference_move_tracker = ReferenceMoveTracker()
         self._piece_synchronizer = PiecePositionSynchronizer()
+        self._legal_game = LegalGame()
+        self._game_mode: GameMode = "diagnostic"
         self._latest_stable_occupied_ui: (
             frozenset[tuple[int, int]] | None
         ) = None
         self._reset_to_start_requested = False
+        self._last_rejected_move: (
+            tuple[tuple[int, int], tuple[int, int]] | None
+        ) = None
         self._camera_only_calibration = False
         self._camera_geometry_ready = False
         self._calibration_result: CalibrationResult | None = None
@@ -261,6 +322,7 @@ class CameraWindow(QMainWindow):
         self._preview.setStyleSheet("background: #202020;")
         self._board_widget = ChessboardWidget()
         self._restore_piece_position()
+        self._restore_game_mode()
         self._board_widget.setEnabled(False)
         self._board_widget.square_clicked.connect(self._board_square_clicked)
         self._board_quarter_turns = int(
@@ -278,10 +340,26 @@ class CameraWindow(QMainWindow):
         if selected_index is not None:
             self._camera_selector.setCurrentIndex(selected_index)
         self._camera_selector.setEnabled(bool(self._devices))
+        self._game_mode_selector = QComboBox()
+        self._game_mode_selector.addItem("Diagnostic movement", "diagnostic")
+        self._game_mode_selector.addItem("Offline legal game", "offline-game")
+        self._game_mode_selector.setCurrentIndex(
+            1 if self._game_mode == "offline-game" else 0
+        )
+        self._game_mode_selector.currentIndexChanged.connect(
+            self._game_mode_changed
+        )
+        self._turn_indicator = QLabel()
+        self._turn_indicator.setFixedSize(22, 22)
 
         camera_layout = QHBoxLayout()
         camera_layout.addWidget(QLabel("Camera:"))
         camera_layout.addWidget(self._camera_selector, stretch=1)
+        camera_layout.addWidget(QLabel("Move rules:"))
+        camera_layout.addWidget(self._game_mode_selector)
+        camera_layout.addWidget(QLabel("Turn:"))
+        camera_layout.addWidget(self._turn_indicator)
+        self._update_turn_indicator()
 
         self._camera_status = QLabel()
         self._camera_status.setTextInteractionFlags(
@@ -322,30 +400,19 @@ class CameraWindow(QMainWindow):
         self._projector_selector = QComboBox()
         primary_screen = QGuiApplication.primaryScreen()
         for screen in self._screens:
-            geometry = screen.geometry()
-            primary_suffix = " (primary)" if screen is primary_screen else ""
-            hardware_parts = [
-                value
-                for value in (screen.manufacturer(), screen.model())
-                if value
-            ]
-            hardware = (
-                f" [{' '.join(hardware_parts)}]"
-                if hardware_parts
-                else ""
-            )
             self._projector_selector.addItem(
-                f"{screen.name()}{hardware} - "
-                f"{geometry.width()}x{geometry.height()} at "
-                f"({geometry.x()}, {geometry.y()}){primary_suffix}"
+                self._projector_screen_label(screen, primary_screen)
             )
         saved_screen_name = str(
             self._settings.value(_PROJECTOR_SETTING, "")
         )
+        calibrated_screen_name = self._calibrated_screen_name(
+            self._screens
+        )
         projector_index = self._default_projector_index(
             self._screens,
             primary_screen,
-            saved_screen_name,
+            calibrated_screen_name or saved_screen_name,
         )
         self._projector_selector.setCurrentIndex(projector_index)
 
@@ -531,6 +598,14 @@ class CameraWindow(QMainWindow):
         self._projector_selector.currentIndexChanged.connect(
             self._projector_selection_changed
         )
+        application = QGuiApplication.instance()
+        if isinstance(application, QGuiApplication):
+            application.screenAdded.connect(
+                self._available_screens_changed
+            )
+            application.screenRemoved.connect(
+                self._available_screens_changed
+            )
         self._camera_selector.currentIndexChanged.connect(
             self._camera_selection_changed
         )
@@ -571,6 +646,83 @@ class CameraWindow(QMainWindow):
             if screen is not primary_screen:
                 return index
         return 0
+
+    @staticmethod
+    def _projector_screen_label(
+        screen: QScreen,
+        primary_screen: QScreen | None,
+    ) -> str:
+        geometry = screen.geometry()
+        primary_suffix = " (primary)" if screen is primary_screen else ""
+        hardware_parts = [
+            value
+            for value in (screen.manufacturer(), screen.model())
+            if value
+        ]
+        hardware = (
+            f" [{' '.join(hardware_parts)}]" if hardware_parts else ""
+        )
+        return (
+            f"{screen.name()}{hardware} - "
+            f"{geometry.width()}x{geometry.height()} at "
+            f"({geometry.x()}, {geometry.y()}){primary_suffix}"
+        )
+
+    def _calibrated_screen_name(
+        self,
+        screens: Sequence[QScreen],
+    ) -> str:
+        try:
+            saved_display = self._calibration_store.saved_projector_display()
+        except ValueError:
+            return ""
+        if saved_display is None:
+            return ""
+        saved_name, saved_resolution = saved_display
+        for screen in screens:
+            geometry = screen.geometry()
+            if (
+                screen.name() == saved_name
+                and (geometry.width(), geometry.height())
+                == saved_resolution
+            ):
+                return saved_name
+        return ""
+
+    def _available_screens_changed(self, _screen: QScreen) -> None:
+        current_index = self._projector_selector.currentIndex()
+        current_name = (
+            self._screens[current_index].name()
+            if 0 <= current_index < len(self._screens)
+            else ""
+        )
+        screens = list(QGuiApplication.screens())
+        primary_screen = QGuiApplication.primaryScreen()
+        calibrated_screen_name = self._calibrated_screen_name(screens)
+        saved_screen_name = str(
+            self._settings.value(_PROJECTOR_SETTING, "")
+        )
+        preferred_name = (
+            calibrated_screen_name
+            or current_name
+            or saved_screen_name
+        )
+        selected_index = self._default_projector_index(
+            screens,
+            primary_screen,
+            preferred_name,
+        )
+        self._projector_selector.blockSignals(True)
+        self._projector_selector.clear()
+        for screen in screens:
+            self._projector_selector.addItem(
+                self._projector_screen_label(screen, primary_screen)
+            )
+        self._screens = screens
+        self._projector_selector.setCurrentIndex(selected_index)
+        self._projector_selector.setEnabled(bool(screens))
+        self._projector_selector.blockSignals(False)
+        self._restore_saved_calibration()
 
     @staticmethod
     def _device_key(device: QCameraDevice) -> str:
@@ -1383,7 +1535,14 @@ class CameraWindow(QMainWindow):
         self._latest_stable_occupied_ui = None
         self._board_widget.set_occupied_squares(())
         self._occupancy_status.setText(status)
-        if self._piece_synchronizer.initialized:
+        if self._last_rejected_move is not None:
+            self._piece_status.setText(
+                _illegal_correction_message(
+                    self._last_rejected_move,
+                    self._legal_game,
+                )
+            )
+        elif self._piece_synchronizer.initialized:
             self._piece_status.setText(
                 "Piece position retained while occupancy restabilizes."
             )
@@ -1548,9 +1707,44 @@ class CameraWindow(QMainWindow):
             )
             return
         self._occupancy_status.setText(update.message)
+        rejected_move = self._last_rejected_move
+        correction_restored = (
+            rejected_move is not None
+            and self._reference_move_tracker.rejected_move_is_restored(
+                update,
+                rejected_move,
+            )
+        )
+        if correction_restored:
+            self._board_widget.set_illegal_source(None)
+            self._last_rejected_move = None
+            self._occupancy_status.setText(
+                "Board matches the accepted reference."
+            )
+            self._piece_status.setText(
+                _accepted_position_message(self._legal_game)
+            )
         if update.state != "accepted" or update.move is None:
             return
         source, destination = update.move
+        legal_move: LegalMoveResult | None = None
+        if self._game_mode == "offline-game":
+            try:
+                legal_move = self._legal_game.apply_move(
+                    source,
+                    destination,
+                )
+            except ValueError as error:
+                self._reference_move_tracker.reset_activity()
+                newly_marked = self._last_rejected_move != update.move
+                self._last_rejected_move = update.move
+                self._board_widget.set_illegal_source(source)
+                self._piece_status.setText(
+                    _illegal_correction_message(update.move, self._legal_game)
+                )
+                if newly_marked:
+                    self._project_illegal_move_correction(update.move)
+                return
         try:
             position_update = self._piece_synchronizer.accept_move(
                 source,
@@ -1558,6 +1752,8 @@ class CameraWindow(QMainWindow):
             )
             self._reference_move_tracker.commit_accepted(update.move)
         except ValueError as error:
+            if legal_move is not None:
+                self._legal_game.rollback()
             self._reference_move_tracker.reset_activity()
             self._piece_status.setText(
                 f"Reference move rejected: {error}"
@@ -1565,10 +1761,20 @@ class CameraWindow(QMainWindow):
             return
         self._board_widget.set_pieces(position_update.position)
         self._board_widget.set_occupied_squares(position_update.position)
+        self._board_widget.set_illegal_source(None)
+        self._last_rejected_move = None
         self._board_widget.set_last_move(update.move)
         self._persist_piece_position(position_update.position)
         self._persist_move_reference()
-        self._piece_status.setText(position_update.message)
+        if legal_move is None:
+            self._piece_status.setText(position_update.message)
+        else:
+            self._persist_game_state()
+            self._update_turn_indicator()
+            self._piece_status.setText(
+                f"Legal move {legal_move.san} accepted; "
+                f"{legal_move.status.turn} to move."
+            )
         self._project_accepted_move(update.move)
 
     def _reset_pieces_to_start(self) -> None:
@@ -1604,11 +1810,16 @@ class CameraWindow(QMainWindow):
             )
             return
         self._piece_synchronizer.reset()
+        self._legal_game.reset()
+        self._update_turn_indicator()
         update = self._piece_synchronizer.observe(
             occupied,
         )
         self._board_widget.set_pieces(update.position)
         self._persist_piece_position(update.position)
+        self._persist_game_state()
+        self._board_widget.set_illegal_source(None)
+        self._last_rejected_move = None
         self._board_widget.set_last_move(None)
         self._piece_status.setText(update.message)
         if self._latest_frame is None or self._calibration_result is None:
@@ -1664,6 +1875,43 @@ class CameraWindow(QMainWindow):
         )
         QTimer.singleShot(2000, self._finish_move_projection)
 
+    def _project_illegal_move_correction(
+        self,
+        move: tuple[tuple[int, int], tuple[int, int]],
+    ) -> None:
+        if self._camera_only_calibration:
+            self._projector_status.setText(
+                "Illegal move marked in red on the UI; physical projection "
+                "is unavailable."
+            )
+            return
+        if self._calibration_result is None or not self._open_projector():
+            self._projector_status.setText(
+                "Illegal move marked in red on the UI, but no calibrated "
+                "projector is available."
+            )
+            return
+        source, destination = move
+        physical_source = self._physical_board_square(*source)
+        physical_destination = self._physical_board_square(*destination)
+        try:
+            self._projector_window.show_correction(
+                physical_destination,
+                physical_source,
+            )
+        except (RuntimeError, ValueError) as error:
+            self._projector_status.setText(
+                f"Illegal move marked on the UI, but projection failed: "
+                f"{error}"
+            )
+            return
+        self._alignment_monitor.set_paused("illegal move indication")
+        self._projector_status.setText(
+            "Projecting the incorrect square in red and the correct square "
+            "in white for 2 seconds."
+        )
+        QTimer.singleShot(2000, self._finish_illegal_move_projection)
+
     def _finish_move_projection(self) -> None:
         if self._projector_window.output_mode != "move":
             return
@@ -1671,6 +1919,18 @@ class CameraWindow(QMainWindow):
         self._alignment_monitor.set_black()
         self._projector_status.setText(
             "Move indication finished; projector returned to black."
+        )
+
+    def _finish_illegal_move_projection(self) -> None:
+        if self._projector_window.output_mode not in (
+            "illegal",
+            "correction",
+        ):
+            return
+        self._projector_window.show_black()
+        self._alignment_monitor.set_black()
+        self._projector_status.setText(
+            "Illegal-move indication finished; projector returned to black."
         )
 
     def _physical_board_square(
@@ -1724,6 +1984,83 @@ class CameraWindow(QMainWindow):
             return
         self._settings.setValue(_PIECE_POSITION_SETTING, encoded)
         self._settings.sync()
+
+    def _restore_game_mode(self) -> None:
+        saved_mode = str(
+            self._settings.value(_GAME_MODE_SETTING, "diagnostic")
+        )
+        saved_fen = str(self._settings.value(_LEGAL_GAME_FEN_SETTING, ""))
+        if saved_mode != "offline-game" or not saved_fen:
+            return
+        try:
+            restored = LegalGame(saved_fen)
+        except ValueError:
+            self._settings.remove(_LEGAL_GAME_FEN_SETTING)
+            self._settings.setValue(_GAME_MODE_SETTING, "diagnostic")
+            self._settings.sync()
+            return
+        if (
+            not self._piece_synchronizer.initialized
+            or restored.position != self._piece_synchronizer.position
+        ):
+            self._settings.setValue(_GAME_MODE_SETTING, "diagnostic")
+            self._settings.sync()
+            return
+        self._legal_game = restored
+        self._game_mode = "offline-game"
+
+    def _persist_game_state(self) -> None:
+        self._settings.setValue(_GAME_MODE_SETTING, self._game_mode)
+        self._settings.setValue(_LEGAL_GAME_FEN_SETTING, self._legal_game.fen)
+        self._settings.sync()
+
+    def _game_mode_changed(self, index: int) -> None:
+        selected = str(self._game_mode_selector.itemData(index))
+        if selected == "diagnostic":
+            self._game_mode = "diagnostic"
+            self._board_widget.set_illegal_source(None)
+            self._last_rejected_move = None
+            self._persist_game_state()
+            self._update_turn_indicator()
+            self._piece_status.setText(
+                "Diagnostic movement mode accepts unambiguous relocations."
+            )
+            return
+        if selected != "offline-game":
+            raise ValueError(f"Unknown game mode: {selected}")
+        position = self._piece_synchronizer.position
+        if position == self._legal_game.position:
+            self._game_mode = "offline-game"
+            self._persist_game_state()
+            self._update_turn_indicator()
+            self._piece_status.setText(
+                f"Offline legal game enabled; "
+                f"{self._legal_game.status.turn} to move."
+            )
+            return
+        self._game_mode_selector.blockSignals(True)
+        self._game_mode_selector.setCurrentIndex(0)
+        self._game_mode_selector.blockSignals(False)
+        self._update_turn_indicator()
+        self._piece_status.setText(
+            "Cannot enable legal play: reset the physical board to the "
+            "starting position or restore its saved legal game."
+        )
+
+    def _update_turn_indicator(self) -> None:
+        state = _turn_indicator_state(self._game_mode, self._legal_game)
+        if state is None:
+            self._turn_indicator.hide()
+            self._turn_indicator.setToolTip("")
+            self._turn_indicator.setAccessibleName("No enforced chess turn")
+            return
+        color, description = state
+        self._turn_indicator.setStyleSheet(
+            f"background-color: {color}; border: 2px solid #404040;"
+        )
+        self._turn_indicator.setToolTip(description)
+        self._turn_indicator.setAccessibleName(description)
+        self._turn_indicator.show()
 
     def _restore_move_reference(self) -> None:
         if (

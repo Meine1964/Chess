@@ -261,6 +261,53 @@ shall:
 Captures, castling, en passant, and promotion remain outside the first
 reference-tracking milestone.
 
+The application provides two local movement policies:
+
+- `Diagnostic movement` retains legality-independent one-piece relocation for
+  camera testing.
+- `Offline legal game` validates a visual candidate against an authoritative
+  `python-chess` position before changing the logical position or reference.
+
+After an illegal relocation, the accepted position and reference remain
+unchanged. The user may move the physical piece directly from the rejected
+square to a legal destination; returning it to its original square first is
+not required. The authoritative source piece remains at its logical square and
+that square is marked red on the UI. When a calibrated projector is available,
+the physically observed incorrect destination is projected in red and the
+authoritative source square is projected in white for two seconds. The
+projector then returns to black so camera verification can resume. The UI mark
+clears when the board returns to the accepted reference or a legal move is
+accepted. Restoration uses a separate conservative tolerance: every square
+except the authoritative source must be below the normal movement threshold,
+while the source may retain a small lighting residual. This tolerance does not
+change ordinary move detection.
+
+While correction is required, persistent UI guidance shall identify the
+observed incorrect square, the authoritative source square, the side to move,
+and the source piece's legal destinations. If that piece has no legal move for
+the current side, the guidance shall explicitly require returning it to its
+authoritative source before making a move with the correct side. Camera
+restabilization and alignment messages shall not replace this guidance. After
+restoration, the guidance shall confirm that the board matches the accepted
+position and state the side to move.
+
+The complete offline FEN is persisted. Offline legal mode is restored only
+when its piece map matches the persisted logical position. Visual signatures
+for captures and special moves are specified as later milestones in the
+[Lichess physical-board integration roadmap](./lichess-integration-roadmap.md).
+
+Offline legal mode shall display a persistent turn indicator beside the move
+rules selector:
+
+- White fill with a dark border means White to move.
+- Black fill with a dark border means Black to move.
+- Gray means the authoritative legal game is complete.
+- The indicator is hidden in diagnostic mode.
+
+The indicator is driven only by the authoritative legal position. Camera,
+alignment, occupancy, and correction messages shall not change it. Its tooltip
+and accessible name shall state the same turn or game-over information.
+
 ## 14. Recovery and Reset
 
 The UI shall provide an explicit action equivalent to:

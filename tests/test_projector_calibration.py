@@ -848,6 +848,10 @@ def test_calibration_store_persists_mesh_and_validation(tmp_path) -> None:
         detection.grid_points,
     )
     assert metadata["validation"]["maximum_square_fraction"] == 0.025
+    assert CalibrationStore(tmp_path).saved_projector_display() == (
+        "Projector",
+        (1280, 720),
+    )
 
     loaded = CalibrationStore(tmp_path).load_matching(
         camera_id="camera-id",

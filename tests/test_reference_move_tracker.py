@@ -1,8 +1,15 @@
 import cv2
 import numpy as np
+import pytest
 
+from src.chess_camera.chess_position import (
+    PiecePositionSynchronizer,
+    starting_occupied_squares,
+)
+from src.chess_camera.legal_game import LegalGame
 from src.chess_camera.reference_move_tracker import (
     ReferenceMoveTracker,
+    ReferenceTrackerUpdate,
     square_change_scores,
 )
 
@@ -88,6 +95,54 @@ def test_change_scores_localize_source_and_destination() -> None:
     assert ranked[1][0] > ranked[2][0] + 0.025
 
 
+def _adjacent_queen_residual(
+    retained_piece: str,
+) -> tuple[np.ndarray, np.ndarray, dict[tuple[int, int], str]]:
+    source = (6, 3)
+    retained = (7, 3)
+    destination = (2, 7)
+    reference = _empty_board()
+    moved = _empty_board()
+    _draw_piece(reference, retained, (235, 235, 235))
+    _draw_piece(moved, retained, (235, 235, 235))
+    _draw_piece(reference, source)
+    _draw_piece(moved, destination)
+    cv2.rectangle(
+        reference,
+        (315, 700),
+        (385, 748),
+        (20, 20, 20),
+        -1,
+    )
+    return (
+        reference,
+        moved,
+        {source: "q", retained: retained_piece},
+    )
+
+
+def test_retained_opposite_piece_resolves_adjacent_residual() -> None:
+    reference, moved, position = _adjacent_queen_residual("Q")
+    tracker = ReferenceMoveTracker()
+    tracker.set_reference(reference, _camera_grid(), 0)
+
+    update = _accepted_update(tracker, moved, position)
+
+    assert update.state == "accepted"
+    assert update.move == ((6, 3), (2, 7))
+
+
+def test_same_color_adjacent_residual_remains_ambiguous() -> None:
+    reference, moved, position = _adjacent_queen_residual("r")
+    tracker = ReferenceMoveTracker()
+    tracker.set_reference(reference, _camera_grid(), 0)
+
+    update = _accepted_update(tracker, moved, position)
+
+    assert update.state == "ambiguous"
+    assert update.move is None
+
+
 def test_accepts_non_legal_single_piece_relocation() -> None:
     source = (0, 1)
     destination = (0, 3)
@@ -107,6 +162,40 @@ def test_accepts_non_legal_single_piece_relocation() -> None:
     np.testing.assert_allclose(tracker.reference, moved, atol=3)
 
 
+def test_illegal_game_move_preserves_position_and_reference() -> None:
+    source = (7, 6)
+    destination = (5, 6)
+    reference = _empty_board()
+    position = {
+        (row, column): piece
+        for (row, column), piece in LegalGame().position.items()
+    }
+    for square in position:
+        _draw_piece(reference, square)
+    moved = reference.copy()
+    moved[
+        source[0] * 100 : (source[0] + 1) * 100,
+        source[1] * 100 : (source[1] + 1) * 100,
+    ] = _empty_board()[
+        source[0] * 100 : (source[0] + 1) * 100,
+        source[1] * 100 : (source[1] + 1) * 100,
+    ]
+    _draw_piece(moved, destination)
+    tracker = ReferenceMoveTracker()
+    tracker.set_reference(reference, _camera_grid(), 0)
+    synchronizer = PiecePositionSynchronizer()
+    synchronizer.observe(starting_occupied_squares())
+    accepted = _accepted_update(tracker, moved, position)
+
+    assert accepted.state == "accepted"
+    with pytest.raises(ValueError, match="g1-g3 is not legal"):
+        LegalGame().apply_move(source, destination)
+    tracker.reset_activity()
+
+    assert synchronizer.position == position
+    np.testing.assert_array_equal(tracker.reference, reference)
+
+
 def test_discarding_accepted_candidate_preserves_reference() -> None:
     source = (0, 1)
     destination = (0, 3)
@@ -122,6 +211,35 @@ def test_discarding_accepted_candidate_preserves_reference() -> None:
     tracker.reset_activity()
 
     np.testing.assert_array_equal(tracker.reference, reference)
+
+
+def test_restored_rejected_move_allows_small_source_residual() -> None:
+    tracker = ReferenceMoveTracker()
+    scores = np.full((8, 8), 0.07, dtype=np.float32)
+    scores[3, 3] = 0.087
+    update = ReferenceTrackerUpdate(
+        "ambiguous",
+        None,
+        "Ambiguous settled board change.",
+        scores,
+    )
+
+    assert tracker.rejected_move_is_restored(
+        update,
+        ((3, 3), (4, 3)),
+    )
+
+    destination_changed = scores.copy()
+    destination_changed[4, 3] = 0.09
+    assert not tracker.rejected_move_is_restored(
+        ReferenceTrackerUpdate(
+            "ambiguous",
+            None,
+            "Ambiguous settled board change.",
+            destination_changed,
+        ),
+        ((3, 3), (4, 3)),
+    )
 
 
 def test_global_exposure_change_does_not_produce_move() -> None:
@@ -213,6 +331,127 @@ def test_stationary_large_obstruction_is_not_evaluated_as_move() -> None:
     assert activity.state in ("activity", "waiting-for-clear")
     assert waiting.state == "waiting-for-clear"
     assert waiting.move is None
+
+
+def test_two_square_hand_region_blocks_intermediate_move() -> None:
+    source = (7, 7)
+    destination = (7, 6)
+    reference = _empty_board()
+    _draw_piece(reference, source)
+    held = _empty_board()
+    _draw_piece(held, destination)
+    cv2.rectangle(held, (610, 700), (799, 799), (80, 120, 190), -1)
+    tracker = ReferenceMoveTracker()
+    tracker.set_reference(reference, _camera_grid(), 0)
+
+    updates = [
+        tracker.observe(held, _camera_grid(), 0, {source: "R"})
+        for _index in range(4)
+    ]
+
+    assert updates[-1].state == "waiting-for-clear"
+    assert all(update.move is None for update in updates)
+
+
+def test_wide_piece_crossing_square_edge_is_not_an_obstruction() -> None:
+    source = (7, 4)
+    destination = (6, 4)
+    reference = _empty_board()
+    moved = _empty_board()
+    cv2.ellipse(
+        reference,
+        (480, 750),
+        (38, 48),
+        0,
+        0,
+        360,
+        (20, 20, 20),
+        -1,
+        cv2.LINE_AA,
+    )
+    cv2.ellipse(
+        moved,
+        (480, 650),
+        (38, 48),
+        0,
+        0,
+        360,
+        (20, 20, 20),
+        -1,
+        cv2.LINE_AA,
+    )
+    tracker = ReferenceMoveTracker()
+    tracker.set_reference(reference, _camera_grid(), 0)
+
+    update = _accepted_update(tracker, moved, {source: "K"})
+
+    assert update.state == "accepted"
+    assert update.move == (source, destination)
+
+
+def test_large_released_king_footprint_is_accepted() -> None:
+    source = (7, 4)
+    destination = (7, 5)
+    reference = _empty_board()
+    moved = _empty_board()
+    cv2.ellipse(
+        reference,
+        (450, 750),
+        (44, 45),
+        0,
+        0,
+        360,
+        (20, 20, 20),
+        -1,
+        cv2.LINE_AA,
+    )
+    cv2.ellipse(
+        moved,
+        (550, 750),
+        (44, 45),
+        0,
+        0,
+        360,
+        (20, 20, 20),
+        -1,
+        cv2.LINE_AA,
+    )
+    tracker = ReferenceMoveTracker()
+    tracker.set_reference(reference, _camera_grid(), 0)
+
+    update = _accepted_update(tracker, moved, {source: "K"})
+
+    assert update.state == "accepted"
+    assert update.move == (source, destination)
+
+
+def test_single_square_hand_footprint_blocks_move_until_release() -> None:
+    source = (7, 7)
+    destination = (7, 6)
+    reference = _empty_board()
+    _draw_piece(reference, source)
+    held = _empty_board()
+    cv2.rectangle(held, (605, 705), (695, 795), (80, 120, 190), -1)
+    tracker = ReferenceMoveTracker()
+    tracker.set_reference(reference, _camera_grid(), 0)
+
+    held_updates = [
+        tracker.observe(held, _camera_grid(), 0, {source: "R"})
+        for _index in range(6)
+    ]
+
+    assert any(
+        update.state == "waiting-for-clear" for update in held_updates
+    )
+    assert all(update.state != "accepted" for update in held_updates)
+    assert all(update.move is None for update in held_updates)
+
+    released = _empty_board()
+    _draw_piece(released, destination)
+    accepted = _accepted_update(tracker, released, {source: "R"})
+
+    assert accepted.state == "accepted"
+    assert accepted.move == (source, destination)
 
 
 def test_ambiguous_multi_square_change_preserves_reference() -> None:
