@@ -555,13 +555,18 @@ acceptance. Reference-relative physical piece-color classification has also
 passed live acceptance for white and black captures and wrong-color rejection;
 arbitrary-position setup remains future work.
 
-Physical-board reconciliation shall be an explicit, non-authoritative workflow.
-Stable absolute occupancy shall be compared with the accepted legal position,
-and the UI shall list missing expected pieces and unexpected occupied squares.
-All mismatches shall be projected red before the projector returns to black for
-the next verification. Reconciliation shall never change the FEN, turn, or
-piece identities, and shall replace the accepted camera reference only after
-occupancy matches exactly.
+Physical-board reconciliation supports both manual restart and automatic
+Lichess attachment. Without an active Lichess target, stable absolute
+occupancy is compared with the accepted legal position and may replace only
+the accepted camera reference. With an active Lichess target, stable occupancy
+is compared with the authoritative current server position. Missing expected
+pieces, unexpected occupied squares, and confidently opposite-color pieces are
+marked red on both the UI and projector. Uncertain colors do not block
+adoption. When no discrepancy remains, reconciliation may replace the stale
+logical piece map and legal state with the authoritative Lichess position,
+capture a new accepted camera reference, and initialize synchronization at the
+current server cursor. Same-color piece identity differences are intentionally
+accepted because occupancy and color evidence cannot distinguish piece types.
 
 ### Milestone 1: Asset import
 

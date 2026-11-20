@@ -554,22 +554,27 @@ new current-position baseline and require physical reconciliation. The public
 game-export endpoint is not suitable because Lichess deliberately delays
 ongoing-game exports.
 
-The Lichess state is displayed for observation only and does not yet change the
-local legal game, physical reference, or projector.
+The Lichess state drives the separate server cursor, current-position
+reconciliation, pending physical-move guidance, and ordinary local move
+submission. The physical cursor and accepted camera reference advance only
+after camera confirmation or successful current-position adoption.
 
 Official API reference:
 <https://github.com/lichess-org/api/blob/master/doc/specs/lichess-api.yaml>
 
 ### 9.2 Phase 6 acceptance gate
 
-The application follows a live game and reconstructs exactly the same position
-as Lichess after every streamed event and after reconnecting.
+The application follows a live game and displays exactly the same current
+position as Lichess after every streamed event or verified polling transition.
+When polling cannot verify a one-move transition, it establishes the reported
+current FEN as a new reconciliation baseline rather than reconstructing
+unreported history.
 
 **Acceptance status:** Live-accepted against a standard correspondence game
 with Stockfish. On the tested network, blocked streaming response headers
-triggered the read-only polling fallback, which discovered the active game,
-reconstructed its move history and position, and updated the separate Lichess
-board panel after subsequent moves.
+triggered current-position polling. It discovered the selected active game,
+adopted its authenticated current FEN, verified subsequent authoritative
+`lastMove` transitions, and updated the separate Lichess board panel.
 
 ## 10. Phase 7: Incoming Opponent Moves
 
@@ -577,11 +582,14 @@ Detailed behavior is defined in the
 [Lichess physical move synchronization specification](./lichess-physical-move-synchronization-specification.md).
 
 **Implementation status:** The first ordinary-move synchronization slice is
-implemented and awaiting live acceptance. It maintains separate server and
-physical legal cursors, validates complete move-history prefixes, queues moves
-in server order, projects one pending move at a time, and commits the physical
-position and camera reference only after exact expected evidence. Captures,
-special moves, and restart persistence remain staged Phase 7 work.
+implemented and live-accepted. It maintains separate server and physical legal
+cursors, validates streamed history prefixes and verified polling transitions,
+queues one or more reported moves in server order, shows one pending move at a
+time in white on the physical UI board and projector, and commits the physical
+position and camera reference only after exact expected evidence. It also
+supports explicit game selection, automatic current-position reconciliation,
+and ordinary local move submission. Captures, promotions, castling, en passant,
+and other special-move synchronization remain staged work.
 
 When Lichess reports an opponent move:
 

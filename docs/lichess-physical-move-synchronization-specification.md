@@ -342,10 +342,15 @@ It shall not silently replace the known history.
 
 ### 8.4 Multiple appended moves
 
-Polling or reconnection may reveal multiple new plies.
+Streaming or a history-bearing reconnection may reveal multiple new plies.
 
 They shall be queued and confirmed physically in server order. Only the first
 pending move may be active in the projector and camera workflow.
+
+Current-position polling reports only the authoritative latest move. If its
+new FEN is not exactly the result of that legal move from the prior polling
+FEN, the application shall establish a new reconciliation baseline instead of
+creating a multi-ply queue from unavailable history.
 
 Polling shall obtain the current FEN and authoritative last move from the
 authenticated ongoing-games endpoint. The first observation establishes a
@@ -553,8 +558,10 @@ It shall not duplicate already queued or confirmed moves.
 
 ### 14.3 Polling fallback
 
-The read-only polling fallback may discover several moves at once. The same
-prefix validation and ordered queue shall apply.
+Current-position polling shall verify each reported `lastMove` against the
+prior FEN. A verified transition appends one move to the server cursor. An
+unverifiable transition replaces the polling baseline and enters physical
+reconciliation; it shall not fabricate or queue unreported intermediate moves.
 
 The five-second polling interval may delay guidance but shall not alter
 correctness.
