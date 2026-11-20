@@ -350,6 +350,74 @@ def test_detects_board_orientation_from_square_color_parity() -> None:
     assert detect_board_orientation(rotated, detection.grid_points) == 1
 
 
+def test_new_calibration_requires_orientation_redetection() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    geometry = SimpleNamespace(width=lambda: 1280, height=lambda: 720)
+    screen = SimpleNamespace(geometry=lambda: geometry)
+    result = SimpleNamespace(
+        mapping=SimpleNamespace(projector_grid=np.zeros((9, 9, 2)))
+    )
+    window = SimpleNamespace(
+        _piece_synchronizer=SimpleNamespace(initialized=True),
+        _suspend_selected_square=MagicMock(),
+        _reset_occupancy=MagicMock(),
+        _projector_window=MagicMock(),
+        _board_widget=MagicMock(),
+        _reset_pieces_button=MagicMock(),
+        _reconcile_button=MagicMock(),
+        _show_grid_button=MagicMock(),
+        _show_squares_button=MagicMock(),
+        _quick_verify_button=MagicMock(),
+        _validate_calibration_button=MagicMock(),
+        _screens=[screen],
+        _projector_selector=SimpleNamespace(currentIndex=lambda: 0),
+        _alignment_monitor=MagicMock(),
+        _set_calibration_indicator=MagicMock(),
+        _camera_calibration_indicator=object(),
+        _projector_calibration_indicator=object(),
+    )
+
+    CameraWindow._activate_calibration_result(window, result)
+
+    assert window._board_orientation_needs_detection is True
+    assert window._piece_side_orientation_needs_detection is True
+
+
+def test_loaded_camera_geometry_requires_orientation_redetection() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    result = SimpleNamespace()
+    window = SimpleNamespace(
+        _piece_synchronizer=SimpleNamespace(initialized=True),
+        _suspend_selected_square=MagicMock(),
+        _reset_occupancy=MagicMock(),
+        _projector_window=MagicMock(),
+        _board_widget=MagicMock(),
+        _reset_pieces_button=MagicMock(),
+        _reconcile_button=MagicMock(),
+        _show_grid_button=MagicMock(),
+        _show_squares_button=MagicMock(),
+        _quick_verify_button=MagicMock(),
+        _validate_calibration_button=MagicMock(),
+        _alignment_monitor=MagicMock(),
+        _set_calibration_indicator=MagicMock(),
+        _camera_calibration_indicator=object(),
+        _projector_calibration_indicator=object(),
+    )
+
+    CameraWindow._activate_camera_only_calibration(window, result)
+
+    assert window._board_orientation_needs_detection is True
+    assert window._piece_side_orientation_needs_detection is True
+
+
 def test_mapping_recovers_projector_grid_from_dense_measurements() -> None:
     detection = _detection(20, 20, 180, 180)
     height = 200

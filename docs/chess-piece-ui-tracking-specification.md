@@ -241,6 +241,15 @@ shall be retained until:
 - The board is deliberately reoriented.
 - The user explicitly starts a new setup.
 
+Activating a newly completed or loaded calibration shall always invalidate the
+previous physical-grid orientation, even when the logical piece position is
+already initialized. Before square projection or occupancy resumes, the
+application shall re-detect square-color parity from the current camera frame
+so that logical light squares map to physical light squares. When a complete
+starting position is subsequently visible, the application shall also
+re-evaluate the 180-degree White-side ambiguity without clearing or replacing
+the initialized logical position.
+
 ## 7. Move Tracking
 
 Post-initialization move inference is defined exclusively by

@@ -1693,12 +1693,8 @@ class CameraWindow(QMainWindow):
         self._camera_geometry_ready = True
         self._calibration_result = result
         self._verified_calibration_result = result
-        self._board_orientation_needs_detection = (
-            not self._piece_synchronizer.initialized
-        )
-        self._piece_side_orientation_needs_detection = (
-            not self._piece_synchronizer.initialized
-        )
+        self._board_orientation_needs_detection = True
+        self._piece_side_orientation_needs_detection = True
         self._suspend_selected_square()
         self._reset_occupancy(
             "Occupancy stabilizing with the verified calibration."
@@ -1742,12 +1738,8 @@ class CameraWindow(QMainWindow):
         self._camera_geometry_ready = False
         self._calibration_result = result
         self._verified_calibration_result = None
-        self._board_orientation_needs_detection = (
-            not self._piece_synchronizer.initialized
-        )
-        self._piece_side_orientation_needs_detection = (
-            not self._piece_synchronizer.initialized
-        )
+        self._board_orientation_needs_detection = True
+        self._piece_side_orientation_needs_detection = True
         self._suspend_selected_square()
         self._reset_occupancy(
             "Occupancy stabilizing from saved camera board geometry."
