@@ -341,6 +341,57 @@ def match_pending_castling(
     )
 
 
+def match_pending_castling_relocation(
+    move: tuple[Square, Square],
+    signatures: Sequence[LegalMoveSignature],
+) -> PendingCastlingMatch:
+    candidates: list[tuple[LegalMoveSignature, Square, Square]] = []
+    for signature in signatures:
+        if (
+            signature.kind != "castling"
+            or (signature.source, signature.destination) != move
+        ):
+            continue
+        rook_source = next(
+            (
+                change.square
+                for change in signature.changes
+                if change.square
+                not in (signature.source, signature.destination)
+                and change.before in ("R", "r")
+                and change.after is None
+            ),
+            None,
+        )
+        rook_destination = next(
+            (
+                change.square
+                for change in signature.changes
+                if change.square
+                not in (signature.source, signature.destination)
+                and change.before is None
+                and change.after in ("R", "r")
+            ),
+            None,
+        )
+        if rook_source is not None and rook_destination is not None:
+            candidates.append((signature, rook_source, rook_destination))
+    if len(candidates) != 1:
+        return PendingCastlingMatch(
+            None,
+            None,
+            None,
+            "No unique castling signature matches the king relocation.",
+        )
+    signature, rook_source, rook_destination = candidates[0]
+    return PendingCastlingMatch(
+        signature,
+        rook_source,
+        rook_destination,
+        "The detected king relocation matches pending physical castling.",
+    )
+
+
 def match_pending_en_passant(
     change_scores: FloatArray,
     signatures: Sequence[LegalMoveSignature],

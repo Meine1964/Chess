@@ -332,12 +332,17 @@ While reconciliation is active, the reconciliation control shall read
 **Stop reconciliation**. Pressing it is an explicit user confirmation that the
 physical board visibly matches the authoritative Lichess position even when
 automatic camera comparison has not converged. The application shall then
-perform the same current-position adoption as an automatic match, using the
-current camera frame as the accepted reference, clearing red marks, and
-continuing synchronization from the current server history. If no calibrated
-current frame or required Lichess metadata is available, the application shall
-keep reconciliation active and report that manual acceptance cannot yet
-complete.
+remove every projected reconciliation mark, return the projector to black,
+discard at least one second of camera exposure transition, and require a
+stable quiet observation window. Only that later clean frame may replace the
+move reference and continue synchronization from the current server history.
+Because the user explicitly accepted the visible position, final clean-frame
+capture shall not consult the previous appearance reference; that reference
+may itself be contaminated and be the reason reconciliation was requested. If
+no calibrated current frame or required Lichess metadata is available, the
+application shall keep reconciliation active and report that manual acceptance
+cannot yet complete. Closing the application before clean capture completes
+shall leave the previous accepted state unchanged.
 
 The first live acceptance shall use a fresh Lichess game and a physical board
 in the standard starting position.

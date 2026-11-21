@@ -995,6 +995,7 @@ class CameraWindow(QMainWindow):
         self._pending_offline_games: tuple[LegalGame, LegalGame] | None = None
         self._pending_offline_restore_game: LegalGame | None = None
         self._offline_mode_recovery_error: str | None = None
+        self._startup_offline_reference_refresh_pending = False
         self._offline_restore_requested = False
         self._activate_offline_after_reset = False
         self._automatic_start_reset_recovery = False
@@ -1085,6 +1086,7 @@ class CameraWindow(QMainWindow):
         self._reset_to_start_requested = False
         self._reconciliation_requested = False
         self._reconciliation_blackout_pending = False
+        self._reconciliation_reference_acceptance_pending = False
         self._reconciliation_blackout_generation = 0
         self._last_rejected_move: (
             tuple[tuple[int, int], tuple[int, int]] | None
@@ -2160,6 +2162,7 @@ class CameraWindow(QMainWindow):
         )
         self._restore_saved_calibration()
         self._restore_move_reference()
+        self._start_pending_offline_reference_refresh()
         self._record_runtime_diagnostic(
             "camera-started",
             f"Camera started: {device.description()}.",
@@ -4976,7 +4979,9 @@ class CameraWindow(QMainWindow):
         )
 
     def _accept_current_physical_reconciliation(self) -> None:
-        target_position, lichess_game = self._physical_reconciliation_target()
+        _target_position, lichess_game = (
+            self._physical_reconciliation_target()
+        )
         if self._latest_frame is None or self._calibration_result is None:
             QMessageBox.warning(
                 self,
@@ -4993,10 +4998,34 @@ class CameraWindow(QMainWindow):
                 "connection update, then try again.",
             )
             return
-        self._complete_physical_reconciliation(
-            target_position,
-            lichess_game,
-            "Reconciliation stopped by user; current position accepted.",
+        self._queue_clean_reconciliation_reference_capture()
+
+    def _queue_clean_reconciliation_reference_capture(self) -> None:
+        if not self._reconciliation_requested:
+            raise RuntimeError(
+                "Clean reference capture requires active reconciliation."
+            )
+        self._reconciliation_reference_acceptance_pending = True
+        self._reconciliation_blackout_generation += 1
+        generation = self._reconciliation_blackout_generation
+        self._reconciliation_blackout_pending = True
+        self._black_projector()
+        self._occupancy_detector.reset()
+        self._reference_move_tracker.reset_activity()
+        self._board_widget.set_reconciliation_squares(())
+        self._piece_status.setText(
+            "Current position accepted; keep the board clear while a clean "
+            "move reference is captured."
+        )
+        self._occupancy_status.setText(
+            "Waiting for projector black and camera exposure to settle."
+        )
+        self._projector_status.setText(
+            "Reconciliation marks removed; clean reference capture pending."
+        )
+        QTimer.singleShot(
+            1000,
+            lambda: self._finish_reconciliation_blackout(generation),
         )
 
     def _begin_physical_reconciliation(
@@ -5005,6 +5034,7 @@ class CameraWindow(QMainWindow):
     ) -> None:
         self._reconciliation_requested = True
         self._reconciliation_blackout_pending = False
+        self._reconciliation_reference_acceptance_pending = False
         self._reconciliation_blackout_generation += 1
         self._reconcile_button.setText("Stop reconciliation")
         self._board_widget.set_illegal_source(None)
@@ -5038,6 +5068,18 @@ class CameraWindow(QMainWindow):
         physically_occupied: frozenset[tuple[int, int]],
     ) -> None:
         target_position, lichess_game = self._physical_reconciliation_target()
+        if getattr(
+            self,
+            "_reconciliation_reference_acceptance_pending",
+            False,
+        ):
+            self._complete_physical_reconciliation(
+                target_position,
+                lichess_game,
+                "Current physical position accepted; clean move reference "
+                "captured.",
+            )
+            return
         observed_colors: (
             dict[tuple[int, int], PieceColorLabel] | None
         ) = None
@@ -5171,6 +5213,7 @@ class CameraWindow(QMainWindow):
         self._persist_move_reference()
         self._reconciliation_requested = False
         self._reconciliation_blackout_pending = False
+        self._reconciliation_reference_acceptance_pending = False
         self._reconciliation_blackout_generation += 1
         self._reconcile_button.setText("Reconcile physical board")
         self._black_projector()
@@ -5179,7 +5222,17 @@ class CameraWindow(QMainWindow):
         self._board_widget.set_reconciliation_squares(())
         self._occupancy_status.setText(completion_message)
         self._piece_status.setText(
-            _accepted_position_message(self._legal_game)
+            "Clean move reference captured; make the first move to determine "
+            "whose turn it is."
+            if (
+                self._game_mode == "offline-game"
+                and getattr(
+                    self,
+                    "_offline_turn_inference_pending",
+                    False,
+                )
+            )
+            else _accepted_position_message(self._legal_game)
             if self._game_mode == "offline-game"
             else "Physical and UI piece positions are synchronized."
         )
@@ -5312,6 +5365,16 @@ class CameraWindow(QMainWindow):
             if self._offline_turn_inference_pending
             else None
         )
+        self._startup_offline_reference_refresh_pending = True
+
+    def _start_pending_offline_reference_refresh(self) -> None:
+        if not self._startup_offline_reference_refresh_pending:
+            return
+        self._startup_offline_reference_refresh_pending = False
+        self._begin_physical_reconciliation(
+            "Restored Offline game; preparing a clean move reference."
+        )
+        self._queue_clean_reconciliation_reference_capture()
 
     def _persist_game_state(self) -> None:
         self._settings.setValue(_GAME_MODE_SETTING, self._game_mode)
@@ -5490,12 +5553,11 @@ class CameraWindow(QMainWindow):
         self._reference_move_tracker.reset_activity()
         self._persist_game_state()
         self._update_turn_indicator()
-        self._piece_status.setText(
-            "Offline game ready from the standard position; White to move."
-            if is_standard_position
-            else "Offline game ready from the current position; make the "
-            "first move to determine whose turn it is."
+        self._begin_physical_reconciliation(
+            "Current Offline position accepted; preparing a clean move "
+            "reference."
         )
+        self._queue_clean_reconciliation_reference_capture()
 
     def _begin_offline_position_restore(self, target: LegalGame) -> None:
         self._pending_offline_restore_game = None

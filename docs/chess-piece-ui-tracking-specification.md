@@ -480,6 +480,24 @@ completion within one second after the board becomes clear.
   undetermined. The standard starting position is the exception: it starts
   immediately with White to move.
 
+Selecting **Start Offline game from current position** shall not immediately
+enable move tracking against a restored reference. The application shall
+black the projector, discard at least one second of camera exposure
+transition, wait for a stable quiet observation window, and capture a fresh
+move reference for the accepted current position. The previous appearance
+reference shall not participate in this capture because it may be stale or
+projector-contaminated. Turn inference and ordinary Offline move tracking
+shall begin only after the clean reference is installed.
+
+The same clean-reference requirement applies when a matching saved Offline
+game is restored during application startup. Restoring the saved legal state
+shall schedule an automatic clean capture after the camera and calibration
+are available. Move tracking shall remain paused until a stable quiet camera
+observation replaces the appearance reference and has been persisted. The
+accepted physical piece map remains authoritative during this recapture;
+binary occupancy shall not block it because occupancy may be incomplete for
+otherwise visible pieces.
+
 For an Offline game started from the current position, the provisional legal
 position shall grant castling rights for each king and corresponding rook
 occupying their home squares. For each candidate side to move, it shall retain

@@ -5,6 +5,7 @@ from src.chess_camera.legal_signature_matcher import (
     find_illegal_removed_piece,
     match_legal_move_signature,
     match_pending_castling,
+    match_pending_castling_relocation,
     match_pending_capture,
     match_pending_en_passant,
 )
@@ -147,6 +148,20 @@ def test_pending_castling_matches_king_first() -> None:
         _scores(((7, 4), 0.2), ((7, 6), 0.2)),
         game.physical_move_signatures,
         colors,
+    )
+
+    assert pending.signature is not None
+    assert pending.signature.uci == "e1g1"
+    assert pending.rook_source == (7, 7)
+    assert pending.rook_destination == (7, 5)
+
+
+def test_legal_castling_king_relocation_remains_pending() -> None:
+    game = LegalGame("4k3/8/8/8/8/8/8/4K2R w K - 0 1")
+
+    pending = match_pending_castling_relocation(
+        ((7, 4), (7, 6)),
+        game.physical_move_signatures,
     )
 
     assert pending.signature is not None

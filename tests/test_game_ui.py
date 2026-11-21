@@ -751,6 +751,7 @@ def test_matching_offline_mode_is_restored() -> None:
     assert window._game_mode == "offline-game"
     assert window._legal_game.fen == saved.fen
     assert window._pending_offline_restore_game is None
+    assert window._startup_offline_reference_refresh_pending is True
     settings.setValue.assert_not_called()
 
 
@@ -791,6 +792,26 @@ def test_pending_turn_inference_is_restored_with_matching_position() -> None:
     assert window._game_mode == "offline-game"
     assert window._offline_turn_inference_pending is True
     assert window._pending_offline_games is not None
+    assert window._startup_offline_reference_refresh_pending is True
+
+
+def test_restored_offline_game_starts_clean_reference_refresh() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    window = SimpleNamespace(
+        _startup_offline_reference_refresh_pending=True,
+        _begin_physical_reconciliation=MagicMock(),
+        _queue_clean_reconciliation_reference_capture=MagicMock(),
+    )
+
+    CameraWindow._start_pending_offline_reference_refresh(window)
+
+    assert window._startup_offline_reference_refresh_pending is False
+    window._begin_physical_reconciliation.assert_called_once_with(
+        "Restored Offline game; preparing a clean move reference."
+    )
+    window._queue_clean_reconciliation_reference_capture.assert_called_once_with()
 
 
 def test_lichess_authority_cancels_stale_offline_recovery() -> None:
@@ -887,6 +908,8 @@ def test_start_offline_from_current_position_waits_for_first_move() -> None:
         _persist_game_state=MagicMock(),
         _update_turn_indicator=MagicMock(),
         _piece_status=MagicMock(),
+        _begin_physical_reconciliation=MagicMock(),
+        _queue_clean_reconciliation_reference_capture=MagicMock(),
     )
 
     CameraWindow._start_offline_game_from_current_position(window)
@@ -895,10 +918,10 @@ def test_start_offline_from_current_position_waits_for_first_move() -> None:
     assert window._offline_turn_inference_pending is True
     assert window._pending_offline_games is not None
     window._persist_game_state.assert_called_once_with()
-    window._piece_status.setText.assert_called_once_with(
-        "Offline game ready from the current position; make the first move "
-        "to determine whose turn it is."
+    window._begin_physical_reconciliation.assert_called_once_with(
+        "Current Offline position accepted; preparing a clean move reference."
     )
+    window._queue_clean_reconciliation_reference_capture.assert_called_once_with()
 
 
 def test_start_offline_from_standard_position_keeps_white_to_move() -> None:
@@ -928,6 +951,8 @@ def test_start_offline_from_standard_position_keeps_white_to_move() -> None:
         _persist_game_state=MagicMock(),
         _update_turn_indicator=MagicMock(),
         _piece_status=MagicMock(),
+        _begin_physical_reconciliation=MagicMock(),
+        _queue_clean_reconciliation_reference_capture=MagicMock(),
     )
 
     CameraWindow._start_offline_game_from_current_position(window)
@@ -935,6 +960,7 @@ def test_start_offline_from_standard_position_keeps_white_to_move() -> None:
     assert window._offline_turn_inference_pending is False
     assert window._pending_offline_games is None
     assert window._legal_game.status.turn == "white"
+    window._queue_clean_reconciliation_reference_capture.assert_called_once_with()
 
 
 def test_saved_offline_position_restore_commits_after_occupancy_match() -> None:

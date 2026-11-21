@@ -169,6 +169,26 @@ The reference shall be replaced only:
 - After an explicit user reset.
 - After an explicit reference-recapture operation that verifies the physical
   occupancy matches the logical position.
+- After the user starts an Offline game from the accepted current position.
+
+Current-position Offline startup shall not compare the live image with the
+previous reference. It shall black the projector, discard at least one second
+of exposure transition, require a stable quiet observation, and install and
+persist that observation as the new reference before entering `watching`.
+
+A saved Offline game restored at process startup shall follow the same
+recapture sequence even when the saved legal position and accepted piece map
+already match. The accepted piece map remains authoritative, and incomplete
+binary occupancy shall not block recapture. Until a stable quiet frame has
+replaced the reference, the persisted appearance reference shall not be used
+for move tracking.
+
+When a confidently detected king relocation exactly matches the king leg of
+an available castling signature, the tracker shall enter `pending-castling`
+even if appearance classification cannot confidently prove that the rook
+squares are unchanged. The authoritative legal signature supplies the rook
+source and destination. The castling move remains unaccepted until the full
+four-square signature is observed.
 
 ## 7. Runtime State Machine
 

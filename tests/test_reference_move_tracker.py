@@ -318,7 +318,22 @@ def test_two_action_capture_waits_for_attacker_before_accepting() -> None:
     assert accepted.move == (source, destination)
 
 
-def test_king_first_castling_waits_for_rook_before_accepting() -> None:
+def test_king_first_castling_relocation_waits_when_visual_match_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.chess_camera.reference_move_tracker as tracker_module
+    from src.chess_camera.legal_signature_matcher import PendingCastlingMatch
+
+    monkeypatch.setattr(
+        tracker_module,
+        "match_pending_castling",
+        lambda *_args, **_kwargs: PendingCastlingMatch(
+            None,
+            None,
+            None,
+            "Visual castling match unavailable.",
+        ),
+    )
     game = LegalGame("4k3/8/8/8/8/8/8/4K2R w K - 0 1")
     king_source = (7, 4)
     king_destination = (7, 6)

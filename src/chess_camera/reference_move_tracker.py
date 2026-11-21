@@ -11,6 +11,7 @@ from .legal_signature_matcher import (
     find_illegal_removed_piece,
     match_legal_move_signature,
     match_pending_castling,
+    match_pending_castling_relocation,
     match_pending_capture,
     match_pending_en_passant,
 )
@@ -346,7 +347,7 @@ class ReferenceMoveTracker:
                 and pending_capture_destination is None
                 and piece_colors is not None
             ):
-                move = self._select_illegal_relocation(
+                relocation = self._select_illegal_relocation(
                     scores,
                     position,
                     self._reference,
@@ -354,15 +355,29 @@ class ReferenceMoveTracker:
                     piece_colors,
                     allow_boundary_residuals=self._camera_grid_remapped,
                 )
-                if move is None:
-                    move = self._select_move(
+                if relocation is None:
+                    relocation = self._select_move(
                         scores,
                         position,
                         self._reference,
                         normalized,
                         allow_boundary_residuals=self._camera_grid_remapped,
                     )
-                illegal_relocation = move is not None
+                if relocation is not None:
+                    castling_match = match_pending_castling_relocation(
+                        relocation,
+                        physical_signatures,
+                    )
+                    pending_castling = castling_match.signature
+                    pending_castling_rook_source = (
+                        castling_match.rook_source
+                    )
+                    pending_castling_rook_destination = (
+                        castling_match.rook_destination
+                    )
+                    if pending_castling is None:
+                        move = relocation
+                        illegal_relocation = True
         if (
             move is None
             and pending_castling is not None

@@ -901,7 +901,64 @@ def test_reconciliation_adopts_current_lichess_position_and_history() -> None:
     assert window._reconciliation_requested is False
 
 
-def test_stop_reconciliation_accepts_current_authoritative_position() -> None:
+def test_stop_reconciliation_waits_for_clean_reference_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow, QTimer
+
+    target_position = {(0, 4): "k", (7, 4): "K"}
+    lichess_game = object()
+    callback: Callable[[], None] | None = None
+
+    def capture_timer(
+        milliseconds: int,
+        pending_callback: Callable[[], None],
+    ) -> None:
+        nonlocal callback
+        assert milliseconds == 1000
+        callback = pending_callback
+
+    monkeypatch.setattr(QTimer, "singleShot", capture_timer)
+    window = SimpleNamespace(
+        _physical_reconciliation_target=MagicMock(
+            return_value=(target_position, lichess_game)
+        ),
+        _latest_frame=np.zeros((20, 20, 3), dtype=np.uint8),
+        _calibration_result=object(),
+        _lichess_player_color="white",
+        _reconciliation_requested=True,
+        _reconciliation_reference_acceptance_pending=False,
+        _reconciliation_blackout_generation=3,
+        _reconciliation_blackout_pending=False,
+        _black_projector=MagicMock(),
+        _occupancy_detector=MagicMock(),
+        _reference_move_tracker=MagicMock(),
+        _board_widget=MagicMock(),
+        _piece_status=MagicMock(),
+        _occupancy_status=MagicMock(),
+        _projector_status=MagicMock(),
+        _finish_reconciliation_blackout=MagicMock(),
+    )
+    window._queue_clean_reconciliation_reference_capture = lambda: (
+        CameraWindow._queue_clean_reconciliation_reference_capture(window)
+    )
+
+    CameraWindow._accept_current_physical_reconciliation(window)
+
+    assert window._reconciliation_reference_acceptance_pending is True
+    assert window._reconciliation_blackout_pending is True
+    assert callback is not None
+    window._black_projector.assert_called_once_with()
+    window._occupancy_detector.reset.assert_called_once_with()
+    window._board_widget.set_reconciliation_squares.assert_called_once_with(())
+    callback()
+    window._finish_reconciliation_blackout.assert_called_once_with(4)
+
+
+def test_manual_reconciliation_accepts_next_stable_clean_frame() -> None:
     from types import SimpleNamespace
     from unittest.mock import MagicMock
 
@@ -914,18 +971,21 @@ def test_stop_reconciliation_accepts_current_authoritative_position() -> None:
         _physical_reconciliation_target=MagicMock(
             return_value=(target_position, lichess_game)
         ),
-        _latest_frame=np.zeros((20, 20, 3), dtype=np.uint8),
-        _calibration_result=object(),
-        _lichess_player_color="white",
+        _reconciliation_reference_acceptance_pending=True,
         _complete_physical_reconciliation=complete,
+        _board_widget=MagicMock(),
+        _piece_status=MagicMock(),
+        _occupancy_status=MagicMock(),
     )
 
-    CameraWindow._accept_current_physical_reconciliation(window)
+    CameraWindow._update_physical_reconciliation(
+        window, frozenset()
+    )
 
     complete.assert_called_once_with(
         target_position,
         lichess_game,
-        "Reconciliation stopped by user; current position accepted.",
+        "Current physical position accepted; clean move reference captured.",
     )
 
 
