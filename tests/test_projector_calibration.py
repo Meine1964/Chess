@@ -426,7 +426,12 @@ def test_new_calibration_requires_orientation_redetection() -> None:
 
     from src.chess_camera.camera_app import CameraWindow
 
-    geometry = SimpleNamespace(width=lambda: 1280, height=lambda: 720)
+    geometry = SimpleNamespace(
+        width=lambda: 1280,
+        height=lambda: 720,
+        x=lambda: 0,
+        y=lambda: 0,
+    )
     screen = SimpleNamespace(geometry=lambda: geometry)
     result = SimpleNamespace(
         mapping=SimpleNamespace(projector_grid=np.zeros((9, 9, 2)))
@@ -673,7 +678,7 @@ def test_stale_selected_square_timeout_does_not_clear_newer_square() -> None:
     window._projector_status.setText.assert_not_called()
 
 
-def test_failed_recalibration_invalidates_previous_mapping() -> None:
+def test_failed_populated_calibration_retains_previous_mapping() -> None:
     from types import SimpleNamespace
     from unittest.mock import MagicMock
 
@@ -682,6 +687,7 @@ def test_failed_recalibration_invalidates_previous_mapping() -> None:
     window = SimpleNamespace(
         _projector_window=MagicMock(),
         _calibration_result=object(),
+        _alignment_monitor=MagicMock(),
         _calibrator=SimpleNamespace(
             quick_verification=False,
             validation_only=False,
@@ -698,12 +704,16 @@ def test_failed_recalibration_invalidates_previous_mapping() -> None:
 
     CameraWindow._projector_calibration_failed(window, "failed")
 
-    window._invalidate_saved_calibration.assert_called_once_with()
-    window._invalidate_calibration.assert_called_once_with()
+    window._invalidate_saved_calibration.assert_not_called()
+    window._invalidate_calibration.assert_not_called()
+    window._alignment_monitor.set_black.assert_called_once_with()
     assert (
-        "invalidated"
+        "remains active"
         in window._projector_status.setText.call_args.args[0]
     )
+    details = window._record_runtime_diagnostic.call_args.kwargs["details"]
+    assert details["previous_calibration_retained"] is True
+    assert details["previous_calibration_invalidated"] is False
 
 
 def test_alignment_loss_invalidates_projection_mapping() -> None:
@@ -740,10 +750,17 @@ def test_open_projector_marks_black_as_authoritative_output() -> None:
 
     from src.chess_camera.camera_app import CameraWindow
 
-    geometry = SimpleNamespace(width=lambda: 1280, height=lambda: 720)
+    geometry = SimpleNamespace(
+        width=lambda: 1280,
+        height=lambda: 720,
+        x=lambda: 0,
+        y=lambda: 0,
+    )
     screen = SimpleNamespace(
         geometry=lambda: geometry,
         name=lambda: "projector",
+        manufacturer=lambda: "",
+        model=lambda: "",
     )
     window = SimpleNamespace(
         _screens=[screen],
@@ -1193,7 +1210,7 @@ def test_polling_rebaseline_restarts_physical_reconciliation() -> None:
     start_reconciliation.assert_called_once_with()
 
 
-def test_missing_remembered_projector_falls_back_to_primary() -> None:
+def test_missing_remembered_projector_does_not_select_replacement() -> None:
     from types import SimpleNamespace
 
     from src.chess_camera.camera_app import CameraWindow
@@ -1203,11 +1220,104 @@ def test_missing_remembered_projector_falls_back_to_primary() -> None:
 
     selected = CameraWindow._default_projector_index(
         [primary, secondary],
-        primary,
         "missing-projector",
     )
 
-    assert selected == 0
+    assert selected == -1
+
+
+def test_explicit_projector_selection_is_persisted() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, call
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    settings = MagicMock()
+    geometry = SimpleNamespace(
+        width=lambda: 1280,
+        height=lambda: 720,
+        x=lambda: 0,
+        y=lambda: 0,
+    )
+    window = SimpleNamespace(
+        _calibrator=SimpleNamespace(active=False),
+        _projector_selector=SimpleNamespace(currentIndex=lambda: 1),
+        _screens=[
+            SimpleNamespace(
+                name=lambda: "primary",
+                geometry=lambda: geometry,
+                manufacturer=lambda: "",
+                model=lambda: "",
+            ),
+            SimpleNamespace(
+                name=lambda: "remembered-projector",
+                geometry=lambda: geometry,
+                manufacturer=lambda: "",
+                model=lambda: "",
+            ),
+        ],
+        _settings=settings,
+        _record_runtime_diagnostic=MagicMock(),
+        _restore_saved_calibration=MagicMock(),
+    )
+
+    CameraWindow._projector_selection_changed(window)
+
+    assert settings.setValue.call_args_list == [
+        call("projector/screen_name", "remembered-projector"),
+        call(
+            "projector/screen_label",
+            "remembered-projector - 1280x720 at (0, 0)",
+        ),
+    ]
+    settings.sync.assert_called_once_with()
+
+
+def test_projector_screen_refresh_uses_current_enumeration() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    geometry = SimpleNamespace(
+        width=lambda: 1280,
+        height=lambda: 720,
+        x=lambda: 0,
+        y=lambda: 0,
+    )
+    primary = SimpleNamespace(
+        name=lambda: "primary",
+        geometry=lambda: geometry,
+        manufacturer=lambda: "",
+        model=lambda: "",
+    )
+    mini = SimpleNamespace(
+        name=lambda: "ABC TV",
+        geometry=lambda: geometry,
+        manufacturer=lambda: "",
+        model=lambda: "",
+    )
+    selector = MagicMock()
+    settings = MagicMock()
+    settings.value.return_value = "ABC TV"
+    window = SimpleNamespace(
+        _settings=settings,
+        _projector_selector=selector,
+        _screens=[],
+        _restore_saved_calibration=MagicMock(),
+    )
+
+    CameraWindow._refresh_projector_screens(
+        window,
+        [primary, mini],
+    )
+
+    assert window._screens == [primary, mini]
+    assert selector.addItem.call_args_list[-1].args == (
+        "ABC TV - 1280x720 at (0, 0)",
+    )
+    selector.setCurrentIndex.assert_called_once_with(1)
+    window._restore_saved_calibration.assert_called_once_with()
 
 
 def test_reset_to_start_blacks_projector_before_verification() -> None:

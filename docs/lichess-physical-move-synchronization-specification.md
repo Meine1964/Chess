@@ -833,7 +833,7 @@ The ordinary-move, non-promotion capture, and castling slices are implemented:
 - Promotions, en passant, and capture-promotions explicitly enter
   reconciliation until their staged slices are implemented.
 
-The validated automated suite contains 237 passing tests. Live ordinary-move,
+The validated automated suite contains 246 passing tests. Live ordinary-move,
 polling, reconciliation, and guidance acceptance has been exercised on the
 target camera/projector setup. Lichess capture and castling behavior is automated-test validated and awaits
 live acceptance. Promotions, en passant, and capture-promotions remain staged

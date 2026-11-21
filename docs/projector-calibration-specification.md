@@ -722,15 +722,28 @@ Calibration shall fail safely and explain the cause when:
 - Hardware disappears or changes resolution.
 - The board, camera, or projector appears to move.
 
+Temporarily unavailable camera or projector hardware shall not replace the
+persisted device selection with another available device. Calibration may
+become unavailable while the selected hardware is absent, but the application
+shall attempt to restore the matching calibration only when the same selected
+camera and projector identities return.
+
 Every failure path shall make the projector black before returning control to
 the user.
 
-A failed full, populated-board, quick-realignment, or validation operation
-shall invalidate the active projection mapping. Matching hardware identity is
-not evidence that a saved mapping remains geometrically valid after the camera,
-board, or projector has moved. The failed mapping may remain on disk for
-diagnostics, but the UI shall require a successful calibration before allowing
-square projection.
+A failed full, quick-realignment, or validation operation shall invalidate the
+active projection mapping. Matching hardware identity is not evidence that a
+saved mapping remains geometrically valid after the camera, board, or projector
+has moved. The failed mapping may remain on disk for diagnostics, but the UI
+shall require a successful calibration before allowing square projection.
+
+The experimental populated-board operation is a candidate replacement rather
+than evidence that the accepted mapping has become invalid. If it fails while
+a verified calibration is active, the application shall black the projector,
+report the candidate failure, retain the active and saved verified mapping,
+restore its usable calibration indicators, and record that the previous
+mapping was retained. If no verified mapping exists, the failure shall leave
+projection unavailable.
 
 ## 19. Implementation Stages
 

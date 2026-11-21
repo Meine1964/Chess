@@ -1,3 +1,5 @@
+import pytest
+
 from src.chess_camera.camera_app import (
     CameraWindow,
     _accepted_position_message,
@@ -7,6 +9,7 @@ from src.chess_camera.camera_app import (
     _lichess_game_state_message,
     _lichess_polling_snapshot_message,
     _lichess_turn_indicator_state,
+    _lichess_token_configuration_message,
     _ongoing_game_label,
     _reference_tracking_status_message,
     _turn_indicator_state,
@@ -27,6 +30,44 @@ from src.chess_camera.reference_move_tracker import (
 
 def test_turn_indicator_is_hidden_in_diagnostic_mode() -> None:
     assert _turn_indicator_state("diagnostic", LegalGame()) is None
+
+
+def test_lichess_token_status_reports_environment_without_revealing_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LICHESS_TOKEN", "secret-token-value")
+
+    configured = _lichess_token_configuration_message()
+
+    assert configured == "LICHESS_TOKEN is configured in the environment."
+    assert "secret-token-value" not in configured
+
+    monkeypatch.setenv("LICHESS_TOKEN", "   ")
+
+    assert _lichess_token_configuration_message() == (
+        "LICHESS_TOKEN is not configured in the environment."
+    )
+
+
+def test_stable_menu_preferences_are_persisted() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, call
+
+    settings = MagicMock()
+    window = SimpleNamespace(
+        _settings=settings,
+        _preferred_lichess_game_id="",
+    )
+
+    CameraWindow._save_diagnostics_preference_changed(window, False)
+    CameraWindow._remember_lichess_game_selection(window, "game1234")
+
+    assert settings.setValue.call_args_list == [
+        call("diagnostics/save_snapshots", False),
+        call("lichess/selected_game_id", "game1234"),
+    ]
+    assert settings.sync.call_count == 2
+    assert window._preferred_lichess_game_id == "game1234"
 
 
 def test_lichess_game_state_message_reports_clocks_and_result() -> None:

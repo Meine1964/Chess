@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import sys
 from collections.abc import Sequence
 from dataclasses import replace
@@ -10,6 +11,8 @@ import cv2
 import numpy as np
 from PySide6.QtCore import QSettings, QThread, QTimer, Qt
 from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
     QCloseEvent,
     QGuiApplication,
     QImage,
@@ -31,6 +34,9 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -38,8 +44,8 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QProgressBar,
-    QPushButton,
     QScrollArea,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -99,11 +105,16 @@ from .reference_store import ReferenceImageStore
 _SETTINGS_ORGANIZATION = "ChessProject"
 _SETTINGS_APPLICATION = "ChessboardCamera"
 _CAMERA_SETTING = "camera/device_id"
+_CAMERA_NAME_SETTING = "camera/device_name"
 _PROJECTOR_SETTING = "projector/screen_name"
+_PROJECTOR_LABEL_SETTING = "projector/screen_label"
+_SAVE_DIAGNOSTICS_SETTING = "diagnostics/save_snapshots"
+_LICHESS_GAME_SETTING = "lichess/selected_game_id"
 _PIECE_POSITION_SETTING = "pieces/accepted_position"
 _GAME_MODE_SETTING = "game/mode"
 _LEGAL_GAME_FEN_SETTING = "game/offline_fen"
 _BOARD_ORIENTATION_SETTING = "board/automatic_clockwise_quarter_turns"
+_INTERACTION_FONT_POINT_SIZE = 12
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _INTEGRATED_CAMERA_TERMS = (
     "built-in",
@@ -294,10 +305,9 @@ def _is_external_camera(
 def _resolve_camera_index(
     device_names: Sequence[str],
     device_keys: Sequence[str],
-    default_key: str,
     saved_key: str,
     selector: str | None,
-) -> int:
+) -> int | None:
     if not device_names or len(device_names) != len(device_keys):
         raise RuntimeError("No usable camera devices were found.")
 
@@ -324,9 +334,7 @@ def _resolve_camera_index(
 
     if saved_key in device_keys:
         return device_keys.index(saved_key)
-    if default_key in device_keys:
-        return device_keys.index(default_key)
-    return 0
+    return None
 
 
 def _snapshot_board_detection(
@@ -343,6 +351,53 @@ def _snapshot_board_detection(
         reprojection_error=None,
         method="verified calibrated camera grid",
     )
+
+
+def _lichess_token_configuration_message() -> str:
+    token = os.environ.get("LICHESS_TOKEN", "")
+    return (
+        "LICHESS_TOKEN is configured in the environment."
+        if token.strip()
+        else "LICHESS_TOKEN is not configured in the environment."
+    )
+
+
+def _stored_boolean(value: object, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in ("true", "1", "yes", "on"):
+            return True
+        if normalized in ("false", "0", "no", "off"):
+            return False
+    return default
+
+
+def _persistent_choice_options(
+    available: Sequence[tuple[str, str]],
+    remembered_id: str,
+    remembered_label: str,
+) -> tuple[tuple[tuple[str, str], ...], int]:
+    options = list(available)
+    for index, (_label, identity) in enumerate(options):
+        if identity == remembered_id:
+            return tuple(options), index
+    if remembered_id:
+        label = remembered_label or remembered_id
+        options.append((f"{label} (unavailable)", remembered_id))
+        return tuple(options), len(options) - 1
+    return tuple(options), -1
+
+
+def _set_readable_interaction_font(widget: QWidget) -> None:
+    font = widget.font()
+    font.setPointSize(
+        max(font.pointSize(), _INTERACTION_FONT_POINT_SIZE)
+    )
+    widget.setFont(font)
 
 
 class CameraWindow(QMainWindow):
@@ -371,13 +426,11 @@ class CameraWindow(QMainWindow):
         self._devices = self._external_camera_devices()
         device_names = [device.description() for device in self._devices]
         device_keys = [self._device_key(device) for device in self._devices]
-        default_key = self._device_key(QMediaDevices.defaultVideoInput())
         saved_key = str(self._settings.value(_CAMERA_SETTING, ""))
         selected_index = (
             _resolve_camera_index(
                 device_names,
                 device_keys,
-                default_key,
                 saved_key,
                 camera_selector,
             )
@@ -443,6 +496,9 @@ class CameraWindow(QMainWindow):
         self._lichess_disconnect_requested = False
         self._close_pending = False
         self._lichess_game_id: str | None = None
+        self._preferred_lichess_game_id = str(
+            self._settings.value(_LICHESS_GAME_SETTING, "")
+        )
         self._lichess_player_color: PlayerColor | None = None
         self._lichess_opponent_name = ""
         self._lichess_game_controller: LichessGameController | None = None
@@ -507,6 +563,8 @@ class CameraWindow(QMainWindow):
         self._camera_selector.addItems(device_names)
         if selected_index is not None:
             self._camera_selector.setCurrentIndex(selected_index)
+        else:
+            self._camera_selector.setCurrentIndex(-1)
         self._camera_selector.setEnabled(bool(self._devices))
         self._game_mode_selector = QComboBox()
         self._game_mode_selector.setMaximumWidth(260)
@@ -523,10 +581,6 @@ class CameraWindow(QMainWindow):
         self._turn_text = QLabel()
 
         camera_layout = QHBoxLayout()
-        camera_layout.addWidget(QLabel("Camera:"))
-        camera_layout.addWidget(self._camera_selector)
-        camera_layout.addWidget(QLabel("Rules:"))
-        camera_layout.addWidget(self._game_mode_selector)
         camera_layout.addWidget(QLabel("Turn:"))
         camera_layout.addWidget(self._turn_indicator)
         camera_layout.addWidget(self._turn_text)
@@ -548,27 +602,36 @@ class CameraWindow(QMainWindow):
             "remove your hand. Press Esc or Q to exit."
         )
 
-        self._snapshot_button = QPushButton("Take snapshot")
-        self._snapshot_button.clicked.connect(self._take_snapshot)
-        self._resume_button = QPushButton("Resume live camera")
-        self._resume_button.clicked.connect(self._resume_live_camera)
+        self._snapshot_button = QAction("Take snapshot", self)
+        self._snapshot_button.triggered.connect(self._take_snapshot)
+        self._resume_button = QAction("Resume live camera", self)
+        self._resume_button.triggered.connect(self._resume_live_camera)
         self._resume_button.setEnabled(False)
         self._save_diagnostics = QCheckBox("Save diagnostic snapshots")
-        self._save_diagnostics.setChecked(True)
-        self._reset_pieces_button = QPushButton(
-            "Reset pieces to starting position"
+        self._save_diagnostics.setChecked(
+            _stored_boolean(
+                self._settings.value(_SAVE_DIAGNOSTICS_SETTING, True),
+                True,
+            )
         )
-        self._reset_pieces_button.clicked.connect(
+        self._save_diagnostics.toggled.connect(
+            self._save_diagnostics_preference_changed
+        )
+        self._reset_pieces_button = QAction(
+            "Reset pieces to starting position",
+            self,
+        )
+        self._reset_pieces_button.triggered.connect(
             self._reset_pieces_to_start
         )
         self._reset_pieces_button.setEnabled(False)
-        self._reconcile_button = QPushButton("Reconcile physical board")
-        self._reconcile_button.clicked.connect(
+        self._reconcile_button = QAction("Reconcile physical board", self)
+        self._reconcile_button.triggered.connect(
             self._toggle_physical_reconciliation
         )
         self._reconcile_button.setEnabled(False)
-        self._lichess_button = QPushButton("Connect to Lichess")
-        self._lichess_button.clicked.connect(
+        self._lichess_button = QAction("Connect to Lichess", self)
+        self._lichess_button.triggered.connect(
             self._toggle_lichess_connection
         )
         self._lichess_game_selector = QComboBox()
@@ -581,20 +644,6 @@ class CameraWindow(QMainWindow):
         self._lichess_game_selector.currentIndexChanged.connect(
             self._lichess_game_selection_changed
         )
-        button_layout = QGridLayout()
-        button_layout.addWidget(self._snapshot_button, 0, 0)
-        button_layout.addWidget(self._resume_button, 0, 1)
-        button_layout.addWidget(self._save_diagnostics, 0, 2)
-        button_layout.addWidget(self._reset_pieces_button, 1, 0)
-        button_layout.addWidget(self._reconcile_button, 1, 1)
-        button_layout.addWidget(self._lichess_button, 1, 2)
-        lichess_game_layout = QHBoxLayout()
-        lichess_game_layout.addWidget(QLabel("Lichess game:"))
-        lichess_game_layout.addWidget(
-            self._lichess_game_selector,
-            stretch=1,
-        )
-
         self._screens = list(QGuiApplication.screens())
         self._projector_selector = QComboBox()
         self._projector_selector.setMaximumWidth(360)
@@ -606,140 +655,88 @@ class CameraWindow(QMainWindow):
         saved_screen_name = str(
             self._settings.value(_PROJECTOR_SETTING, "")
         )
-        calibrated_screen_name = self._calibrated_screen_name(
-            self._screens
-        )
         projector_index = self._default_projector_index(
             self._screens,
-            primary_screen,
-            calibrated_screen_name or saved_screen_name,
+            saved_screen_name,
         )
         self._projector_selector.setCurrentIndex(projector_index)
 
-        self._open_projector_button = QPushButton("Open projector (black)")
-        self._open_projector_button.clicked.connect(self._open_projector)
-        self._focus_pattern_button = QPushButton("Focus pattern")
-        self._focus_pattern_button.clicked.connect(
+        self._open_projector_button = QAction(
+            "Open projector black",
+            self,
+        )
+        self._open_projector_button.triggered.connect(self._open_projector)
+        self._focus_pattern_button = QAction("Show focus pattern", self)
+        self._focus_pattern_button.triggered.connect(
             self._show_focus_pattern
         )
-        self._black_projector_button = QPushButton("Black")
-        self._black_projector_button.clicked.connect(
+        self._black_projector_button = QAction("Black projector", self)
+        self._black_projector_button.triggered.connect(
             self._black_projector
         )
-        self._close_projector_button = QPushButton("Close projector")
-        self._close_projector_button.clicked.connect(
+        self._close_projector_button = QAction("Close projector", self)
+        self._close_projector_button.triggered.connect(
             self._close_projector
         )
 
-        projector_display_layout = QHBoxLayout()
-        projector_display_layout.addWidget(QLabel("Projector display:"))
-        projector_display_layout.addWidget(
-            self._projector_selector,
-            stretch=1,
-        )
-        projector_display_layout.addWidget(self._open_projector_button)
-
-        projector_actions_layout = QGridLayout()
-        projector_actions_layout.addWidget(
-            self._focus_pattern_button,
-            0,
-            0,
-        )
-        projector_actions_layout.addWidget(
-            self._black_projector_button,
-            0,
-            1,
-        )
-        projector_actions_layout.addWidget(
-            self._close_projector_button,
-            0,
-            2,
-        )
-
-        self._start_calibration_button = QPushButton(
-            "Full calibration (empty board)"
+        self._start_calibration_button = QAction(
+            "Full calibration - empty board",
+            self,
         )
         self._start_calibration_button.setToolTip(
             "Remove all pieces before running the accepted Gray-code "
             "calibration."
         )
-        self._start_calibration_button.clicked.connect(
+        self._start_calibration_button.triggered.connect(
             self._start_projector_calibration
         )
-        self._coded_calibration_button = QPushButton(
-            "Populated calibration (experimental)"
+        self._coded_calibration_button = QAction(
+            "Populated calibration - experimental",
+            self,
         )
         self._coded_calibration_button.setToolTip(
             "Experimental hardware path for recalibration without removing "
             "the pieces. A failure retains the previous verified calibration."
         )
-        self._coded_calibration_button.clicked.connect(
+        self._coded_calibration_button.triggered.connect(
             self._start_coded_projector_calibration
         )
-        self._quick_verify_button = QPushButton(
-            "Quick realign / assess"
+        self._quick_verify_button = QAction(
+            "Quick realign / assess",
+            self,
         )
-        self._quick_verify_button.clicked.connect(
+        self._quick_verify_button.triggered.connect(
             self._start_quick_verification
         )
         self._quick_verify_button.setEnabled(False)
-        self._validate_calibration_button = QPushButton(
-            "Validate calibration"
+        self._validate_calibration_button = QAction(
+            "Validate calibration",
+            self,
         )
-        self._validate_calibration_button.clicked.connect(
+        self._validate_calibration_button.triggered.connect(
             self._start_validation_only
         )
         self._validate_calibration_button.setEnabled(False)
-        self._cancel_calibration_button = QPushButton("Cancel calibration")
-        self._cancel_calibration_button.clicked.connect(
+        self._cancel_calibration_button = QAction(
+            "Cancel calibration",
+            self,
+        )
+        self._cancel_calibration_button.triggered.connect(
             self._cancel_projector_calibration
         )
         self._cancel_calibration_button.setEnabled(False)
-        self._show_grid_button = QPushButton("Project 8x8 grid")
-        self._show_grid_button.clicked.connect(self._show_calibrated_grid)
+        self._show_grid_button = QAction("Project 8x8 grid", self)
+        self._show_grid_button.triggered.connect(self._show_calibrated_grid)
         self._show_grid_button.setEnabled(False)
-        self._show_squares_button = QPushButton("Project all 64 squares")
-        self._show_squares_button.clicked.connect(
+        self._show_squares_button = QAction(
+            "Project all 64 squares",
+            self,
+        )
+        self._show_squares_button.triggered.connect(
             self._show_calibrated_squares
         )
         self._show_squares_button.setEnabled(False)
-        calibration_layout = QGridLayout()
-        calibration_layout.addWidget(self._start_calibration_button, 0, 0)
-        calibration_layout.addWidget(self._coded_calibration_button, 0, 1)
-        calibration_layout.addWidget(
-            self._validate_calibration_button,
-            0,
-            2,
-        )
-        calibration_layout.addWidget(self._quick_verify_button, 0, 3)
-        calibration_layout.addWidget(self._cancel_calibration_button, 1, 0)
-        calibration_layout.addWidget(self._show_grid_button, 1, 1)
-        calibration_layout.addWidget(
-            self._show_squares_button,
-            1,
-            2,
-            1,
-            2,
-        )
-        for button in (
-            self._snapshot_button,
-            self._resume_button,
-            self._reset_pieces_button,
-            self._reconcile_button,
-            self._lichess_button,
-            self._open_projector_button,
-            self._focus_pattern_button,
-            self._black_projector_button,
-            self._close_projector_button,
-            self._start_calibration_button,
-            self._coded_calibration_button,
-            self._validate_calibration_button,
-            self._quick_verify_button,
-            self._cancel_calibration_button,
-            self._show_grid_button,
-            self._show_squares_button,
-        ):
-            button.setMaximumWidth(220)
+        self._create_application_menus()
 
         self._calibration_progress = QProgressBar()
         self._calibration_progress.setRange(0, 1)
@@ -792,7 +789,8 @@ class CameraWindow(QMainWindow):
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
         self._lichess_status = QLabel(
-            "Lichess disconnected. Configure LICHESS_TOKEN to connect."
+            f"Lichess disconnected. "
+            f"{_lichess_token_configuration_message()}"
         )
         self._lichess_status.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
@@ -832,13 +830,9 @@ class CameraWindow(QMainWindow):
         lichess_panel.setLayout(lichess_panel_layout)
 
         interaction_content = QWidget()
+        _set_readable_interaction_font(interaction_content)
         interaction_layout = QVBoxLayout()
         interaction_layout.addLayout(camera_layout)
-        interaction_layout.addLayout(button_layout)
-        interaction_layout.addLayout(lichess_game_layout)
-        interaction_layout.addLayout(projector_display_layout)
-        interaction_layout.addLayout(projector_actions_layout)
-        interaction_layout.addLayout(calibration_layout)
         interaction_layout.addWidget(self._calibration_progress)
         interaction_layout.addLayout(calibration_indicator_layout)
         interaction_layout.addWidget(self._camera_status)
@@ -910,21 +904,282 @@ class CameraWindow(QMainWindow):
             "Chessboard camera application started.",
         )
 
+    def _create_application_menus(self) -> None:
+        file_menu = self.menuBar().addMenu("&File")
+        self._settings_action = file_menu.addAction("Settings...")
+        self._settings_action.triggered.connect(self._show_settings_dialog)
+        file_menu.addSeparator()
+        exit_action = file_menu.addAction("Exit")
+        exit_action.triggered.connect(self.close)
+
+        camera_menu = self.menuBar().addMenu("&Camera")
+        camera_menu.addAction(self._snapshot_button)
+        camera_menu.addAction(self._resume_button)
+        camera_menu.addSeparator()
+        camera_menu.addAction(self._reset_pieces_button)
+        camera_menu.addAction(self._reconcile_button)
+
+        game_menu = self.menuBar().addMenu("&Game")
+        mode_menu = game_menu.addMenu("Mode")
+        self._game_mode_action_group = QActionGroup(self)
+        self._game_mode_action_group.setExclusive(True)
+        self._diagnostic_mode_action = mode_menu.addAction(
+            "Diagnostic movement"
+        )
+        self._diagnostic_mode_action.setCheckable(True)
+        self._diagnostic_mode_action.triggered.connect(
+            lambda: self._game_mode_selector.setCurrentIndex(0)
+        )
+        self._game_mode_action_group.addAction(
+            self._diagnostic_mode_action
+        )
+        self._offline_mode_action = mode_menu.addAction("Offline legal game")
+        self._offline_mode_action.setCheckable(True)
+        self._offline_mode_action.triggered.connect(
+            lambda: self._game_mode_selector.setCurrentIndex(1)
+        )
+        self._game_mode_action_group.addAction(self._offline_mode_action)
+        self._sync_game_mode_actions()
+
+        lichess_menu = game_menu.addMenu("Lichess")
+        lichess_menu.addAction(self._lichess_button)
+        lichess_menu.addSeparator()
+        self._lichess_games_menu = lichess_menu.addMenu("Active game")
+        self._lichess_game_action_group = QActionGroup(self)
+        self._lichess_game_action_group.setExclusive(True)
+        self._rebuild_lichess_games_menu()
+
+        projector_menu = self.menuBar().addMenu("&Projector")
+        projector_menu.addAction(self._open_projector_button)
+        projector_menu.addAction(self._focus_pattern_button)
+        projector_menu.addAction(self._black_projector_button)
+        projector_menu.addAction(self._close_projector_button)
+        projector_menu.addSeparator()
+        patterns_menu = projector_menu.addMenu("Test patterns")
+        patterns_menu.addAction(self._show_grid_button)
+        patterns_menu.addAction(self._show_squares_button)
+
+        calibration_menu = self.menuBar().addMenu("&Calibration")
+        calibration_menu.addAction(self._start_calibration_button)
+        calibration_menu.addAction(self._coded_calibration_button)
+        calibration_menu.addAction(self._quick_verify_button)
+        calibration_menu.addAction(self._validate_calibration_button)
+        calibration_menu.addSeparator()
+        calibration_menu.addAction(self._cancel_calibration_button)
+
+    def _sync_game_mode_actions(self) -> None:
+        diagnostic = self._game_mode_selector.currentData() == "diagnostic"
+        self._diagnostic_mode_action.setChecked(diagnostic)
+        self._offline_mode_action.setChecked(not diagnostic)
+
+    def _rebuild_lichess_games_menu(self) -> None:
+        self._lichess_games_menu.clear()
+        self._lichess_game_action_group = QActionGroup(self)
+        self._lichess_game_action_group.setExclusive(True)
+        current_game_id = self._lichess_game_selector.currentData()
+        selectable_games = 0
+        for index in range(self._lichess_game_selector.count()):
+            label = self._lichess_game_selector.itemText(index)
+            game_id = self._lichess_game_selector.itemData(index)
+            action = self._lichess_games_menu.addAction(label)
+            if not isinstance(game_id, str):
+                action.setEnabled(False)
+                continue
+            selectable_games += 1
+            action.setCheckable(True)
+            action.setChecked(game_id == current_game_id)
+            action.triggered.connect(
+                lambda _checked=False, selected=game_id: (
+                    self._select_lichess_game_from_menu(selected)
+                )
+            )
+            self._lichess_game_action_group.addAction(action)
+        self._lichess_games_menu.setEnabled(selectable_games > 0)
+
+    def _select_lichess_game_from_menu(self, game_id: str) -> None:
+        index = self._lichess_game_selector.findData(game_id)
+        if index >= 0:
+            self._lichess_game_selector.setCurrentIndex(index)
+        self._rebuild_lichess_games_menu()
+
+    def _show_settings_dialog(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Settings")
+        dialog.setModal(True)
+        tabs = QTabWidget(dialog)
+
+        devices_tab = QWidget()
+        devices_layout = QFormLayout()
+        camera_selector = QComboBox()
+        camera_options, camera_index = _persistent_choice_options(
+            tuple(
+                (
+                    device.description(),
+                    self._device_key(device),
+                )
+                for device in self._devices
+            ),
+            str(self._settings.value(_CAMERA_SETTING, "")),
+            str(self._settings.value(_CAMERA_NAME_SETTING, "")),
+        )
+        for label, identity in camera_options:
+            camera_selector.addItem(label, identity)
+        camera_selector.setCurrentIndex(camera_index)
+
+        projector_selector = QComboBox()
+
+        def refresh_projector_selector(
+            _screen: QScreen | None = None,
+        ) -> None:
+            selected_identity = projector_selector.currentData()
+            selected_label = projector_selector.currentText()
+            self._refresh_projector_screens(
+                list(QGuiApplication.screens())
+            )
+            remembered_id = (
+                selected_identity
+                if isinstance(selected_identity, str)
+                else str(self._settings.value(_PROJECTOR_SETTING, ""))
+            )
+            remembered_label = (
+                selected_label.removesuffix(" (unavailable)")
+                if isinstance(selected_identity, str)
+                else str(
+                    self._settings.value(_PROJECTOR_LABEL_SETTING, "")
+                )
+            )
+            primary_screen = QGuiApplication.primaryScreen()
+            projector_options, projector_index = (
+                _persistent_choice_options(
+                    tuple(
+                        (
+                            CameraWindow._projector_screen_label(
+                                screen,
+                                primary_screen,
+                            ),
+                            screen.name(),
+                        )
+                        for screen in self._screens
+                    ),
+                    remembered_id,
+                    remembered_label,
+                )
+            )
+            projector_selector.blockSignals(True)
+            projector_selector.clear()
+            for label, identity in projector_options:
+                projector_selector.addItem(label, identity)
+            projector_selector.setCurrentIndex(projector_index)
+            projector_selector.blockSignals(False)
+
+        refresh_projector_selector()
+        devices_layout.addRow("Camera:", camera_selector)
+        devices_layout.addRow("Projector display:", projector_selector)
+        devices_tab.setLayout(devices_layout)
+        tabs.addTab(devices_tab, "Devices")
+
+        diagnostics_tab = QWidget()
+        diagnostics_layout = QVBoxLayout()
+        save_diagnostics = QCheckBox("Save diagnostic snapshots")
+        save_diagnostics.setChecked(self._save_diagnostics.isChecked())
+        diagnostics_layout.addWidget(save_diagnostics)
+        diagnostics_layout.addStretch(1)
+        diagnostics_tab.setLayout(diagnostics_layout)
+        tabs.addTab(diagnostics_tab, "Diagnostics")
+
+        lichess_tab = QWidget()
+        lichess_layout = QVBoxLayout()
+        lichess_status = QLabel(self._lichess_status.text())
+        lichess_status.setWordWrap(True)
+        lichess_layout.addWidget(lichess_status)
+        lichess_layout.addWidget(
+            QLabel(
+                f"{_lichess_token_configuration_message()} Authentication "
+                "continues to use the environment value. The token is not "
+                "displayed or stored in application settings."
+            )
+        )
+        lichess_layout.addStretch(1)
+        lichess_tab.setLayout(lichess_layout)
+        tabs.addTab(lichess_tab, "Lichess")
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+            | QDialogButtonBox.StandardButton.Apply
+        )
+
+        def apply_values() -> None:
+            selected_camera = camera_selector.currentData()
+            camera_keys = [
+                self._device_key(device) for device in self._devices
+            ]
+            if (
+                isinstance(selected_camera, str)
+                and selected_camera in camera_keys
+            ):
+                self._camera_selector.setCurrentIndex(
+                    camera_keys.index(selected_camera)
+                )
+            selected_projector = projector_selector.currentData()
+            projector_names = [screen.name() for screen in self._screens]
+            if (
+                isinstance(selected_projector, str)
+                and selected_projector in projector_names
+            ):
+                self._projector_selector.setCurrentIndex(
+                    projector_names.index(selected_projector)
+                )
+            self._save_diagnostics.setChecked(
+                save_diagnostics.isChecked()
+            )
+
+        def accept_values() -> None:
+            apply_values()
+            dialog.accept()
+
+        buttons.accepted.connect(accept_values)
+        buttons.rejected.connect(dialog.reject)
+        apply_button = buttons.button(
+            QDialogButtonBox.StandardButton.Apply
+        )
+        if apply_button is None:
+            raise RuntimeError("Settings dialog has no Apply button.")
+        apply_button.clicked.connect(apply_values)
+
+        layout = QVBoxLayout()
+        layout.addWidget(tabs)
+        layout.addWidget(buttons)
+        dialog.setLayout(layout)
+        dialog.resize(520, 320)
+        application = QGuiApplication.instance()
+        if isinstance(application, QGuiApplication):
+            application.screenAdded.connect(refresh_projector_selector)
+            application.screenRemoved.connect(refresh_projector_selector)
+        try:
+            dialog.exec()
+        finally:
+            if isinstance(application, QGuiApplication):
+                application.screenAdded.disconnect(
+                    refresh_projector_selector
+                )
+                application.screenRemoved.disconnect(
+                    refresh_projector_selector
+                )
+
+    def _save_diagnostics_preference_changed(self, checked: bool) -> None:
+        self._settings.setValue(_SAVE_DIAGNOSTICS_SETTING, checked)
+        self._settings.sync()
+
     @staticmethod
     def _default_projector_index(
         screens: Sequence[QScreen],
-        primary_screen: QScreen | None,
         saved_screen_name: str,
     ) -> int:
         for index, screen in enumerate(screens):
             if screen.name() == saved_screen_name:
                 return index
-        if saved_screen_name and primary_screen in screens:
-            return screens.index(primary_screen)
-        for index, screen in enumerate(screens):
-            if screen is not primary_screen:
-                return index
-        return 0
+        return -1
 
     @staticmethod
     def _projector_screen_label(
@@ -947,57 +1202,33 @@ class CameraWindow(QMainWindow):
             f"({geometry.x()}, {geometry.y()}){primary_suffix}"
         )
 
-    def _calibrated_screen_name(
+    def _available_screens_changed(self, _screen: QScreen) -> None:
+        self._refresh_projector_screens(
+            list(QGuiApplication.screens())
+        )
+
+    def _refresh_projector_screens(
         self,
         screens: Sequence[QScreen],
-    ) -> str:
-        try:
-            saved_display = self._calibration_store.saved_projector_display()
-        except ValueError:
-            return ""
-        if saved_display is None:
-            return ""
-        saved_name, saved_resolution = saved_display
-        for screen in screens:
-            geometry = screen.geometry()
-            if (
-                screen.name() == saved_name
-                and (geometry.width(), geometry.height())
-                == saved_resolution
-            ):
-                return saved_name
-        return ""
-
-    def _available_screens_changed(self, _screen: QScreen) -> None:
-        current_index = self._projector_selector.currentIndex()
-        current_name = (
-            self._screens[current_index].name()
-            if 0 <= current_index < len(self._screens)
-            else ""
-        )
-        screens = list(QGuiApplication.screens())
+    ) -> None:
         primary_screen = QGuiApplication.primaryScreen()
-        calibrated_screen_name = self._calibrated_screen_name(screens)
         saved_screen_name = str(
             self._settings.value(_PROJECTOR_SETTING, "")
         )
-        preferred_name = (
-            calibrated_screen_name
-            or current_name
-            or saved_screen_name
-        )
-        selected_index = self._default_projector_index(
+        selected_index = CameraWindow._default_projector_index(
             screens,
-            primary_screen,
-            preferred_name,
+            saved_screen_name,
         )
         self._projector_selector.blockSignals(True)
         self._projector_selector.clear()
         for screen in screens:
             self._projector_selector.addItem(
-                self._projector_screen_label(screen, primary_screen)
+                CameraWindow._projector_screen_label(
+                    screen,
+                    primary_screen,
+                )
             )
-        self._screens = screens
+        self._screens = list(screens)
         self._projector_selector.setCurrentIndex(selected_index)
         self._projector_selector.setEnabled(bool(screens))
         self._projector_selector.blockSignals(False)
@@ -1062,6 +1293,10 @@ class CameraWindow(QMainWindow):
         self._coded_calibration_button.setEnabled(True)
         self._resume_button.setEnabled(False)
         self._settings.setValue(_CAMERA_SETTING, self._device_key(device))
+        self._settings.setValue(
+            _CAMERA_NAME_SETTING,
+            device.description(),
+        )
         self._settings.sync()
 
         active_format = camera.cameraFormat()
@@ -1140,12 +1375,10 @@ class CameraWindow(QMainWindow):
             return
 
         saved_key = str(self._settings.value(_CAMERA_SETTING, ""))
-        default_key = self._device_key(QMediaDevices.defaultVideoInput())
         try:
             selected_index = _resolve_camera_index(
                 [device.description() for device in devices],
                 device_keys,
-                default_key,
                 saved_key,
                 self._requested_camera_selector,
             )
@@ -1154,6 +1387,13 @@ class CameraWindow(QMainWindow):
             self._wait_for_external_camera(str(error))
             return
 
+        if selected_index is None:
+            self._camera_selector.setCurrentIndex(-1)
+            self._camera_selector.blockSignals(False)
+            self._wait_for_external_camera(
+                "The previously selected camera is unavailable."
+            )
+            return
         self._camera_selector.setCurrentIndex(selected_index)
         self._camera_selector.blockSignals(False)
         self._start_camera(selected_index)
@@ -1216,6 +1456,13 @@ class CameraWindow(QMainWindow):
 
         self._alignment_monitor.set_black()
         self._settings.setValue(_PROJECTOR_SETTING, screen.name())
+        self._settings.setValue(
+            _PROJECTOR_LABEL_SETTING,
+            CameraWindow._projector_screen_label(
+                screen,
+                QGuiApplication.primaryScreen(),
+            ),
+        )
         self._settings.sync()
         geometry = screen.geometry()
         self._projector_status.setText(
@@ -1568,9 +1815,42 @@ class CameraWindow(QMainWindow):
         elif self._calibrator.validation_only:
             operation = "Validation"
         elif self._calibrator.coded_pattern_mode:
-            operation = "Coded-pattern calibration"
+            operation = "Populated calibration"
         else:
             operation = "Full calibration"
+        if (
+            self._calibration_result is not None
+            and self._calibrator.coded_pattern_mode
+        ):
+            self._alignment_monitor.set_black()
+            self._set_calibration_indicator(
+                self._projector_calibration_indicator,
+                "Projector calibration",
+                "ok",
+                f"{operation} failed: {message} "
+                "The previous verified mapping was retained.",
+            )
+            self._projector_status.setText(
+                f"{operation} failed: {message} The previous verified "
+                "mapping remains active."
+            )
+            self._record_runtime_diagnostic(
+                "calibration-failed",
+                message,
+                details={
+                    "operation": operation,
+                    "previous_calibration_retained": True,
+                    "previous_calibration_invalidated": False,
+                },
+                include_images=True,
+                additional_images={
+                    f"calibration-{name}": image
+                    for name, image in (
+                        self._calibrator.diagnostic_captures.items()
+                    )
+                },
+            )
+            return
         if self._calibration_result is not None:
             invalidation_error = self._invalidate_saved_calibration()
             self._invalidate_calibration()
@@ -3291,6 +3571,7 @@ class CameraWindow(QMainWindow):
         selected = str(self._game_mode_selector.itemData(index))
         if selected == "diagnostic":
             self._game_mode = "diagnostic"
+            self._sync_game_mode_actions()
             self._board_widget.set_illegal_source(None)
             self._last_rejected_move = None
             self._persist_game_state()
@@ -3304,6 +3585,7 @@ class CameraWindow(QMainWindow):
         position = self._piece_synchronizer.position
         if position == self._legal_game.position:
             self._game_mode = "offline-game"
+            self._sync_game_mode_actions()
             self._persist_game_state()
             self._update_turn_indicator()
             self._piece_status.setText(
@@ -3314,6 +3596,7 @@ class CameraWindow(QMainWindow):
         self._game_mode_selector.blockSignals(True)
         self._game_mode_selector.setCurrentIndex(0)
         self._game_mode_selector.blockSignals(False)
+        self._sync_game_mode_actions()
         self._update_turn_indicator()
         self._piece_status.setText(
             "Cannot enable legal play: reset the physical board to the "
@@ -3374,7 +3657,7 @@ class CameraWindow(QMainWindow):
         ):
             raise TypeError("Ongoing Lichess games must be a tuple.")
         games = cast(tuple[OngoingGame, ...], value)
-        previous = self._lichess_game_selector.currentData()
+        remembered = self._preferred_lichess_game_id
         self._lichess_game_selector.blockSignals(True)
         self._lichess_game_selector.clear()
         if not games:
@@ -3386,12 +3669,26 @@ class CameraWindow(QMainWindow):
             selected: str | None = None
         elif len(games) == 1:
             game = games[0]
-            self._lichess_game_selector.addItem(
-                _ongoing_game_label(game),
-                game.game_id,
-            )
-            self._lichess_game_selector.setEnabled(False)
-            selected = game.game_id
+            if remembered and remembered != game.game_id:
+                self._lichess_game_selector.addItem(
+                    "Previously selected game is not ongoing",
+                    None,
+                )
+                self._lichess_game_selector.addItem(
+                    _ongoing_game_label(game),
+                    game.game_id,
+                )
+                self._lichess_game_selector.setEnabled(True)
+                selected = None
+            else:
+                self._lichess_game_selector.addItem(
+                    _ongoing_game_label(game),
+                    game.game_id,
+                )
+                self._lichess_game_selector.setEnabled(False)
+                selected = game.game_id
+                if not remembered:
+                    self._remember_lichess_game_selection(game.game_id)
         else:
             self._lichess_game_selector.addItem(
                 "Select an ongoing game...",
@@ -3402,14 +3699,15 @@ class CameraWindow(QMainWindow):
                     _ongoing_game_label(game),
                     game.game_id,
                 )
-            matching_index = self._lichess_game_selector.findData(previous)
+            matching_index = self._lichess_game_selector.findData(remembered)
             if matching_index > 0:
                 self._lichess_game_selector.setCurrentIndex(matching_index)
-                selected = cast(str, previous)
+                selected = remembered
             else:
                 selected = None
             self._lichess_game_selector.setEnabled(True)
         self._lichess_game_selector.blockSignals(False)
+        self._rebuild_lichess_games_menu()
         if self._lichess_worker is not None:
             self._lichess_worker.select_game(selected)
 
@@ -3420,9 +3718,16 @@ class CameraWindow(QMainWindow):
                 game_id if isinstance(game_id, str) else None
             )
         if isinstance(game_id, str):
+            self._remember_lichess_game_selection(game_id)
             self._lichess_status.setText(
                 f"Selected Lichess game {game_id}; awaiting snapshot."
             )
+        self._rebuild_lichess_games_menu()
+
+    def _remember_lichess_game_selection(self, game_id: str) -> None:
+        self._preferred_lichess_game_id = game_id
+        self._settings.setValue(_LICHESS_GAME_SETTING, game_id)
+        self._settings.sync()
 
     def _lichess_connection_status_changed(self, message: str) -> None:
         self._lichess_status.setText(message)
@@ -4053,6 +4358,21 @@ class CameraWindow(QMainWindow):
     def _projector_selection_changed(self) -> None:
         if self._calibrator.active:
             return
+        selected_index = self._projector_selector.currentIndex()
+        if 0 <= selected_index < len(self._screens):
+            selected_screen = self._screens[selected_index]
+            self._settings.setValue(
+                _PROJECTOR_SETTING,
+                selected_screen.name(),
+            )
+            self._settings.setValue(
+                _PROJECTOR_LABEL_SETTING,
+                CameraWindow._projector_screen_label(
+                    selected_screen,
+                    QGuiApplication.primaryScreen(),
+                ),
+            )
+            self._settings.sync()
         self._record_runtime_diagnostic(
             "projector-selection-changed",
             "The selected projector display changed.",

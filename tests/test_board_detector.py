@@ -392,7 +392,6 @@ def test_resolves_saved_camera_before_default() -> None:
         _resolve_camera_index(
             ["Logitech Webcam", "Integrated Webcam"],
             ["logitech-id", "integrated-id"],
-            default_key="integrated-id",
             saved_key="logitech-id",
             selector=None,
         )
@@ -405,11 +404,22 @@ def test_resolves_camera_by_unique_name_fragment() -> None:
         _resolve_camera_index(
             ["Logitech Webcam", "Integrated Webcam"],
             ["logitech-id", "integrated-id"],
-            default_key="integrated-id",
             saved_key="",
             selector="logitech",
         )
         == 0
+    )
+
+
+def test_missing_saved_camera_does_not_select_available_replacement() -> None:
+    assert (
+        _resolve_camera_index(
+            ["Other Camera"],
+            ["other-id"],
+            saved_key="remembered-id",
+            selector=None,
+        )
+        is None
     )
 
 

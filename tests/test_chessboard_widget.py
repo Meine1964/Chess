@@ -3,9 +3,8 @@ from typing import cast
 
 import pytest
 from PySide6.QtCore import QPointF
-from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QApplication
-from PySide6.QtWidgets import QComboBox
+from PySide6.QtGui import QAction, QColor
+from PySide6.QtWidgets import QApplication, QComboBox, QMainWindow
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -248,6 +247,9 @@ def test_multiple_ongoing_games_require_explicit_ui_selection(
             _lichess_game_selector=selector,
             _lichess_worker=worker,
             _lichess_status=MagicMock(),
+            _rebuild_lichess_games_menu=MagicMock(),
+            _preferred_lichess_game_id="",
+            _remember_lichess_game_selection=MagicMock(),
         ),
     )
 
@@ -265,4 +267,142 @@ def test_multiple_ongoing_games_require_explicit_ui_selection(
     )
 
     worker.select_game.assert_called_with("jgWZLWs6")
+    window._remember_lichess_game_selection.assert_called_once_with(
+        "jgWZLWs6"
+    )
     selector.close()
+
+
+def test_remembered_lichess_game_is_not_replaced_by_another_game(
+    application: QApplication,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    selector = QComboBox()
+    worker = MagicMock()
+    window = cast(
+        CameraWindow,
+        SimpleNamespace(
+            _lichess_game_selector=selector,
+            _lichess_worker=worker,
+            _preferred_lichess_game_id="remembered",
+            _remember_lichess_game_selection=MagicMock(),
+            _rebuild_lichess_games_menu=MagicMock(),
+        ),
+    )
+    available = OngoingGame(
+        "different",
+        "differentabcd",
+        "white",
+        "unused",
+        "Different opponent",
+        True,
+    )
+
+    CameraWindow._lichess_ongoing_games_received(window, (available,))
+
+    assert selector.currentData() is None
+    assert selector.findData("different") == 1
+    worker.select_game.assert_called_once_with(None)
+    window._remember_lichess_game_selection.assert_not_called()
+    selector.close()
+
+
+def test_settings_lists_remembered_unavailable_device() -> None:
+    from src.chess_camera.camera_app import _persistent_choice_options
+
+    options, selected_index = _persistent_choice_options(
+        (("Camera B", "b"),),
+        "a",
+        "Mini projector",
+    )
+
+    assert options == (
+        ("Camera B", "b"),
+        ("Mini projector (unavailable)", "a"),
+    )
+    assert selected_index == 1
+
+
+def test_main_commands_are_available_from_menus(
+    application: QApplication,
+) -> None:
+    from src.chess_camera.camera_app import CameraWindow
+
+    class MenuTestWindow(CameraWindow):
+        def __init__(self) -> None:
+            QMainWindow.__init__(self)
+            action_names = (
+                "_snapshot_button",
+                "_resume_button",
+                "_reset_pieces_button",
+                "_reconcile_button",
+                "_lichess_button",
+                "_open_projector_button",
+                "_focus_pattern_button",
+                "_black_projector_button",
+                "_close_projector_button",
+                "_show_grid_button",
+                "_show_squares_button",
+                "_start_calibration_button",
+                "_coded_calibration_button",
+                "_quick_verify_button",
+                "_validate_calibration_button",
+                "_cancel_calibration_button",
+            )
+            for name in action_names:
+                setattr(self, name, QAction(name, self))
+            self._game_mode_selector = QComboBox()
+            self._game_mode_selector.addItem(
+                "Diagnostic movement",
+                "diagnostic",
+            )
+            self._game_mode_selector.addItem(
+                "Offline legal game",
+                "offline-game",
+            )
+            self._lichess_game_selector = QComboBox()
+            self._lichess_game_selector.addItem("No ongoing games", None)
+            self._create_application_menus()
+
+        def _show_settings_dialog(self) -> None:
+            return
+
+    window = MenuTestWindow()
+
+    assert [
+        action.menu().title()
+        for action in window.menuBar().actions()
+        if action.menu() is not None
+    ] == ["&File", "&Camera", "&Game", "&Projector", "&Calibration"]
+    assert window._settings_action.text() == "Settings..."
+    camera_actions = {
+        action.text()
+        for action in window.menuBar().actions()[1].menu().actions()
+        if not action.isSeparator()
+    }
+    assert {
+        "_snapshot_button",
+        "_resume_button",
+        "_reset_pieces_button",
+        "_reconcile_button",
+    } <= camera_actions
+    window.deleteLater()
+
+
+def test_interaction_panel_font_is_readable(
+    application: QApplication,
+) -> None:
+    from PySide6.QtWidgets import QLabel, QWidget
+
+    from src.chess_camera.camera_app import _set_readable_interaction_font
+
+    panel = QWidget()
+    _set_readable_interaction_font(panel)
+    status = QLabel("Camera status", panel)
+
+    assert status.font().pointSize() >= 12
+    panel.close()
