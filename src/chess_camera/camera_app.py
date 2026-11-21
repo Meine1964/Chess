@@ -76,7 +76,6 @@ from .diagnostics import DiagnosticStore, RuntimeDiagnosticLog
 from .guidance_activity import (
     BlackoutSettlingDetector,
     BoardEdgeActivityDetector,
-    GuidanceActivityDetector,
 )
 from .legal_game import (
     GameMode,
@@ -147,6 +146,7 @@ _ALIGNMENT_REMAP_RETRY_MILLISECONDS = 250
 _BOARD_EDGE_STUCK_DIAGNOSTIC_SECONDS = 3.0
 _BOARD_EDGE_STUCK_REPEAT_SECONDS = 5.0
 _LICHESS_GUIDANCE_FALLBACK_MILLISECONDS = 2000
+_ILLEGAL_CORRECTION_FALLBACK_MILLISECONDS = 2000
 _ALIGNMENT_REMAP_PROTECTED_TRACKER_STATES = frozenset(
     {
         "candidate",
@@ -1083,14 +1083,6 @@ class CameraWindow(QMainWindow):
         self._lichess_blackout_settling_detector = (
             BlackoutSettlingDetector()
         )
-        self._illegal_correction_activity_detector = (
-            GuidanceActivityDetector(
-                confirmation_observations=1,
-                minimum_square_fraction=0.5,
-                rolling_baseline_before_activity=True,
-                require_halo_activity=True,
-            )
-        )
         self._promotion_activity_detector = (
             ManipulationSettlingDetector()
         )
@@ -1178,7 +1170,6 @@ class CameraWindow(QMainWindow):
         self._illegal_correction_physical_squares: (
             tuple[tuple[int, int], ...]
         ) = ()
-        self._illegal_correction_activity_logged = False
         self._illegal_correction_last_projected_move: (
             tuple[tuple[int, int], tuple[int, int]] | None
         ) = None
@@ -2623,9 +2614,8 @@ class CameraWindow(QMainWindow):
         self._illegal_correction_blackout_pending = False
         self._illegal_correction_generation += 1
         self._illegal_correction_physical_squares = ()
-        self._illegal_correction_activity_logged = False
         self._illegal_correction_last_projected_move = None
-        self._illegal_correction_activity_detector.reset()
+        self._resume_board_edge_activity_indicator()
         if self._calibrator.active:
             self._calibrator.cancel()
         if not self._open_projector():
@@ -3840,6 +3830,7 @@ class CameraWindow(QMainWindow):
             restored_move = self._last_rejected_move
             self._last_rejected_move = None
             self._illegal_correction_last_projected_move = None
+            self._resume_board_edge_activity_indicator()
             self._occupancy_status.setText(
                 "Board matches the accepted reference."
             )
@@ -5285,19 +5276,18 @@ class CameraWindow(QMainWindow):
                 f"{error}"
             )
             return
+        self._resume_board_edge_activity_indicator()
         self._alignment_monitor.set_paused("illegal move indication")
         self._illegal_correction_generation += 1
         self._illegal_correction_projection_active = True
         self._illegal_correction_blackout_pending = False
         self._illegal_correction_physical_squares = correction_squares
-        self._illegal_correction_activity_logged = False
-        self._illegal_correction_activity_detector.reset()
         status_message = (
-            "Projecting the illegally removed square in red until the "
-            "restoring hand leaves the board."
+            "Projecting the illegally removed square in red until entry or "
+            "fallback blackout."
             if source == destination
-            else "Projecting both illegal move squares in red until the "
-            "restoring hand leaves the board."
+            else "Projecting both illegal move squares in red until entry "
+            "or fallback blackout."
         )
         self._projector_status.setText(status_message)
         reprojection = self._illegal_correction_last_projected_move == move
@@ -5321,70 +5311,72 @@ class CameraWindow(QMainWindow):
             },
             include_images=True,
         )
+        generation = self._illegal_correction_generation
+        QTimer.singleShot(
+            _ILLEGAL_CORRECTION_FALLBACK_MILLISECONDS,
+            lambda: self._begin_illegal_correction_observation_if_current(
+                generation,
+                "fallback",
+            ),
+        )
 
     def _observe_illegal_correction_activity(self) -> None:
         if (
-            self._latest_frame is None
-            or self._calibration_result is None
-            or not self._illegal_correction_projection_active
+            not self._illegal_correction_projection_active
+            or not self._board_edge_indicator_active
         ):
             return
-        try:
-            manipulation_settled = (
-                self._illegal_correction_activity_detector.observe(
-                    self._latest_frame,
-                    self._calibration_result.mapping.camera_grid,
-                    self._illegal_correction_physical_squares,
-                )
-            )
-        except (ValueError, RuntimeError, cv2.error) as error:
-            self._projector_status.setText(
-                f"Correction hand detection unavailable: {error}"
-            )
-            return
-        if manipulation_settled:
-            self._begin_illegal_correction_observation()
-        elif self._illegal_correction_activity_detector.manipulation_active:
-            status_message = (
-                "Correction in progress; both red squares remain projected "
-                "until the hand leaves the board."
-            )
-            self._projector_status.setText(status_message)
-            if not self._illegal_correction_activity_logged:
-                self._illegal_correction_activity_logged = True
-                self._record_runtime_diagnostic(
-                    "illegal-correction-hand-entered",
-                    status_message,
-                    details={
-                        "generation": self._illegal_correction_generation,
-                        "physical_squares": [
-                            [row, column]
-                            for row, column
-                            in self._illegal_correction_physical_squares
-                        ],
-                    },
-                    include_images=True,
-                )
+        status_message = (
+            "Hand entered the board; red correction is returning to black "
+            "before restoration verification."
+        )
+        self._projector_status.setText(status_message)
+        self._record_runtime_diagnostic(
+            "illegal-correction-hand-entered",
+            status_message,
+            details={
+                "generation": self._illegal_correction_generation,
+                "physical_squares": [
+                    [row, column]
+                    for row, column
+                    in self._illegal_correction_physical_squares
+                ],
+            },
+            include_images=True,
+        )
+        self._begin_illegal_correction_observation("boundary-entry")
 
-    def _begin_illegal_correction_observation(self) -> None:
+    def _begin_illegal_correction_observation_if_current(
+        self,
+        generation: int,
+        reason: str,
+    ) -> None:
+        if generation != self._illegal_correction_generation:
+            return
+        self._begin_illegal_correction_observation(reason)
+
+    def _begin_illegal_correction_observation(
+        self,
+        reason: str = "manual",
+    ) -> None:
         if not self._illegal_correction_projection_active:
             return
         generation = self._illegal_correction_generation
         self._illegal_correction_projection_active = False
         self._illegal_correction_blackout_pending = True
-        self._illegal_correction_activity_detector.reset()
+        self._suspend_board_edge_activity_indicator()
         self._projector_window.show_black()
         self._alignment_monitor.set_black()
         self._reference_move_tracker.reset_activity()
         status_message = (
-            "Hand left the board; red correction removed while projector "
-            "black settles."
+            "Red correction removed while projector black settles "
+            f"({reason})."
         )
         self._projector_status.setText(status_message)
         self._record_runtime_diagnostic(
             "illegal-correction-blackout-started",
             status_message,
-            details={"generation": generation},
+            details={"generation": generation, "reason": reason},
             include_images=True,
         )
         QTimer.singleShot(
@@ -7134,10 +7126,7 @@ class CameraWindow(QMainWindow):
                     for row, column
                     in self._illegal_correction_physical_squares
                 ],
-                "detector_manipulation_active": (
-                    self._illegal_correction_activity_detector
-                    .manipulation_active
-                ),
+                "boundary_active": self._board_edge_indicator_active,
             },
         }
         if tracker_update is not None:

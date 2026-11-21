@@ -796,8 +796,8 @@ def test_black_action_opens_and_raises_projector_before_clearing_marker() -> Non
         _offline_move_marking_active=False,
         _offline_move_marking_blackout_pending=False,
         _offline_move_marking_generation=0,
-        _illegal_correction_activity_detector=MagicMock(),
         _illegal_correction_generation=0,
+        _resume_board_edge_activity_indicator=MagicMock(),
     )
 
     CameraWindow._black_projector(window)

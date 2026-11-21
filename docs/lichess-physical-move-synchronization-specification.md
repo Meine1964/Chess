@@ -699,14 +699,12 @@ camera image shall be ignored. This margin ensures that a hand approaching a
 piece on the nearest rank or an outer file starts manipulation tracking even
 when only fingertips enter the 64-square board area.
 
-The manipulation detector may compare frames captured under the same static
-guidance projection, but its frames and scores shall never update occupancy,
-infer a chess move, or replace the accepted reference. The detector shall arm
-only after one second of static projected observations so projector startup
-cannot be mistaken for hand activity. It shall then require material activity
-in consecutive frames, keep the guidance projected throughout that activity,
-and request projector blackout only after the scene is quiet for the required
-consecutive observations.
+The shared boundary detector may initiate blackout from the first confirmed
+entry across the calibrated board edge. Its frames and scores shall never
+update occupancy, infer a chess move, or replace the accepted reference.
+Guidance blackout shall not wait for hand departure; after entry or the
+generation-guarded fallback, black-board tracking shall handle obstruction,
+departure, settling, and final position verification.
 
 ### 10.2 Camera observation
 
@@ -977,6 +975,18 @@ The user may:
 
 - Restore the previous physical position; or
 - Complete a final board position that exactly matches the expected signature.
+
+While red correction is projected, the application shall use the shared
+calibrated boundary detector to begin blackout immediately when a hand enters.
+A generation-guarded two-second fallback shall begin blackout when entry is
+missed. Boundary observation shall be suspended before changing to black so a
+hand-containing frame cannot become its baseline. After the fixed
+illegal-correction blackout settling interval, the ordinary black-board
+reference tracker shall verify restoration. If restoration is incomplete, red
+correction shall be reprojected and boundary observation rearmed against that
+static projected scene. If restoration is complete, correction state shall
+clear and boundary observation shall rearm against the restored black-board
+scene.
 
 After restoration, the application shall resume guidance for the same pending
 move. After an exact expected final position, it may commit normally.
