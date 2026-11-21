@@ -54,6 +54,9 @@ advances the authoritative Offline `LegalGame`.
 - While enabled in Offline mode, project both clocks using the existing
   calibrated edge-clock geometry, orientation, perspective, parallax, and
   stroke compensation.
+- Keep both clocks visible during projected promotion choices and promotion
+  confirmation. Only the deliberate black evidence-measurement interval may
+  temporarily replace the promotion display.
 - Clock display updates may run periodically, but elapsed time shall be
   derived from a monotonic baseline rather than accumulated timer ticks.
 - Offline terminal results shall retain the stopped clocks when clock data is
@@ -107,4 +110,5 @@ Implemented in the Offline game UI and projector integration.
 Validation:
 
 - Focused Offline clock and game UI suite: 80 passed.
-- Full repository quality gate: 415 passed.
+- Focused projector suite: 26 passed.
+- Full repository quality gate: 416 passed.

@@ -866,6 +866,10 @@ be treated as hand activity and shall not cause repeated black/reproject
 flashing. Black output is permitted only for the deliberate settled evidence
 measurement.
 
+When authoritative game clocks are available, both edge clocks shall remain
+visible during promotion choices and promotion confirmation. Promotion
+projection shall not clear or suppress the clock state.
+
 - Exactly one occupied virtual square selects its displayed promotion piece.
 - No occupied virtual square shall select nothing; the icons shall reappear and
   selection shall continue.

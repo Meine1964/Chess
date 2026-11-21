@@ -538,7 +538,15 @@ class ProjectorWindow(QWidget):
                 )
         if (
             self._display_mode
-            in ("black", "move", "illegal", "correction", "reconciliation")
+            in (
+                "black",
+                "move",
+                "illegal",
+                "correction",
+                "reconciliation",
+                "promotion_choices",
+                "promotion_confirmation",
+            )
             and self._projector_grid is not None
             and (
                 (

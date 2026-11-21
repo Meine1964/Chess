@@ -530,6 +530,39 @@ def test_projector_places_agreed_draw_result_between_clocks(
     assert expiration_flag_pixels < 10
 
 
+def test_promotion_projection_keeps_edge_clocks_visible(
+    application: QApplication,
+) -> None:
+    from unittest.mock import patch
+
+    window = ProjectorWindow()
+    window.resize(360, 180)
+    window.show()
+    x_values = np.linspace(80, 280, 9, dtype=np.float32)
+    y_values = np.asarray(
+        (10, 20, 30, 40, 80, 120, 130, 140, 150),
+        dtype=np.float32,
+    )
+    x_grid, y_grid = np.meshgrid(x_values, y_values)
+    window.set_projector_grid(
+        np.stack((x_grid, y_grid), axis=2).astype(np.float32)
+    )
+    window.set_edge_clocks(
+        "10:05",
+        "10:05",
+        board_quarter_turns=0,
+    )
+
+    with patch.object(
+        ProjectorWindow, "_draw_edge_clock"
+    ) as draw_edge_clock:
+        window.show_promotion_choices("top", "bottom")
+        application.processEvents()
+
+    assert draw_edge_clock.call_count == 2
+    window.close()
+
+
 def test_projector_renders_patterns_and_calibrated_squares(
     application: QApplication,
 ) -> None:
