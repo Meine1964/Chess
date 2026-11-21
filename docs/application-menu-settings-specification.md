@@ -115,6 +115,7 @@ poll; a changed ongoing-game set may prompt again.
 
 - **Full calibration - empty board**
 - **Populated calibration - experimental**
+- **Board-cropped calibration - experimental**
 - **Quick realign / assess**
 - **Validate calibration**
 - **Cancel calibration**

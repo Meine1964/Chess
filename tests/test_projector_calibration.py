@@ -20,6 +20,7 @@ from src.chess_camera.projector_calibration import (
     decode_gray_code,
     detect_coded_marker_correspondences,
     detect_board_orientation,
+    expanded_projector_board_mask,
     fit_coded_pattern_mapping,
     fit_projector_mapping,
     fit_visible_middle_lattice,
@@ -53,6 +54,22 @@ def _detection(
         method="test",
         grid_alignment=1.0,
     )
+
+
+def test_expanded_projector_board_mask_limits_illumination() -> None:
+    grid = _detection(40, 30, 120, 110).grid_points
+
+    mask = expanded_projector_board_mask(
+        (160, 140),
+        grid,
+        margin_square_fraction=0.5,
+    )
+
+    assert mask.shape == (140, 160)
+    assert mask[70, 80]
+    assert mask[25, 80]
+    assert not mask[0, 0]
+    assert not mask[-1, -1]
 
 
 def test_coded_marker_pattern_decodes_absolute_projector_coordinates() -> None:
@@ -683,7 +700,14 @@ def test_stale_selected_square_timeout_does_not_clear_newer_square() -> None:
     window._projector_status.setText.assert_not_called()
 
 
-def test_failed_populated_calibration_retains_previous_mapping() -> None:
+@pytest.mark.parametrize(
+    ("coded_pattern_mode", "adaptive_cropped_mode"),
+    [(True, False), (False, True)],
+)
+def test_failed_experimental_calibration_retains_previous_mapping(
+    coded_pattern_mode: bool,
+    adaptive_cropped_mode: bool,
+) -> None:
     from types import SimpleNamespace
     from unittest.mock import MagicMock
 
@@ -696,7 +720,8 @@ def test_failed_populated_calibration_retains_previous_mapping() -> None:
         _calibrator=SimpleNamespace(
             quick_verification=False,
             validation_only=False,
-            coded_pattern_mode=True,
+            coded_pattern_mode=coded_pattern_mode,
+            adaptive_cropped_mode=adaptive_cropped_mode,
             diagnostic_captures={},
         ),
         _invalidate_saved_calibration=MagicMock(return_value=None),
@@ -1907,6 +1932,162 @@ def test_quick_realign_uses_independent_validation_phase() -> None:
     ]
     assert controller._validation_index == 0
     assert "validation_black" not in controller._captures
+    assert projector.grid is not None
+
+
+def test_adaptive_calibration_uses_brief_single_frame_projection() -> None:
+    from unittest.mock import MagicMock, patch
+
+    class FakeProjector:
+        def __init__(self) -> None:
+            self.patterns: list[np.ndarray] = []
+            self.blackouts = 0
+
+        def show_pattern(self, pattern: np.ndarray) -> None:
+            self.patterns.append(pattern.copy())
+
+        def show_black(self) -> None:
+            self.blackouts += 1
+
+    detector = MagicMock()
+    detection = _detection()
+    detector.detect.return_value = detection
+    projector = FakeProjector()
+    controller = ProjectorCalibrationController(
+        projector,
+        detector,
+        settle_milliseconds=1000,
+        frames_per_state=3,
+    )
+    delays: list[int] = []
+    controller._schedule = lambda delay, _callback: delays.append(delay)
+
+    controller.start_adaptive_cropped(320, 180)
+
+    assert controller.adaptive_cropped_mode
+    assert delays == [1000]
+    controller._step_index = 1
+    controller._display_current_step()
+    assert delays[-1] == 100
+
+    controller._collecting = True
+    controller._frame_accumulator = None
+    controller._frame_count = 0
+    controller._captures["black"] = np.zeros((60, 80), dtype=np.uint8)
+    mapping = MappingResult(
+        camera_grid=detection.grid_points,
+        projector_grid=detection.grid_points,
+        camera_to_projector_homography=np.eye(3, dtype=np.float32),
+        coverage_ratio=1.0,
+        decoded_ratio=1.0,
+        inlier_ratio=1.0,
+        rms_error=0.0,
+        maximum_error=0.0,
+    )
+    with patch(
+        "src.chess_camera.calibration_controller.fit_coded_pattern_mapping",
+        side_effect=[
+            CalibrationError("No markers yet."),
+            (detection, mapping),
+        ],
+    ):
+        controller.accept_frame(
+            np.zeros((60, 80, 3), dtype=np.uint8)
+        )
+        assert controller._collecting
+        assert projector.blackouts == 0
+        controller.accept_frame(
+            np.zeros((60, 80, 3), dtype=np.uint8)
+        )
+
+    assert not controller._collecting
+    assert controller._frame_count == 1
+    assert projector.blackouts == 1
+
+    controller._adaptive_phase = "gray-code"
+    controller._steps = controller._build_cropped_gray_code_steps(
+        np.ones((180, 320), dtype=bool)
+    )
+    controller._step_index = 0
+    controller._display_current_step()
+    assert delays[-1] == 250
+    controller._collecting = True
+    controller._frame_accumulator = None
+    controller._frame_count = 0
+    for _index in range(2):
+        controller.accept_frame(
+            np.zeros((60, 80, 3), dtype=np.uint8)
+        )
+        assert controller._collecting
+    controller.accept_frame(np.zeros((60, 80, 3), dtype=np.uint8))
+    assert not controller._collecting
+    assert controller._frame_count == 3
+
+
+def test_adaptive_gray_code_patterns_are_black_outside_board_mask() -> None:
+    controller = ProjectorCalibrationController(object(), object())
+    controller._projector_size = (32, 24)
+    mask = np.zeros((24, 32), dtype=bool)
+    mask[6:18, 8:24] = True
+
+    steps = controller._build_cropped_gray_code_steps(mask)
+
+    assert steps
+    for step in steps:
+        assert np.count_nonzero(step.pattern[~mask]) == 0
+    assert any(np.count_nonzero(step.pattern[mask]) > 0 for step in steps)
+
+
+def test_adaptive_final_mapping_uses_dense_gray_code() -> None:
+    from unittest.mock import patch
+
+    class FakeProjector:
+        def __init__(self) -> None:
+            self.grid: np.ndarray | None = None
+
+        def set_projector_grid(self, grid: np.ndarray) -> None:
+            self.grid = grid.copy()
+
+    projector = FakeProjector()
+    controller = ProjectorCalibrationController(projector, object())
+    controller._projector_size = (8, 8)
+    controller._detection = _detection(1, 1, 8, 8)
+    controller._captures["black"] = np.zeros((10, 10), dtype=np.uint8)
+    for axis in ("x", "y"):
+        for bit in range(2):
+            for suffix in ("normal", "inverse"):
+                controller._captures[f"{axis}_{bit}_{suffix}"] = np.zeros(
+                    (10, 10),
+                    dtype=np.uint8,
+                )
+    mapping = MappingResult(
+        camera_grid=controller._detection.grid_points,
+        projector_grid=controller._detection.grid_points,
+        camera_to_projector_homography=np.eye(3, dtype=np.float32),
+        coverage_ratio=1.0,
+        decoded_ratio=1.0,
+        inlier_ratio=1.0,
+        rms_error=0.0,
+        maximum_error=0.0,
+    )
+    decoded = np.zeros((10, 10), dtype=np.int32)
+    valid = np.ones((10, 10), dtype=bool)
+
+    with (
+        patch(
+            "src.chess_camera.calibration_controller.decode_gray_code",
+            return_value=(decoded, decoded, valid),
+        ) as decode,
+        patch(
+            "src.chess_camera.calibration_controller.fit_projector_mapping",
+            return_value=mapping,
+        ) as fit,
+    ):
+        controller._calculate_adaptive_mapping()
+
+    decode.assert_called_once()
+    fit.assert_called_once()
+    assert controller._mapping is mapping
     assert projector.grid is not None
 
 

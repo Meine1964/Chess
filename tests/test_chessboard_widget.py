@@ -579,6 +579,7 @@ def test_main_commands_are_available_from_menus(
                 "_show_squares_button",
                 "_start_calibration_button",
                 "_coded_calibration_button",
+                "_adaptive_calibration_button",
                 "_quick_verify_button",
                 "_validate_calibration_button",
                 "_cancel_calibration_button",

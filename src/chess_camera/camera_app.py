@@ -1685,6 +1685,17 @@ class CameraWindow(QMainWindow):
         self._coded_calibration_button.triggered.connect(
             self._start_coded_projector_calibration
         )
+        self._adaptive_calibration_button = QAction(
+            "Board-cropped calibration - experimental",
+            self,
+        )
+        self._adaptive_calibration_button.setToolTip(
+            "Use one brief coded discovery image, then confine Gray-code "
+            "calibration patterns to the detected board."
+        )
+        self._adaptive_calibration_button.triggered.connect(
+            self._start_adaptive_projector_calibration
+        )
         self._quick_verify_button = QAction(
             "Quick realign / assess",
             self,
@@ -2016,6 +2027,7 @@ class CameraWindow(QMainWindow):
         calibration_menu = self.menuBar().addMenu("&Calibration")
         calibration_menu.addAction(self._start_calibration_button)
         calibration_menu.addAction(self._coded_calibration_button)
+        calibration_menu.addAction(self._adaptive_calibration_button)
         calibration_menu.addAction(self._quick_verify_button)
         calibration_menu.addAction(self._validate_calibration_button)
         calibration_menu.addSeparator()
@@ -2544,6 +2556,7 @@ class CameraWindow(QMainWindow):
         self._snapshot_button.setEnabled(True)
         self._start_calibration_button.setEnabled(True)
         self._coded_calibration_button.setEnabled(True)
+        self._adaptive_calibration_button.setEnabled(True)
         self._resume_button.setEnabled(False)
         self._settings.setValue(_CAMERA_SETTING, self._device_key(device))
         self._settings.setValue(
@@ -2657,6 +2670,7 @@ class CameraWindow(QMainWindow):
         self._resume_button.setEnabled(False)
         self._start_calibration_button.setEnabled(False)
         self._coded_calibration_button.setEnabled(False)
+        self._adaptive_calibration_button.setEnabled(False)
         message = "Waiting for an external USB camera."
         if detail is not None:
             message = f"{message} {detail}"
@@ -2800,6 +2814,44 @@ class CameraWindow(QMainWindow):
             QMessageBox.critical(
                 self,
                 "Coded-pattern calibration",
+                str(error),
+            )
+
+    def _start_adaptive_projector_calibration(self) -> None:
+        if self._latest_frame is None:
+            QMessageBox.warning(
+                self,
+                "Board-cropped calibration",
+                "No camera frame is available yet.",
+            )
+            return
+        if not self._open_projector():
+            return
+
+        self._suspend_selected_square()
+        selected_index = self._projector_selector.currentIndex()
+        screen_geometry = self._screens[selected_index].geometry()
+        self._record_runtime_diagnostic(
+            "calibration-start-requested",
+            "Board-cropped calibration requested.",
+            details={
+                "operation": "adaptive-board-cropped",
+                "previous_calibration_available": (
+                    self._calibration_result is not None
+                ),
+            },
+            include_images=True,
+        )
+        try:
+            self._calibrator.start_adaptive_cropped(
+                screen_geometry.width(),
+                screen_geometry.height(),
+            )
+        except (RuntimeError, ValueError) as error:
+            self._projector_window.show_black()
+            QMessageBox.critical(
+                self,
+                "Board-cropped calibration",
                 str(error),
             )
 
@@ -2976,6 +3028,7 @@ class CameraWindow(QMainWindow):
         self._calibration_progress.setVisible(active)
         self._start_calibration_button.setEnabled(not active)
         self._coded_calibration_button.setEnabled(not active)
+        self._adaptive_calibration_button.setEnabled(not active)
         self._quick_verify_button.setEnabled(
             not active and self._calibration_result is not None
         )
@@ -3079,11 +3132,16 @@ class CameraWindow(QMainWindow):
             operation = "Validation"
         elif self._calibrator.coded_pattern_mode:
             operation = "Populated calibration"
+        elif self._calibrator.adaptive_cropped_mode:
+            operation = "Board-cropped calibration"
         else:
             operation = "Full calibration"
         if (
             self._calibration_result is not None
-            and self._calibrator.coded_pattern_mode
+            and (
+                self._calibrator.coded_pattern_mode
+                or self._calibrator.adaptive_cropped_mode
+            )
         ):
             self._alignment_monitor.set_black()
             self._set_calibration_indicator(
@@ -7872,6 +7930,9 @@ class CameraWindow(QMainWindow):
                 "quick_verification": self._calibrator.quick_verification,
                 "validation_only": self._calibrator.validation_only,
                 "coded_pattern_mode": self._calibrator.coded_pattern_mode,
+                "adaptive_cropped_mode": (
+                    self._calibrator.adaptive_cropped_mode
+                ),
                 "projector_output": self._alignment_monitor.output_mode,
                 "metrics": calibration_metrics,
                 "remembered_square": (

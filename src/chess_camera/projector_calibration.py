@@ -418,6 +418,7 @@ def fit_coded_pattern_mapping(
     *,
     inverse_illuminated: GrayImage | None = None,
     inverse_pattern: CodedPattern | None = None,
+    require_quadrant_coverage: bool = True,
 ) -> tuple[BoardDetection, MappingResult]:
     refined_detection = fit_visible_middle_lattice(
         black,
@@ -542,7 +543,7 @@ def fit_coded_pattern_mapping(
         for row in range(2)
         for column in range(2)
     ]
-    if min(quadrant_counts) < 2:
+    if require_quadrant_coverage and min(quadrant_counts) < 2:
         raise CalibrationError(
             "Coded-pattern plane support does not cover every board quadrant."
         )
@@ -574,6 +575,57 @@ def fit_coded_pattern_mapping(
         maximum_error=maximum_error,
     )
     return refined_detection, mapping
+
+
+def expanded_projector_board_mask(
+    projector_size: tuple[int, int],
+    projector_grid: FloatArray,
+    *,
+    margin_square_fraction: float = 0.5,
+) -> BoolArray:
+    width, height = projector_size
+    if width <= 1 or height <= 1:
+        raise ValueError("Projector dimensions must be greater than one.")
+    if projector_grid.shape != (9, 9, 2):
+        raise ValueError("Projector grid must have shape (9, 9, 2).")
+    if margin_square_fraction < 0:
+        raise ValueError("Board-mask margin cannot be negative.")
+
+    polygon = np.ascontiguousarray(
+        np.rint(
+            projector_grid[
+                [0, 0, 8, 8],
+                [0, 8, 8, 0],
+            ]
+        ),
+        dtype=np.int32,
+    )
+    mask = np.zeros((height, width), dtype=np.uint8)
+    cv2.fillConvexPoly(mask, polygon, 255)
+    horizontal_lengths = np.linalg.norm(
+        np.diff(projector_grid, axis=1),
+        axis=2,
+    )
+    vertical_lengths = np.linalg.norm(
+        np.diff(projector_grid, axis=0),
+        axis=2,
+    )
+    median_square_size = float(
+        np.median(
+            np.concatenate(
+                [horizontal_lengths.ravel(), vertical_lengths.ravel()]
+            )
+        )
+    )
+    margin = int(round(median_square_size * margin_square_fraction))
+    if margin > 0:
+        kernel_size = 2 * margin + 1
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (kernel_size, kernel_size),
+        )
+        mask = cv2.dilate(mask, kernel)
+    return mask > 0
 
 
 def gray_code_pattern(
