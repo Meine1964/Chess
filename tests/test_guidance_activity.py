@@ -648,7 +648,7 @@ def test_correction_detector_rejects_board_confined_light_change() -> None:
     assert detector.manipulation_active is False
 
 
-def test_pending_lichess_guidance_has_no_fixed_timeout() -> None:
+def test_pending_lichess_guidance_schedules_bounded_fallback() -> None:
     window = SimpleNamespace(
         _board_orientation_needs_detection=False,
         _piece_side_orientation_needs_detection=False,
@@ -664,7 +664,9 @@ def test_pending_lichess_guidance_has_no_fixed_timeout() -> None:
         _lichess_guidance_projection_active=False,
         _lichess_guidance_blackout_pending=False,
         _lichess_guidance_reprojection_pending=False,
+        _resume_board_edge_activity_indicator=MagicMock(),
         _record_runtime_diagnostic=MagicMock(),
+        _begin_lichess_guidance_observation_if_current=MagicMock(),
     )
 
     with patch(
@@ -675,7 +677,8 @@ def test_pending_lichess_guidance_has_no_fixed_timeout() -> None:
             ((1, 4), (3, 4)),
         )
 
-    single_shot.assert_not_called()
+    single_shot.assert_called_once()
+    assert single_shot.call_args.args[0] == 2000
     assert window._lichess_guidance_projection_active is True
     assert window._lichess_guidance_squares == ((1, 4), (3, 4))
     window._board_widget.set_illegal_source.assert_called_once_with(None)
@@ -683,14 +686,18 @@ def test_pending_lichess_guidance_has_no_fixed_timeout() -> None:
     window._board_widget.set_guidance_move.assert_called_once_with(
         ((1, 4), (3, 4))
     )
-    assert window._lichess_guidance_edge_entered is False
     window._projector_status.setText.assert_called_once_with(
-        "Projecting pending Lichess move e7-e5 until the hand leaves the "
-        "board."
+        "Projecting pending Lichess move e7-e5 until entry or fallback "
+        "blackout."
     )
     assert (
         window._record_runtime_diagnostic.call_args.args[0]
         == "lichess-guidance-projected"
+    )
+    single_shot.call_args.args[1]()
+    window._begin_lichess_guidance_observation_if_current.assert_called_once_with(
+        1,
+        "fallback",
     )
 
 
@@ -744,6 +751,7 @@ def test_pending_lichess_guidance_uses_complete_two_turn_orientation() -> None:
         _lichess_guidance_projection_active=False,
         _lichess_guidance_blackout_pending=False,
         _lichess_guidance_reprojection_pending=False,
+        _resume_board_edge_activity_indicator=MagicMock(),
         _record_runtime_diagnostic=MagicMock(),
     )
     window._physical_board_square = lambda row, column: (
@@ -819,6 +827,7 @@ def test_en_passant_guidance_projects_all_three_squares() -> None:
         _lichess_guidance_projection_active=False,
         _lichess_guidance_blackout_pending=False,
         _lichess_guidance_reprojection_pending=False,
+        _resume_board_edge_activity_indicator=MagicMock(),
         _record_runtime_diagnostic=MagicMock(),
     )
     squares = ((3, 4), (2, 3), (3, 3))
@@ -844,11 +853,11 @@ def test_settled_manipulation_blacks_projector_before_observation() -> None:
         _lichess_guidance_projection_active=True,
         _lichess_guidance_blackout_pending=False,
         _lichess_guidance_generation=4,
-        _guidance_activity_detector=MagicMock(),
         _projector_window=MagicMock(),
         _alignment_monitor=MagicMock(),
         _lichess_blackout_settling_detector=MagicMock(),
         _reference_move_tracker=MagicMock(),
+        _suspend_board_edge_activity_indicator=MagicMock(),
         _projector_status=MagicMock(),
         _record_runtime_diagnostic=MagicMock(),
         _finish_lichess_guidance_blackout=MagicMock(),
@@ -862,6 +871,7 @@ def test_settled_manipulation_blacks_projector_before_observation() -> None:
     assert window._lichess_guidance_projection_active is False
     assert window._lichess_guidance_blackout_pending is True
     assert window._lichess_guidance_reprojection_pending is True
+    window._suspend_board_edge_activity_indicator.assert_called_once_with()
     window._projector_window.show_black.assert_called_once_with()
     window._alignment_monitor.set_black.assert_called_once_with()
     window._lichess_blackout_settling_detector.reset.assert_called_once_with()
@@ -903,11 +913,10 @@ def test_stable_blackout_observations_finish_guidance_early() -> None:
     )
 
 
-def test_boundary_departure_starts_lichess_guidance_blackout() -> None:
+def test_boundary_entry_starts_lichess_guidance_blackout() -> None:
     window = SimpleNamespace(
         _lichess_guidance_projection_active=True,
         _board_edge_indicator_active=False,
-        _lichess_guidance_edge_entered=False,
         _lichess_guidance_activity_logged=False,
         _lichess_guidance_generation=3,
         _projector_status=MagicMock(),
@@ -920,17 +929,37 @@ def test_boundary_departure_starts_lichess_guidance_blackout() -> None:
 
     window._board_edge_indicator_active = True
     CameraWindow._observe_lichess_guidance_activity(window)
-    window._begin_lichess_guidance_observation.assert_not_called()
-    assert window._lichess_guidance_edge_entered
+    window._begin_lichess_guidance_observation.assert_called_once_with(
+        "boundary-entry"
+    )
     window._projector_status.setText.assert_called_with(
-        "Opponent move in progress; guidance remains projected until the hand "
-        "leaves the board."
+        "Hand entered the board; guidance is returning to black before move "
+        "verification."
     )
     window._record_runtime_diagnostic.assert_called_once()
 
-    window._board_edge_indicator_active = False
-    CameraWindow._observe_lichess_guidance_activity(window)
-    window._begin_lichess_guidance_observation.assert_called_once_with()
+
+def test_stale_lichess_guidance_fallback_cannot_black_new_projection() -> None:
+    window = SimpleNamespace(
+        _lichess_guidance_generation=4,
+        _begin_lichess_guidance_observation=MagicMock(),
+    )
+
+    CameraWindow._begin_lichess_guidance_observation_if_current(
+        window,
+        3,
+        "fallback",
+    )
+    window._begin_lichess_guidance_observation.assert_not_called()
+
+    CameraWindow._begin_lichess_guidance_observation_if_current(
+        window,
+        4,
+        "fallback",
+    )
+    window._begin_lichess_guidance_observation.assert_called_once_with(
+        "fallback"
+    )
 
 
 def test_offline_move_marking_uses_fixed_one_second_intervals() -> None:
@@ -1043,6 +1072,57 @@ def test_guidance_activity_precedes_black_output_gate() -> None:
     window._observe_lichess_guidance_activity.assert_called_once_with()
 
 
+def test_lichess_blackout_rearms_edge_indicator_after_synchronization() -> None:
+    frame = _frame()
+    crossing = frame.copy()
+    cv2.rectangle(crossing, (350, 100), (550, 260), (20, 20, 20), -1)
+    detector = BoardEdgeActivityDetector(
+        arming_observations=2,
+        confirmation_observations=1,
+        quiet_observations=1,
+    )
+    assert not detector.observe(frame, _camera_grid())
+    assert not detector.observe(frame, _camera_grid())
+    assert detector.observe(crossing, _camera_grid())
+
+    projector_window = SimpleNamespace(
+        set_edge_activity_indicator=MagicMock()
+    )
+    window = SimpleNamespace(
+        _latest_frame=frame,
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(camera_grid=_camera_grid())
+        ),
+        _board_edge_activity_detector=detector,
+        _board_edge_indicator_active=True,
+        _board_edge_activity_suspended=False,
+        _board_edge_indicator_active_since=0.0,
+        _board_edge_indicator_last_stuck_diagnostic_at=None,
+        _projector_window=projector_window,
+        _record_runtime_diagnostic=MagicMock(),
+    )
+    window._reset_board_edge_activity_indicator = lambda: (
+        CameraWindow._reset_board_edge_activity_indicator(window)
+    )
+
+    CameraWindow._suspend_board_edge_activity_indicator(window)
+    CameraWindow._update_board_edge_activity_indicator(window)
+
+    assert window._board_edge_activity_suspended is True
+    assert window._board_edge_indicator_active is False
+    assert detector.active is False
+
+    CameraWindow._resume_board_edge_activity_indicator(window)
+    CameraWindow._update_board_edge_activity_indicator(window)
+    CameraWindow._update_board_edge_activity_indicator(window)
+    CameraWindow._update_board_edge_activity_indicator(window)
+
+    assert window._board_edge_activity_suspended is False
+    assert window._board_edge_indicator_active is False
+    assert detector.active is False
+    projector_window.set_edge_activity_indicator.assert_called_with(False)
+
+
 def test_board_edge_indicator_records_only_state_transitions() -> None:
     detector = SimpleNamespace(
         observe=MagicMock(side_effect=(True, True, False)),
@@ -1060,6 +1140,7 @@ def test_board_edge_indicator_records_only_state_transitions() -> None:
         ),
         _board_edge_activity_detector=detector,
         _board_edge_indicator_active=False,
+        _board_edge_activity_suspended=False,
         _board_edge_indicator_active_since=None,
         _board_edge_indicator_last_stuck_diagnostic_at=None,
         _projector_window=SimpleNamespace(
@@ -1112,6 +1193,7 @@ def test_board_edge_indicator_records_periodic_stuck_images() -> None:
         ),
         _board_edge_activity_detector=detector,
         _board_edge_indicator_active=False,
+        _board_edge_activity_suspended=False,
         _board_edge_indicator_active_since=None,
         _board_edge_indicator_last_stuck_diagnostic_at=None,
         _projector_window=SimpleNamespace(

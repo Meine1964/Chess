@@ -146,6 +146,7 @@ _ALIGNMENT_REMAP_DELAY_MILLISECONDS = 750
 _ALIGNMENT_REMAP_RETRY_MILLISECONDS = 250
 _BOARD_EDGE_STUCK_DIAGNOSTIC_SECONDS = 3.0
 _BOARD_EDGE_STUCK_REPEAT_SECONDS = 5.0
+_LICHESS_GUIDANCE_FALLBACK_MILLISECONDS = 2000
 _ALIGNMENT_REMAP_PROTECTED_TRACKER_STATES = frozenset(
     {
         "candidate",
@@ -1073,6 +1074,7 @@ class CameraWindow(QMainWindow):
         )
         self._board_edge_activity_detector = BoardEdgeActivityDetector()
         self._board_edge_indicator_active = False
+        self._board_edge_activity_suspended = False
         self._board_edge_indicator_active_since: float | None = None
         self._board_edge_indicator_last_stuck_diagnostic_at: float | None = None
         self._projector_window.projection_changed.connect(
@@ -1166,7 +1168,6 @@ class CameraWindow(QMainWindow):
         self._lichess_guidance_squares: (
             tuple[tuple[int, int], ...]
         ) = ()
-        self._lichess_guidance_edge_entered = False
         self._lichess_guidance_activity_logged = False
         self._offline_move_marking_active = False
         self._offline_move_marking_blackout_pending = False
@@ -3400,7 +3401,17 @@ class CameraWindow(QMainWindow):
         self._board_edge_indicator_last_stuck_diagnostic_at = None
         self._projector_window.set_edge_activity_indicator(False)
 
+    def _suspend_board_edge_activity_indicator(self) -> None:
+        self._board_edge_activity_suspended = True
+        self._reset_board_edge_activity_indicator()
+
+    def _resume_board_edge_activity_indicator(self) -> None:
+        self._board_edge_activity_suspended = False
+        self._reset_board_edge_activity_indicator()
+
     def _update_board_edge_activity_indicator(self) -> None:
+        if self._board_edge_activity_suspended:
+            return
         if self._latest_frame is None or self._calibration_result is None:
             self._reset_board_edge_activity_indicator()
             return
@@ -4995,6 +5006,7 @@ class CameraWindow(QMainWindow):
                 f"Lichess move guidance failed: {error}"
             )
             return False
+        self._resume_board_edge_activity_indicator()
         reprojection = self._lichess_guidance_reprojection_pending
         self._alignment_monitor.set_paused("Lichess move guidance")
         self._lichess_guidance_generation += 1
@@ -5002,11 +5014,10 @@ class CameraWindow(QMainWindow):
         self._lichess_guidance_blackout_pending = False
         self._lichess_guidance_reprojection_pending = False
         self._lichess_guidance_squares = guidance_squares
-        self._lichess_guidance_edge_entered = False
         self._lichess_guidance_activity_logged = False
         status_message = (
-            f"Projecting pending Lichess move {move_name} until the hand "
-            "leaves the board."
+            f"Projecting pending Lichess move {move_name} until entry or "
+            "fallback blackout."
         )
         self._projector_status.setText(status_message)
         self._record_runtime_diagnostic(
@@ -5026,19 +5037,25 @@ class CameraWindow(QMainWindow):
             },
             include_images=True,
         )
+        generation = self._lichess_guidance_generation
+        QTimer.singleShot(
+            _LICHESS_GUIDANCE_FALLBACK_MILLISECONDS,
+            lambda: self._begin_lichess_guidance_observation_if_current(
+                generation,
+                "fallback",
+            ),
+        )
         return True
 
     def _observe_lichess_guidance_activity(self) -> None:
-        if not self._lichess_guidance_projection_active:
+        if (
+            not self._lichess_guidance_projection_active
+            or not self._board_edge_indicator_active
+        ):
             return
-        if not self._board_edge_indicator_active:
-            if self._lichess_guidance_edge_entered:
-                self._begin_lichess_guidance_observation()
-            return
-        self._lichess_guidance_edge_entered = True
         status_message = (
-            "Opponent move in progress; guidance remains projected until "
-            "the hand leaves the board."
+            "Hand entered the board; guidance is returning to black before "
+            "move verification."
         )
         self._projector_status.setText(status_message)
         if not self._lichess_guidance_activity_logged:
@@ -5051,28 +5068,44 @@ class CameraWindow(QMainWindow):
                 },
                 include_images=True,
             )
+        self._begin_lichess_guidance_observation("boundary-entry")
 
-    def _begin_lichess_guidance_observation(self) -> None:
+    def _begin_lichess_guidance_observation_if_current(
+        self,
+        generation: int,
+        reason: str,
+    ) -> None:
+        if generation != self._lichess_guidance_generation:
+            return
+        self._begin_lichess_guidance_observation(reason)
+
+    def _begin_lichess_guidance_observation(
+        self,
+        reason: str = "manual",
+    ) -> None:
         if not self._lichess_guidance_projection_active:
             return
         generation = self._lichess_guidance_generation
         self._lichess_guidance_projection_active = False
         self._lichess_guidance_blackout_pending = True
         self._lichess_guidance_reprojection_pending = True
-        self._lichess_guidance_edge_entered = False
+        self._suspend_board_edge_activity_indicator()
         self._projector_window.show_black()
         self._alignment_monitor.set_black()
         self._lichess_blackout_settling_detector.reset()
         self._reference_move_tracker.reset_activity()
         status_message = (
-            "Hand left the board; projector returned to black and is settling "
-            "before move verification."
+            "Projector returned to black and is settling before move "
+            f"verification ({reason})."
         )
         self._projector_status.setText(status_message)
         self._record_runtime_diagnostic(
             "lichess-guidance-blackout-started",
             status_message,
-            details={"generation": generation},
+            details={
+                "generation": generation,
+                "reason": reason,
+            },
             include_images=True,
         )
         QTimer.singleShot(
@@ -5151,9 +5184,9 @@ class CameraWindow(QMainWindow):
         self._lichess_guidance_blackout_pending = False
         self._lichess_guidance_reprojection_pending = False
         self._lichess_guidance_squares = ()
-        self._lichess_guidance_edge_entered = False
         self._lichess_guidance_activity_logged = False
         self._lichess_blackout_settling_detector.reset()
+        self._resume_board_edge_activity_indicator()
 
     def _restore_pending_lichess_guidance_after_no_change(
         self,
@@ -7081,7 +7114,7 @@ class CameraWindow(QMainWindow):
                     for row, column in self._lichess_guidance_squares
                 ],
                 "detector_manipulation_active": (
-                    self._lichess_guidance_edge_entered
+                    self._board_edge_indicator_active
                 ),
                 "lifecycle_state": (
                     "manipulating"
@@ -7089,9 +7122,6 @@ class CameraWindow(QMainWindow):
                     else "arming"
                 ),
                 "boundary_active": self._board_edge_indicator_active,
-                "edge_entry_confirmed": (
-                    self._lichess_guidance_edge_entered
-                ),
             },
             "illegal_correction": {
                 "projection_active": (

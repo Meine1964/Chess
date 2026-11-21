@@ -416,8 +416,13 @@ all-64 stepping remain planned test modes.
   indicator.
 - Clear the indicator on the first observation without a qualifying boundary
   crossing.
-- Keep this diagnostic independent of Lichess manipulation lifecycle state;
-  it shall not trigger blackout, move verification, or other game behavior.
+- Keep the indicator's measurements and display state independent of move
+  verification. Lichess may consume its first qualifying entry transition to
+  begin blackout, but shall suspend and clear indicator observation during
+  black-board manipulation and verification. Rearm it with a fresh baseline
+  only after guidance is reprojected or the accepted physical state is
+  synchronized, so an entering hand cannot become the baseline and its later
+  departure cannot create a false crossing.
 - Record every activation and clearing transition with the current camera
   image, active state, current crossing decision, component area, inside-board
   pixels, outside-board pixels, outer-halo-rim pixels, and component bounding

@@ -81,26 +81,38 @@ settled camera image still matches the accepted reference, the same pending
 guidance shall be projected again. Camera or board drift shall not permanently
 hide an unperformed opponent move.
 
-Opponent-move guidance shall remain projected until camera evidence shows both
-that a real hand or arm entered the board region and that it subsequently left.
+Opponent-move guidance shall remain projected until camera evidence shows that
+a real hand or arm entered the board region or a bounded guidance-display
+interval elapsed.
 Lichess guidance shall use the same calibrated boundary-crossing detector as
 the visible edge indicator. It shall:
 
 - arm against the projected scene before accepting activity;
-- latch entry when one connected component contains material activity inside
+- confirm entry when one connected component contains material activity inside
   the board, outside the board, and at the outer rim of the one-square
   observation halo;
-- keep guidance projected while that boundary crossing remains active; and
-- begin blackout and move verification on the first subsequent clear boundary
-  observation.
+- begin blackout immediately on confirmed entry, before waiting for the hand
+  to depart;
+- suspend and clear boundary-indicator observation before changing to black so
+  frames containing the entering hand cannot become a new detector baseline;
+- use a generation-guarded two-second fallback to begin blackout when entry is
+  missed; and
+- after blackout settling, use the ordinary reference tracker to wait for a
+  clear, stable board and verify the required move.
 
-Board-confined changes after entry, including the completed opponent move,
-projector spill, piece silhouettes, or shadows, shall not delay blackout once
-the boundary detector reports clear. Runtime diagnostics shall record initial
-projection or reprojection, first confirmed boundary entry, blackout after
-departure, and black-frame verification readiness once per lifecycle. The
-edge-indicator diagnostics remain the authoritative component measurements for
-this lifecycle.
+Hand departure, board-confined changes, the completed opponent move, projector
+spill, piece silhouettes, and shadows shall therefore be handled by the same
+black-board reference-tracking path used by Offline play rather than by a
+second guidance-specific departure gate. If the black, settled image still
+matches the accepted reference, guidance shall be reprojected and the bounded
+cycle may repeat. Boundary-indicator observation shall resume with a fresh
+baseline only after guidance has been successfully reprojected or the pending
+move has been accepted and synchronization has completed. The unchanged
+accepted scene shall not reactivate the indicator. Runtime diagnostics shall
+record initial projection or reprojection, confirmed boundary entry when
+observed, blackout reason, and black-frame verification readiness once per
+lifecycle. The edge-indicator diagnostics remain the authoritative
+boundary-component measurements.
 
 When exactly one Lichess move is pending, its legal physical signature and
 resulting position are authoritative verification inputs, distinct from the
@@ -117,12 +129,13 @@ their ordinary candidate-ranking rules.
 
 Implementation status (2026-11-21): authoritative required-signature
 verification, shared boundary-detector guidance lifecycle, smooth local
-photometric-drift normalization, outer-halo entry qualification, and decision
+photometric-drift normalization, outer-halo entry qualification,
+entry-triggered blackout, generation-guarded fallback blackout, and decision
 diagnostics are implemented. Focused regressions cover exact `e8-f8` fallback,
 wrong-relocation rejection, halo-only activity, genuine boundary crossing,
-completed edge-piece changes, and transition diagnostics. Automatic camera
-measurement of projector-specific optical spill remains a possible later
-refinement rather than an acceptance dependency.
+completed edge-piece changes, stale fallback suppression, and transition
+diagnostics. Automatic camera measurement of projector-specific optical spill
+remains a possible later refinement rather than an acceptance dependency.
 
 ### 2.6 Authoritative game information
 
