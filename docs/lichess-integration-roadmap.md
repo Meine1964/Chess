@@ -675,6 +675,12 @@ Add UI support for:
 - Reconnection status.
 - Return to setup after game completion.
 
+**Game-information slice:** Implemented and automated-test validated. The
+Lichess panel displays White and Black player identity/rating, authoritative
+clocks when available, side to move, game status, and result. Polling snapshots
+without clocks show unavailable clocks rather than zero. Incremental state
+updates retain player identity from the latest full snapshot.
+
 For the first playable version, challenge creation may remain on the Lichess
 website. The application may initially detect and join an already active game.
 

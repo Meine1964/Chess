@@ -77,6 +77,20 @@ illegal correction and reconciliation discrepancies. The physical UI guidance
 shall remain visible while the projector is black for move verification and
 shall clear only when the move is confirmed, replaced, or enters correction.
 
+### 2.6 Authoritative game information
+
+The Lichess panel shall display both players with their colors and ratings when
+available, separate White and Black clocks, side to move, game status, and
+result. Full snapshots establish player identity and state; incremental state
+events update clocks, turn, status, and result without discarding player
+identity.
+
+When polling cannot provide authoritative clocks, both clocks shall display
+`--:--` rather than `0:00`. Zero is a valid displayed clock only when the
+transport identifies clock values as available. Before an active game is
+loaded, the panel shall explicitly report that no game information is
+available rather than displaying stale values from another selected game.
+
 ## 3. Scope
 
 ### 3.1 First implementation
@@ -878,8 +892,10 @@ promotion slices are implemented:
 - Underpromotion explicitly enters reconciliation until computer-based piece
   selection is implemented.
 
-The validated automated suite contains 259 passing tests. Live ordinary-move,
+The validated automated suite contains 261 passing tests. Live ordinary-move,
 polling, reconciliation, and guidance acceptance has been exercised on the
 target camera/projector setup. Lichess capture, castling, en passant, and
 auto-queen behavior is automated-test validated and awaits live acceptance.
-Underpromotion remains a staged limitation.
+The dedicated player, clock, status, and result display is automated-test
+validated and awaits live acceptance. Underpromotion remains a staged
+limitation.

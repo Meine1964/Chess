@@ -250,6 +250,8 @@ def test_multiple_ongoing_games_require_explicit_ui_selection(
             _rebuild_lichess_games_menu=MagicMock(),
             _preferred_lichess_game_id="",
             _remember_lichess_game_selection=MagicMock(),
+            _lichess_game_id=None,
+            _clear_lichess_game_information=MagicMock(),
         ),
     )
 
@@ -269,6 +271,9 @@ def test_multiple_ongoing_games_require_explicit_ui_selection(
     worker.select_game.assert_called_with("jgWZLWs6")
     window._remember_lichess_game_selection.assert_called_once_with(
         "jgWZLWs6"
+    )
+    window._clear_lichess_game_information.assert_called_once_with(
+        "Loading selected Lichess game information."
     )
     selector.close()
 

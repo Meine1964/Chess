@@ -6,6 +6,7 @@ from src.chess_camera.camera_app import (
     _format_lichess_clock,
     _illegal_correction_message,
     _lichess_board_state,
+    _lichess_game_information,
     _lichess_game_state_message,
     _lichess_polling_snapshot_message,
     _lichess_turn_indicator_state,
@@ -181,6 +182,71 @@ def test_polling_message_reports_unavailable_correspondence_clocks() -> None:
         "Stockfish level 1 (Black). White to move; "
         "clocks unavailable for this game; status started; result *. "
         "Connected by polling."
+    )
+
+
+def test_lichess_game_information_formats_players_and_unavailable_clocks(
+) -> None:
+    game = LichessGameFull(
+        "oozTO3xk",
+        "unused",
+        LichessPlayer("white", "Meine", 1500),
+        LichessPlayer("black", "Stockfish level 1", None),
+        LichessGameState(
+            (),
+            "unused",
+            "white",
+            0,
+            0,
+            0,
+            0,
+            "started",
+            None,
+            "*",
+        ),
+    )
+
+    assert _lichess_game_information(
+        game,
+        clocks_available=False,
+    ) == (
+        "Black: Stockfish level 1",
+        "Black clock: --:--",
+        "White: Meine (1500)",
+        "White clock: --:--",
+        "Status: started; White to move",
+    )
+
+
+def test_lichess_game_information_formats_completed_game() -> None:
+    game = LichessGameFull(
+        "game1234",
+        "unused",
+        LichessPlayer("white", "Local", 1510),
+        LichessPlayer("black", "Remote", 1490),
+        LichessGameState(
+            (),
+            "unused",
+            "white",
+            65000,
+            0,
+            0,
+            0,
+            "mate",
+            "white",
+            "1-0",
+        ),
+    )
+
+    assert _lichess_game_information(
+        game,
+        clocks_available=True,
+    ) == (
+        "Black: Remote (1490)",
+        "Black clock: 0:00",
+        "White: Local (1510)",
+        "White clock: 1:05",
+        "Status: mate; result 1-0",
     )
 
 

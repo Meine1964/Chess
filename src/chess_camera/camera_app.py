@@ -73,6 +73,7 @@ from .lichess_client import (
     LichessConfigurationError,
     LichessGameFull,
     LichessGameState,
+    LichessPlayer,
     LichessPollingSnapshot,
     LichessReadOnlyClient,
     OngoingGame,
@@ -206,6 +207,42 @@ def _format_lichess_clock(milliseconds: int) -> str:
     total_seconds = max(0, milliseconds) // 1000
     minutes, seconds = divmod(total_seconds, 60)
     return f"{minutes}:{seconds:02d}"
+
+
+def _lichess_game_information(
+    game: LichessGameFull,
+    *,
+    clocks_available: bool,
+) -> tuple[str, str, str, str, str]:
+    def player_text(player: LichessPlayer) -> str:
+        color = player.color.capitalize()
+        rating = f" ({player.rating})" if player.rating is not None else ""
+        return f"{color}: {player.name}{rating}"
+
+    state = game.state
+    white_clock = (
+        _format_lichess_clock(state.white_time_ms)
+        if clocks_available
+        else "--:--"
+    )
+    black_clock = (
+        _format_lichess_clock(state.black_time_ms)
+        if clocks_available
+        else "--:--"
+    )
+    if state.result == "*":
+        status = (
+            f"Status: {state.status}; {state.turn.capitalize()} to move"
+        )
+    else:
+        status = f"Status: {state.status}; result {state.result}"
+    return (
+        player_text(game.black),
+        f"Black clock: {black_clock}",
+        player_text(game.white),
+        f"White clock: {white_clock}",
+        status,
+    )
 
 
 def _lichess_game_state_message(state: LichessGameState) -> str:
@@ -531,6 +568,7 @@ class CameraWindow(QMainWindow):
         self._lichess_guidance_generation = 0
         self._latest_lichess_state: LichessGameState | None = None
         self._latest_lichess_game: LichessGameFull | None = None
+        self._lichess_clocks_available = False
         self._last_runtime_tracker_state: str | None = None
         self._runtime_diagnostics_error: str | None = None
         self._latest_stable_occupied_ui: (
@@ -847,9 +885,43 @@ class CameraWindow(QMainWindow):
         physical_panel_layout.addWidget(self._board_widget)
         physical_panel.setLayout(physical_panel_layout)
 
+        self._lichess_black_player = QLabel("Black: --")
+        self._lichess_black_clock = QLabel("Black clock: --:--")
+        self._lichess_white_player = QLabel("White: --")
+        self._lichess_white_clock = QLabel("White clock: --:--")
+        self._lichess_game_information_status = QLabel(
+            "No active Lichess game information."
+        )
+        for label in (
+            self._lichess_black_player,
+            self._lichess_black_clock,
+            self._lichess_white_player,
+            self._lichess_white_clock,
+            self._lichess_game_information_status,
+        ):
+            label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+        self._lichess_game_information_status.setWordWrap(True)
+
+        black_information_layout = QHBoxLayout()
+        black_information_layout.addWidget(self._lichess_black_player)
+        black_information_layout.addStretch(1)
+        black_information_layout.addWidget(self._lichess_black_clock)
+        white_information_layout = QHBoxLayout()
+        white_information_layout.addWidget(self._lichess_white_player)
+        white_information_layout.addStretch(1)
+        white_information_layout.addWidget(self._lichess_white_clock)
+
         lichess_panel = QGroupBox("Lichess position")
+        _set_readable_interaction_font(lichess_panel)
         lichess_panel_layout = QVBoxLayout()
+        lichess_panel_layout.addLayout(black_information_layout)
         lichess_panel_layout.addWidget(self._lichess_board_widget)
+        lichess_panel_layout.addLayout(white_information_layout)
+        lichess_panel_layout.addWidget(
+            self._lichess_game_information_status
+        )
         lichess_panel.setLayout(lichess_panel_layout)
 
         interaction_content = QWidget()
@@ -3715,6 +3787,7 @@ class CameraWindow(QMainWindow):
             )
             self._lichess_game_selector.setEnabled(False)
             selected: str | None = None
+            self._clear_lichess_game_information()
         elif len(games) == 1:
             game = games[0]
             if remembered and remembered != game.game_id:
@@ -3770,6 +3843,10 @@ class CameraWindow(QMainWindow):
             self._lichess_status.setText(
                 f"Selected Lichess game {game_id}; awaiting snapshot."
             )
+            if game_id != self._lichess_game_id:
+                self._clear_lichess_game_information(
+                    "Loading selected Lichess game information."
+                )
         self._rebuild_lichess_games_menu()
 
     def _remember_lichess_game_selection(self, game_id: str) -> None:
@@ -3799,6 +3876,9 @@ class CameraWindow(QMainWindow):
                 self._lichess_game_controller = None
                 self._latest_lichess_game = None
                 self._last_projected_lichess_uci = None
+                self._clear_lichess_game_information(
+                    "Loading Lichess game information."
+                )
             self._lichess_game_id = event.game_id
             self._lichess_player_color = event.color
             self._lichess_opponent_name = event.opponent_name
@@ -3819,12 +3899,20 @@ class CameraWindow(QMainWindow):
         if isinstance(event, LichessPollingSnapshot):
             self._update_lichess_board(event.game.state)
             self._update_lichess_synchronization(event.game)
+            self._update_lichess_game_information(
+                event.game,
+                clocks_available=event.clocks_available,
+            )
             self._lichess_status.setText(
                 _lichess_polling_snapshot_message(event)
             )
         elif isinstance(event, LichessGameFull):
             self._update_lichess_board(event.state)
             self._update_lichess_synchronization(event)
+            self._update_lichess_game_information(
+                event,
+                clocks_available=True,
+            )
             self._lichess_status.setText(
                 f"Lichess game {event.game_id}: "
                 f"{event.white.name} (White) vs "
@@ -3834,6 +3922,11 @@ class CameraWindow(QMainWindow):
         elif isinstance(event, LichessGameState):
             self._update_lichess_board(event)
             self._update_lichess_synchronization_state(event)
+            if self._latest_lichess_game is not None:
+                self._update_lichess_game_information(
+                    self._latest_lichess_game,
+                    clocks_available=self._lichess_clocks_available,
+                )
             self._lichess_status.setText(
                 _lichess_game_state_message(event)
             )
@@ -3859,6 +3952,40 @@ class CameraWindow(QMainWindow):
         self._lichess_board_widget.set_occupied_squares(position)
         self._lichess_board_widget.set_last_move(last_move)
         self._update_turn_indicator()
+
+    def _clear_lichess_game_information(
+        self,
+        status: str = "No active Lichess game information.",
+    ) -> None:
+        self._lichess_clocks_available = False
+        self._lichess_black_player.setText("Black: --")
+        self._lichess_black_clock.setText("Black clock: --:--")
+        self._lichess_white_player.setText("White: --")
+        self._lichess_white_clock.setText("White clock: --:--")
+        self._lichess_game_information_status.setText(status)
+
+    def _update_lichess_game_information(
+        self,
+        game: LichessGameFull,
+        *,
+        clocks_available: bool,
+    ) -> None:
+        self._lichess_clocks_available = clocks_available
+        (
+            black_player,
+            black_clock,
+            white_player,
+            white_clock,
+            status,
+        ) = _lichess_game_information(
+            game,
+            clocks_available=clocks_available,
+        )
+        self._lichess_black_player.setText(black_player)
+        self._lichess_black_clock.setText(black_clock)
+        self._lichess_white_player.setText(white_player)
+        self._lichess_white_clock.setText(white_clock)
+        self._lichess_game_information_status.setText(status)
 
     def _update_lichess_synchronization(
         self,
