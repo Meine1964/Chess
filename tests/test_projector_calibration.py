@@ -788,6 +788,9 @@ def test_black_action_opens_and_raises_projector_before_clearing_marker() -> Non
         _suspend_selected_square=MagicMock(),
         _projector_status=MagicMock(),
         _lichess_guidance_projection_active=False,
+        _offline_guidance_activity_detector=MagicMock(),
+        _illegal_correction_activity_detector=MagicMock(),
+        _illegal_correction_generation=0,
     )
 
     CameraWindow._black_projector(window)

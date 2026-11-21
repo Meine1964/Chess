@@ -69,6 +69,26 @@ def test_activity_on_board_keeps_guidance_until_scene_is_quiet() -> None:
     assert detector.observe(changed, _camera_grid())
 
 
+def test_reset_clears_completed_manipulation_lifecycle() -> None:
+    frame = _frame()
+    changed = frame.copy()
+    cv2.rectangle(changed, (430, 430), (500, 560), (20, 20, 20), -1)
+    detector = _armed_detector(frame)
+
+    assert not detector.observe(changed, _camera_grid())
+    assert not detector.observe(changed, _camera_grid())
+    assert detector.manipulation_active
+
+    detector.reset()
+
+    assert detector.manipulation_active is False
+    for _index in range(10):
+        assert not detector.observe(frame, _camera_grid())
+    for _index in range(5):
+        assert not detector.observe(frame, _camera_grid())
+    assert detector.manipulation_active is False
+
+
 def test_activity_in_near_edge_halo_waits_for_quiet_before_blackout() -> None:
     frame = _frame()
     changed = frame.copy()
@@ -99,6 +119,94 @@ def test_uniform_brightness_change_is_normalized() -> None:
 
     assert not detector.observe(brighter, _camera_grid())
     assert not detector.observe(brighter, _camera_grid())
+
+
+def test_ignored_correction_squares_do_not_trigger_activity() -> None:
+    frame = _frame()
+    projected = frame.copy()
+    cv2.rectangle(projected, (400, 400), (500, 500), (220, 20, 20), -1)
+    cv2.rectangle(projected, (500, 400), (600, 500), (220, 20, 20), -1)
+    detector = _armed_detector(frame)
+
+    assert not detector.observe(
+        projected,
+        _camera_grid(),
+        ((2, 2), (2, 3)),
+    )
+    assert not detector.observe(
+        projected,
+        _camera_grid(),
+        ((2, 2), (2, 3)),
+    )
+    assert detector.manipulation_active is False
+
+
+def test_correction_detector_ignores_edge_spill_but_detects_hand() -> None:
+    frame = _frame()
+    projected = frame.copy()
+    cv2.rectangle(projected, (397, 397), (503, 503), (220, 20, 20), -1)
+    cv2.rectangle(projected, (497, 397), (603, 503), (220, 20, 20), -1)
+    detector = GuidanceActivityDetector(
+        confirmation_observations=1,
+        minimum_square_fraction=0.5,
+        rolling_baseline_before_activity=True,
+        require_halo_activity=True,
+    )
+    for _index in range(10):
+        assert not detector.observe(frame, _camera_grid())
+
+    for _index in range(3):
+        assert not detector.observe(
+            projected,
+            _camera_grid(),
+            ((2, 2), (2, 3)),
+        )
+    assert detector.manipulation_active is False
+
+    hand = projected.copy()
+    cv2.rectangle(hand, (950, 500), (1080, 610), (20, 20, 20), -1)
+    assert not detector.observe(
+        hand,
+        _camera_grid(),
+        ((2, 2), (2, 3)),
+    )
+    assert detector.manipulation_active is True
+
+
+def test_rolling_correction_baseline_does_not_accumulate_exposure_drift() -> None:
+    frame = _frame()
+    detector = GuidanceActivityDetector(
+        confirmation_observations=1,
+        minimum_square_fraction=0.5,
+        rolling_baseline_before_activity=True,
+        require_halo_activity=True,
+    )
+    for _index in range(10):
+        assert not detector.observe(frame, _camera_grid())
+
+    for offset in (8, 16, 24, 32):
+        drifted = frame.copy()
+        drifted[500:610, 700:800] = 110 + offset
+        assert not detector.observe(drifted, _camera_grid())
+
+    assert detector.manipulation_active is False
+
+
+def test_correction_detector_rejects_board_confined_light_change() -> None:
+    frame = _frame()
+    changed = frame.copy()
+    cv2.rectangle(changed, (700, 500), (820, 620), (20, 20, 20), -1)
+    detector = GuidanceActivityDetector(
+        confirmation_observations=1,
+        minimum_square_fraction=0.5,
+        rolling_baseline_before_activity=True,
+        require_halo_activity=True,
+    )
+    for _index in range(10):
+        assert not detector.observe(frame, _camera_grid())
+
+    assert not detector.observe(changed, _camera_grid())
+    assert detector.manipulation_active is False
 
 
 def test_pending_lichess_guidance_has_no_fixed_timeout() -> None:
@@ -259,6 +367,75 @@ def test_active_manipulation_keeps_opponent_guidance_projected() -> None:
     )
 
 
+def test_offline_accepted_projection_returns_when_hand_moves_nothing() -> None:
+    move = ((6, 4), (4, 4))
+    window = SimpleNamespace(
+        _offline_accepted_reprojection_pending=True,
+        _offline_accepted_no_change_count=0,
+        _offline_accepted_move=move,
+        _game_mode="offline-game",
+        _project_offline_accepted_move=MagicMock(),
+        _occupancy_status=MagicMock(),
+    )
+
+    CameraWindow._restore_offline_accepted_projection_after_no_change(
+        window,
+        ReferenceTrackerUpdate(
+            "watching",
+            None,
+            "Board matches the accepted reference.",
+        ),
+    )
+
+    assert window._offline_accepted_reprojection_pending is True
+    window._project_offline_accepted_move.assert_not_called()
+
+    CameraWindow._restore_offline_accepted_projection_after_no_change(
+        window,
+        ReferenceTrackerUpdate(
+            "watching",
+            None,
+            "Board matches the accepted reference.",
+        ),
+    )
+
+    assert window._offline_accepted_reprojection_pending is False
+    window._project_offline_accepted_move.assert_called_once_with(move)
+    window._occupancy_status.setText.assert_called_once_with(
+        "No physical move detected; accepted-move illumination restored."
+    )
+
+
+def test_offline_hand_entry_requests_accepted_move_reprojection() -> None:
+    detector = MagicMock()
+    detector.manipulation_active = True
+    window = SimpleNamespace(
+        _latest_frame=object(),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(camera_grid=object())
+        ),
+        _offline_accepted_projection_active=True,
+        _offline_accepted_reprojection_pending=False,
+        _offline_accepted_no_change_count=1,
+        _offline_guidance_activity_detector=detector,
+        _projector_window=SimpleNamespace(
+            output_mode="move",
+            show_black=MagicMock(),
+        ),
+        _alignment_monitor=MagicMock(),
+        _reference_move_tracker=MagicMock(),
+        _projector_status=MagicMock(),
+    )
+
+    CameraWindow._observe_offline_accepted_projection(window)
+
+    assert window._offline_accepted_projection_active is False
+    assert window._offline_accepted_reprojection_pending is True
+    assert window._offline_accepted_no_change_count == 0
+    window._projector_window.show_black.assert_called_once_with()
+    window._reference_move_tracker.reset_activity.assert_called_once_with()
+
+
 def test_unchanged_board_restores_pending_lichess_guidance() -> None:
     window = SimpleNamespace(
         _lichess_guidance_reprojection_pending=True,
@@ -301,6 +478,9 @@ def test_guidance_activity_precedes_black_output_gate() -> None:
         _activate_offline_after_reset=False,
         _reset_to_start_requested=False,
         _pending_promotion_selection=None,
+        _illegal_correction_projection_active=False,
+        _illegal_correction_blackout_pending=False,
+        _offline_accepted_projection_active=False,
         _lichess_guidance_projection_active=True,
         _lichess_guidance_blackout_pending=False,
         _observe_lichess_guidance_activity=MagicMock(),
@@ -315,6 +495,12 @@ def test_guidance_activity_precedes_black_output_gate() -> None:
 def test_black_button_starts_pending_move_observation() -> None:
     window = SimpleNamespace(
         _lichess_guidance_projection_active=True,
+        _offline_accepted_projection_active=False,
+        _offline_accepted_reprojection_pending=False,
+        _offline_guidance_activity_detector=MagicMock(),
+        _illegal_correction_activity_detector=MagicMock(),
+        _illegal_correction_generation=0,
+        _illegal_correction_physical_squares=(),
         _calibrator=SimpleNamespace(active=False),
         _open_projector=MagicMock(return_value=True),
         _suspend_selected_square=MagicMock(),
@@ -327,3 +513,92 @@ def test_black_button_starts_pending_move_observation() -> None:
     window._open_projector.assert_called_once_with()
     window._suspend_selected_square.assert_called_once_with()
     window._begin_lichess_guidance_observation.assert_called_once_with()
+
+
+def test_illegal_correction_projects_both_squares_without_timeout() -> None:
+    window = SimpleNamespace(
+        _illegal_correction_projection_active=False,
+        _illegal_correction_blackout_pending=False,
+        _illegal_correction_generation=0,
+        _illegal_correction_physical_squares=(),
+        _illegal_correction_activity_detector=MagicMock(),
+        _camera_only_calibration=False,
+        _calibration_result=object(),
+        _open_projector=MagicMock(return_value=True),
+        _physical_board_square=lambda row, column: (row, column),
+        _projector_window=MagicMock(),
+        _alignment_monitor=MagicMock(),
+        _projector_status=MagicMock(),
+    )
+
+    with patch(
+        "src.chess_camera.camera_app.QTimer.singleShot"
+    ) as single_shot:
+        CameraWindow._project_illegal_move_correction(
+            window,
+            ((6, 2), (5, 2)),
+        )
+
+    window._projector_window.show_correction.assert_called_once_with(
+        (6, 2),
+        (5, 2),
+    )
+    assert window._illegal_correction_projection_active is True
+    single_shot.assert_not_called()
+
+
+def test_illegal_correction_remains_while_hand_is_present() -> None:
+    detector = MagicMock()
+    detector.observe.return_value = False
+    detector.manipulation_active = True
+    window = SimpleNamespace(
+        _latest_frame=object(),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(camera_grid=object())
+        ),
+        _illegal_correction_projection_active=True,
+        _illegal_correction_activity_detector=detector,
+        _illegal_correction_physical_squares=((6, 2), (5, 2)),
+        _begin_illegal_correction_observation=MagicMock(),
+        _projector_status=MagicMock(),
+    )
+
+    CameraWindow._observe_illegal_correction_activity(window)
+
+    window._begin_illegal_correction_observation.assert_not_called()
+    window._projector_status.setText.assert_called_once_with(
+        "Correction in progress; both red squares remain projected until "
+        "the hand leaves the board."
+    )
+
+
+def test_illegal_correction_blackout_starts_after_hand_leaves() -> None:
+    callback = None
+
+    def capture_timer(milliseconds: int, pending_callback: object) -> None:
+        nonlocal callback
+        assert milliseconds == 1000
+        callback = pending_callback
+
+    window = SimpleNamespace(
+        _illegal_correction_projection_active=True,
+        _illegal_correction_blackout_pending=False,
+        _illegal_correction_generation=4,
+        _illegal_correction_activity_detector=MagicMock(),
+        _projector_window=MagicMock(),
+        _alignment_monitor=MagicMock(),
+        _reference_move_tracker=MagicMock(),
+        _projector_status=MagicMock(),
+        _finish_illegal_correction_blackout=MagicMock(),
+    )
+
+    with patch(
+        "src.chess_camera.camera_app.QTimer.singleShot",
+        side_effect=capture_timer,
+    ):
+        CameraWindow._begin_illegal_correction_observation(window)
+
+    assert window._illegal_correction_projection_active is False
+    assert window._illegal_correction_blackout_pending is True
+    window._projector_window.show_black.assert_called_once_with()
+    assert callback is not None

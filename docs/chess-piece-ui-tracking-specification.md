@@ -193,6 +193,25 @@ After an accepted move, both its source and destination squares shall remain
 visibly lighter on the UI board until another move is accepted. An explicit
 reset to the standard starting position shall clear the highlight.
 
+In Offline legal mode, the projector shall illuminate the accepted source and
+destination without a fixed timeout. The illumination shall remain steady
+while the board is unobstructed and shall be removed as soon as the next
+player's hand enters the board or its one-square halo. The projector shall
+then return immediately to idle-dark output with the next-turn dot and observe
+the new move. The player shall not have to wait for accepted-move illumination
+to expire. If the hand leaves without changing any piece, black-frame
+comparison shall confirm on two consecutive observations that the board still
+matches the accepted reference before the same accepted-move illumination
+reappears. The restored projection shall be allowed to settle before its hand
+detector is armed so the projected squares cannot trigger a repeated
+blackout/reprojection cycle. Red illegal-move correction projection remains
+unchanged.
+
+If that next manipulation produces a clear relocation which does not match
+any legal physical move signature, including a move by the wrong side, the
+accepted position and reference shall remain unchanged and both observed
+source and destination squares shall be projected red.
+
 ### 5.2 Size and alignment
 
 Each piece shall:
@@ -339,13 +358,17 @@ square to a legal destination; returning it to its original square first is
 not required. The authoritative source piece remains at its logical square and
 that square is marked red on the UI. When a calibrated projector is available,
 both the authoritative source square and the physically observed illegal
-destination are projected in red for two seconds. The projector then returns
-to black so camera verification can resume. The UI mark clears when the board
-returns to the accepted reference or a legal move is
-accepted. Restoration uses a separate conservative tolerance: every square
-except the authoritative source must be below the normal movement threshold,
-while the source may retain a small lighting residual. This tolerance does not
-change ordinary move detection.
+destination shall be projected in red together without a fixed timeout. Both
+red squares shall remain projected while the player reaches onto the board and
+restores or redirects the piece. Only after confirmed hand activity has become
+quiet shall the projector return to black so camera verification can resume.
+If verification shows that the same rejected position remains, both red
+squares shall be projected again. The UI mark clears when the board returns to
+the accepted reference or a legal move is accepted. Restoration uses a
+separate conservative tolerance: every square except the authoritative source
+must be below the normal movement threshold, while the source may retain a
+small lighting residual. This tolerance does not change ordinary move
+detection.
 
 Physical reconciliation may mark multiple squares red simultaneously. Missing
 expected pieces, unexpected pieces, and confidently opposite-color pieces

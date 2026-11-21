@@ -942,6 +942,17 @@ class CameraWindow(QMainWindow):
             settling_observations=3,
         )
         self._guidance_activity_detector = GuidanceActivityDetector()
+        self._offline_guidance_activity_detector = GuidanceActivityDetector(
+            arming_observations=3,
+        )
+        self._illegal_correction_activity_detector = (
+            GuidanceActivityDetector(
+                confirmation_observations=1,
+                minimum_square_fraction=0.5,
+                rolling_baseline_before_activity=True,
+                require_halo_activity=True,
+            )
+        )
         self._promotion_activity_detector = (
             ManipulationSettlingDetector()
         )
@@ -1013,6 +1024,18 @@ class CameraWindow(QMainWindow):
         self._lichess_guidance_projection_active = False
         self._lichess_guidance_blackout_pending = False
         self._lichess_guidance_reprojection_pending = False
+        self._offline_accepted_projection_active = False
+        self._offline_accepted_reprojection_pending = False
+        self._offline_accepted_no_change_count = 0
+        self._offline_accepted_move: (
+            tuple[tuple[int, int], tuple[int, int]] | None
+        ) = None
+        self._illegal_correction_projection_active = False
+        self._illegal_correction_blackout_pending = False
+        self._illegal_correction_generation = 0
+        self._illegal_correction_physical_squares: (
+            tuple[tuple[int, int], ...]
+        ) = ()
         self._lichess_guidance_generation = 0
         self._latest_lichess_state: LichessGameState | None = None
         self._latest_lichess_game: LichessGameFull | None = None
@@ -2414,6 +2437,15 @@ class CameraWindow(QMainWindow):
 
     def _black_projector(self) -> None:
         lichess_guidance_active = self._lichess_guidance_projection_active
+        self._offline_accepted_projection_active = False
+        self._offline_accepted_reprojection_pending = False
+        self._offline_accepted_no_change_count = 0
+        self._offline_guidance_activity_detector.reset()
+        self._illegal_correction_projection_active = False
+        self._illegal_correction_blackout_pending = False
+        self._illegal_correction_generation += 1
+        self._illegal_correction_physical_squares = ()
+        self._illegal_correction_activity_detector.reset()
         if self._calibrator.active:
             self._calibrator.cancel()
         if not self._open_projector():
@@ -3085,6 +3117,18 @@ class CameraWindow(QMainWindow):
         if self._pending_promotion_selection is not None:
             self._update_promotion_selection()
             return
+        if self._illegal_correction_projection_active:
+            self._observe_illegal_correction_activity()
+            return
+        if self._illegal_correction_blackout_pending:
+            self._occupancy_status.setText(
+                "Red correction removed; waiting for projector black to "
+                "settle."
+            )
+            return
+        if self._offline_accepted_projection_active:
+            self._observe_offline_accepted_projection()
+            return
         if self._lichess_guidance_projection_active:
             self._observe_lichess_guidance_activity()
             return
@@ -3334,6 +3378,7 @@ class CameraWindow(QMainWindow):
                 "accepted",
                 "ambiguous",
                 "illegal-removal",
+                "illegal-relocation",
                 "pending-capture",
                 "pending-castling",
                 "pending-en-passant",
@@ -3347,6 +3392,7 @@ class CameraWindow(QMainWindow):
                 include_images=True,
             )
         self._restore_pending_lichess_guidance_after_no_change(update)
+        self._restore_offline_accepted_projection_after_no_change(update)
         rejected_move = self._last_rejected_move
         correction_restored = (
             rejected_move is not None
@@ -3391,14 +3437,21 @@ class CameraWindow(QMainWindow):
                 return
             square = update.move[0]
             self._reference_move_tracker.reset_activity()
-            newly_marked = self._last_rejected_move != update.move
             self._last_rejected_move = update.move
             self._board_widget.set_illegal_source(square)
             self._piece_status.setText(
                 _illegal_correction_message(update.move, self._legal_game)
             )
-            if newly_marked:
-                self._project_illegal_move_correction(update.move)
+            self._project_illegal_move_correction(update.move)
+            return
+        if update.state == "illegal-relocation" and update.move is not None:
+            self._reference_move_tracker.reset_activity()
+            self._last_rejected_move = update.move
+            self._board_widget.set_illegal_source(update.move[0])
+            self._piece_status.setText(
+                _illegal_correction_message(update.move, self._legal_game)
+            )
+            self._project_illegal_move_correction(update.move)
             return
         if update.state != "accepted" or update.move is None:
             return
@@ -3485,14 +3538,12 @@ class CameraWindow(QMainWindow):
                 )
             except ValueError as error:
                 self._reference_move_tracker.reset_activity()
-                newly_marked = self._last_rejected_move != update.move
                 self._last_rejected_move = update.move
                 self._board_widget.set_illegal_source(source)
                 self._piece_status.setText(
                     _illegal_correction_message(update.move, self._legal_game)
                 )
-                if newly_marked:
-                    self._project_illegal_move_correction(update.move)
+                self._project_illegal_move_correction(update.move)
                 return
         previous_position = self._piece_synchronizer.position
         try:
@@ -3550,7 +3601,10 @@ class CameraWindow(QMainWindow):
                 f"{legal_move.status.turn} to move."
             )
         if not lichess_pending:
-            self._project_accepted_move(update.move)
+            if legal_move is None:
+                self._project_accepted_move(update.move)
+            else:
+                self._project_offline_accepted_move(update.move)
 
     def _start_promotion_selection(
         self,
@@ -3906,7 +3960,7 @@ class CameraWindow(QMainWindow):
             f"Legal move {legal_move.san} accepted; "
             f"{legal_move.status.turn} to move."
         )
-        self._project_accepted_move(move)
+        self._project_offline_accepted_move(move)
 
     def _fail_promotion_selection(self, message: str) -> None:
         self._pending_promotion_selection = None
@@ -4265,6 +4319,102 @@ class CameraWindow(QMainWindow):
         )
         QTimer.singleShot(2000, self._finish_move_projection)
 
+    def _project_offline_accepted_move(
+        self,
+        move: tuple[tuple[int, int], tuple[int, int]],
+    ) -> None:
+        if self._camera_only_calibration:
+            return
+        if self._calibration_result is None or not self._open_projector():
+            return
+        source, destination = move
+        try:
+            self._projector_window.show_move(
+                self._physical_board_square(*source),
+                self._physical_board_square(*destination),
+                source_is_light=(sum(source) % 2 == 0),
+                destination_is_light=(sum(destination) % 2 == 0),
+            )
+        except (RuntimeError, ValueError) as error:
+            self._projector_status.setText(
+                f"Accepted-move projection failed: {error}"
+            )
+            return
+        self._offline_accepted_projection_active = True
+        self._offline_accepted_reprojection_pending = False
+        self._offline_accepted_no_change_count = 0
+        self._offline_accepted_move = move
+        self._offline_guidance_activity_detector.reset()
+        self._alignment_monitor.set_paused("Offline accepted move")
+        self._projector_status.setText(
+            "Showing the accepted move until the next player's hand enters."
+        )
+
+    def _observe_offline_accepted_projection(self) -> None:
+        if (
+            self._latest_frame is None
+            or self._calibration_result is None
+            or not self._offline_accepted_projection_active
+        ):
+            return
+        if self._projector_window.output_mode != "move":
+            self._offline_accepted_projection_active = False
+            self._offline_accepted_reprojection_pending = True
+            self._offline_accepted_no_change_count = 0
+            self._offline_guidance_activity_detector.reset()
+            return
+        try:
+            self._offline_guidance_activity_detector.observe(
+                self._latest_frame,
+                self._calibration_result.mapping.camera_grid,
+            )
+        except (ValueError, RuntimeError, cv2.error) as error:
+            self._projector_status.setText(
+                f"Next-move hand detection unavailable: {error}"
+            )
+            return
+        if not self._offline_guidance_activity_detector.manipulation_active:
+            return
+        self._offline_accepted_projection_active = False
+        self._offline_accepted_reprojection_pending = True
+        self._offline_accepted_no_change_count = 0
+        self._offline_guidance_activity_detector.reset()
+        self._projector_window.show_black()
+        self._alignment_monitor.set_black()
+        self._reference_move_tracker.reset_activity()
+        self._projector_status.setText(
+            "Next move started; accepted-move illumination removed."
+        )
+
+    def _restore_offline_accepted_projection_after_no_change(
+        self,
+        update: ReferenceTrackerUpdate,
+    ) -> None:
+        if not self._offline_accepted_reprojection_pending:
+            return
+        if update.state == "watching":
+            self._offline_accepted_no_change_count += 1
+            if self._offline_accepted_no_change_count < 2:
+                return
+            move = self._offline_accepted_move
+            self._offline_accepted_reprojection_pending = False
+            self._offline_accepted_no_change_count = 0
+            if move is not None and self._game_mode == "offline-game":
+                self._project_offline_accepted_move(move)
+                self._occupancy_status.setText(
+                    "No physical move detected; accepted-move illumination "
+                    "restored."
+                )
+            return
+        if update.state not in (
+            "activity",
+            "waiting-for-clear",
+            "settling",
+            "candidate",
+        ):
+            self._offline_accepted_reprojection_pending = False
+        self._offline_accepted_no_change_count = 0
+
     def _update_lichess_synchronization_projection(self) -> None:
         controller = self._lichess_game_controller
         if controller is None:
@@ -4438,7 +4588,6 @@ class CameraWindow(QMainWindow):
         controller = self._lichess_game_controller
         self._reference_move_tracker.reset_activity()
         self._board_widget.set_guidance_move(None)
-        newly_marked = self._last_rejected_move != move
         self._last_rejected_move = move
         self._board_widget.set_illegal_source(move[0])
         expected = (
@@ -4466,13 +4615,17 @@ class CameraWindow(QMainWindow):
             message,
             include_images=True,
         )
-        if newly_marked:
-            self._project_illegal_move_correction(move)
+        self._project_illegal_move_correction(move)
 
     def _project_illegal_move_correction(
         self,
         move: tuple[tuple[int, int], tuple[int, int]],
     ) -> None:
+        if (
+            self._illegal_correction_projection_active
+            or self._illegal_correction_blackout_pending
+        ):
+            return
         if self._camera_only_calibration:
             self._projector_status.setText(
                 "Illegal move marked in red on the UI; physical projection "
@@ -4491,10 +4644,14 @@ class CameraWindow(QMainWindow):
         try:
             if source == destination:
                 self._projector_window.show_illegal_square(*physical_source)
+                correction_squares = (physical_source,)
             else:
                 self._projector_window.show_correction(
                     physical_source,
                     physical_destination,
+                )
+                correction_squares = tuple(
+                    dict.fromkeys((physical_source, physical_destination))
                 )
         except (RuntimeError, ValueError) as error:
             self._projector_status.setText(
@@ -4503,13 +4660,77 @@ class CameraWindow(QMainWindow):
             )
             return
         self._alignment_monitor.set_paused("illegal move indication")
+        self._illegal_correction_generation += 1
+        self._illegal_correction_projection_active = True
+        self._illegal_correction_blackout_pending = False
+        self._illegal_correction_physical_squares = correction_squares
+        self._illegal_correction_activity_detector.reset()
         self._projector_status.setText(
-            f"Projecting the illegally removed square in red for 2 seconds."
+            "Projecting the illegally removed square in red until the "
+            "restoring hand leaves the board."
             if source == destination
-            else "Projecting the illegal move source and destination in red "
-            "for 2 seconds."
+            else "Projecting both illegal move squares in red until the "
+            "restoring hand leaves the board."
         )
-        QTimer.singleShot(2000, self._finish_illegal_move_projection)
+
+    def _observe_illegal_correction_activity(self) -> None:
+        if (
+            self._latest_frame is None
+            or self._calibration_result is None
+            or not self._illegal_correction_projection_active
+        ):
+            return
+        try:
+            manipulation_settled = (
+                self._illegal_correction_activity_detector.observe(
+                    self._latest_frame,
+                    self._calibration_result.mapping.camera_grid,
+                    self._illegal_correction_physical_squares,
+                )
+            )
+        except (ValueError, RuntimeError, cv2.error) as error:
+            self._projector_status.setText(
+                f"Correction hand detection unavailable: {error}"
+            )
+            return
+        if manipulation_settled:
+            self._begin_illegal_correction_observation()
+        elif self._illegal_correction_activity_detector.manipulation_active:
+            self._projector_status.setText(
+                "Correction in progress; both red squares remain projected "
+                "until the hand leaves the board."
+            )
+
+    def _begin_illegal_correction_observation(self) -> None:
+        if not self._illegal_correction_projection_active:
+            return
+        generation = self._illegal_correction_generation
+        self._illegal_correction_projection_active = False
+        self._illegal_correction_blackout_pending = True
+        self._illegal_correction_activity_detector.reset()
+        self._projector_window.show_black()
+        self._alignment_monitor.set_black()
+        self._reference_move_tracker.reset_activity()
+        self._projector_status.setText(
+            "Hand left the board; red correction removed while projector "
+            "black settles."
+        )
+        QTimer.singleShot(
+            1000,
+            lambda: self._finish_illegal_correction_blackout(generation),
+        )
+
+    def _finish_illegal_correction_blackout(self, generation: int) -> None:
+        if (
+            generation != self._illegal_correction_generation
+            or not self._illegal_correction_blackout_pending
+        ):
+            return
+        self._illegal_correction_blackout_pending = False
+        self._reference_move_tracker.reset_activity()
+        self._projector_status.setText(
+            "Projector black settled; verifying the physical correction."
+        )
 
     def _finish_move_projection(self) -> None:
         if self._projector_window.output_mode != "move":
@@ -4518,18 +4739,6 @@ class CameraWindow(QMainWindow):
         self._alignment_monitor.set_black()
         self._projector_status.setText(
             "Move indication finished; projector returned to black."
-        )
-
-    def _finish_illegal_move_projection(self) -> None:
-        if self._projector_window.output_mode not in (
-            "illegal",
-            "correction",
-        ):
-            return
-        self._projector_window.show_black()
-        self._alignment_monitor.set_black()
-        self._projector_status.setText(
-            "Illegal-move indication finished; projector returned to black."
         )
 
     def _toggle_physical_reconciliation(self) -> None:

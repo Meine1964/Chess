@@ -396,11 +396,63 @@ An accepted move shall be applied atomically:
    passant side effect represented by that signature.
 3. Update the UI piece map.
 4. Highlight source and destination on the UI until the next accepted move.
-5. Optionally illuminate both physical squares for two seconds when a matching
-   projector calibration is available.
-6. Store the settled candidate as the new reference.
-7. Persist the logical position and reference metadata.
-8. Return to `watching`.
+5. Store the settled candidate as the new reference.
+6. Persist the logical position and reference metadata.
+7. Return to `watching`.
+
+Offline legal play shall project the accepted source and destination without a
+fixed timeout. A dedicated board-and-halo activity detector shall remove that
+projection as soon as the next player's hand enters, restore idle-dark output
+including the optional next-turn dot, and allow ordinary move tracking to
+continue through that manipulation. If the settled board still matches the
+accepted reference on two consecutive black-frame observations, the same
+accepted-square projection shall reappear. The activity detector shall arm
+only after the restored projection has stabilized, preventing its light
+transition from causing a blackout/reprojection loop. Diagnostic movement may
+retain temporary accepted-square projection, and illegal correction may
+retain its red projection.
+
+Illegal-relocation correction shall project both the authoritative source and
+observed destination in red until a board-and-halo activity detector confirms
+that the restoring hand has entered and subsequently left. Camera comparison
+shall resume only after the red output is removed and projector light has
+settled. If the rejected physical position remains, the same two-square red
+correction shall be restored; a correction shall never degrade to showing only
+one of the two relocation squares. When an empty source and same-color
+destination are both confidently classified, the complete illegal relocation
+shall take precedence over an illegal-removal hypothesis for that source.
+Correction hand detection shall exclude the two illuminated square polygons
+from image differencing so steady red output cannot trigger its own blackout;
+the surrounding board and one-square halo remain active for hand detection.
+This correction-specific detector shall require a hand-sized connected change
+of at least half the median square area, preventing small calibration-edge
+spill or local exposure variation around the red polygons from being treated
+as a restoring hand. Before genuine manipulation begins, it shall compare
+against a rolling previous-frame baseline rather than one fixed projected
+frame, so gradual exposure drift cannot accumulate into false activity. One
+hand-sized temporal change is sufficient to begin manipulation tracking;
+afterward, consecutive quiet observations determine when the hand has left.
+For illegal-correction tracking, the connected change must also extend from
+the board into the one-square exterior halo. A restoring hand or arm enters
+through this halo, while projector light confined to the calibrated 8x8 board
+cannot satisfy the condition.
+
+Resetting any guidance or correction activity detector shall return it to a
+fully inactive lifecycle state: baseline, arming progress, activity
+confirmation, active-manipulation state, and quiet progress shall all be
+cleared. A detector reused after blackout shall never inherit a completed
+manipulation from the preceding projection.
+
+When legal signatures are supplied and no signature matches, an otherwise
+unambiguous settled source-to-empty-destination relocation shall be reported
+as an illegal relocation rather than accepted or left ambiguous. This outcome
+shall not advance the reference or authoritative position. Offline legal mode
+shall use it to mark and project the observed source and destination in red,
+including when a player moves the wrong side's piece. Illegal-relocation
+inference shall use piece-color classification to require that the source now
+looks empty and the destination now looks like the source piece's color;
+small change-score residuals on still-occupied squares shall not compete as
+possible sources.
 
 No intermediate repaint shall show the piece missing from both squares or
 present on both squares.

@@ -13,6 +13,8 @@ class GuidanceActivityDetector:
         quiet_observations: int = 5,
         pixel_difference_threshold: int = 18,
         minimum_square_fraction: float = 0.06,
+        rolling_baseline_before_activity: bool = False,
+        require_halo_activity: bool = False,
     ) -> None:
         if (
             arming_observations < 1
@@ -29,6 +31,10 @@ class GuidanceActivityDetector:
         self._quiet_observations = quiet_observations
         self._pixel_difference_threshold = pixel_difference_threshold
         self._minimum_square_fraction = minimum_square_fraction
+        self._rolling_baseline_before_activity = (
+            rolling_baseline_before_activity
+        )
+        self._require_halo_activity = require_halo_activity
         self._baseline: np.ndarray | None = None
         self._arming_count = 0
         self._activity_count = 0
@@ -43,11 +49,14 @@ class GuidanceActivityDetector:
         self._baseline = None
         self._arming_count = 0
         self._activity_count = 0
+        self._manipulation_active = False
+        self._quiet_count = 0
 
     def observe(
         self,
         frame: ImageArray,
         camera_grid: FloatArray,
+        ignored_squares: tuple[tuple[int, int], ...] = (),
     ) -> bool:
         if frame.ndim != 3 or frame.shape[2] != 3:
             raise ValueError("Guidance activity requires a BGR camera frame.")
@@ -68,6 +77,21 @@ class GuidanceActivityDetector:
             raise RuntimeError("Guidance activity baseline is unavailable.")
 
         mask = _guidance_region_mask(frame.shape[:2], grid)
+        for row, column in ignored_squares:
+            if not 0 <= row < 8 or not 0 <= column < 8:
+                raise ValueError("Ignored squares must be inside the board.")
+            polygon = np.rint(
+                np.asarray(
+                    (
+                        grid[row, column],
+                        grid[row, column + 1],
+                        grid[row + 1, column + 1],
+                        grid[row + 1, column],
+                    ),
+                    dtype=np.float32,
+                )
+            ).astype(np.int32)
+            cv2.fillConvexPoly(mask, polygon, 0)
         baseline_values = self._baseline[mask != 0].astype(np.float32)
         current_values = gray[mask != 0].astype(np.float32)
         brightness_shift = float(
@@ -94,17 +118,32 @@ class GuidanceActivityDetector:
             np.ones((5, 5), dtype=np.uint8),
             iterations=1,
         )
-        component_count, _labels, statistics, _centroids = (
+        component_count, labels, statistics, _centroids = (
             cv2.connectedComponentsWithStats(changed)
-        )
-        largest_component = (
-            0
-            if component_count <= 1
-            else int(np.max(statistics[1:, cv2.CC_STAT_AREA]))
         )
         minimum_component = (
             _median_square_area(grid) * self._minimum_square_fraction
         )
+        halo_mask = None
+        if self._require_halo_activity:
+            halo_mask = cv2.bitwise_and(
+                mask,
+                cv2.bitwise_not(
+                    _board_region_mask(frame.shape[:2], grid)
+                ),
+            )
+        qualifying_components = [
+            int(statistics[component, cv2.CC_STAT_AREA])
+            for component in range(1, component_count)
+            if (
+                halo_mask is None
+                or np.count_nonzero(
+                    (labels == component) & (halo_mask != 0)
+                )
+                >= minimum_component * 0.15
+            )
+        ]
+        largest_component = max(qualifying_components, default=0)
         changed_materially = largest_component >= minimum_component
         if not self._manipulation_active and changed_materially:
             self._activity_count += 1
@@ -112,9 +151,13 @@ class GuidanceActivityDetector:
                 self._manipulation_active = True
                 self._baseline = gray
                 self._quiet_count = 0
+            elif self._rolling_baseline_before_activity:
+                self._baseline = gray
             return False
         if not self._manipulation_active:
             self._activity_count = 0
+            if self._rolling_baseline_before_activity:
+                self._baseline = gray
             return False
 
         self._baseline = gray
@@ -153,6 +196,29 @@ def _guidance_region_mask(
     polygon = np.rint(
         np.asarray(
             [top_left, top_right, bottom_right, bottom_left],
+            dtype=np.float32,
+        )
+    ).astype(np.int32)
+    polygon[:, 0] = np.clip(polygon[:, 0], 0, width - 1)
+    polygon[:, 1] = np.clip(polygon[:, 1], 0, height - 1)
+    mask = np.zeros((height, width), dtype=np.uint8)
+    cv2.fillConvexPoly(mask, polygon, 255)
+    return mask
+
+
+def _board_region_mask(
+    frame_shape: tuple[int, int],
+    camera_grid: FloatArray,
+) -> np.ndarray:
+    height, width = frame_shape
+    polygon = np.rint(
+        np.asarray(
+            (
+                camera_grid[0, 0],
+                camera_grid[0, 8],
+                camera_grid[8, 8],
+                camera_grid[8, 0],
+            ),
             dtype=np.float32,
         )
     ).astype(np.int32)

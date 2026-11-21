@@ -77,7 +77,7 @@ def _accepted_update(
             position,
             legal_signatures,
         )
-        if update.state == "accepted":
+        if update.state in ("accepted", "illegal-relocation"):
             return update
     assert update is not None
     return update
@@ -569,7 +569,7 @@ def test_legal_capture_is_not_reset_by_whole_board_motion_gate() -> None:
     assert updates[-1].move == (source, destination)
 
 
-def test_legal_signatures_disable_unrestricted_move_fallback() -> None:
+def test_wrong_side_relocation_is_reported_as_illegal() -> None:
     game = LegalGame("4k3/8/8/3p4/4P3/8/8/4K3 w - - 0 1")
     reference = _empty_board()
     for square, piece in game.position.items():
@@ -600,8 +600,138 @@ def test_legal_signatures_disable_unrestricted_move_fallback() -> None:
         game.physical_move_signatures,
     )
 
-    assert update.state == "ambiguous"
-    assert update.move is None
+    assert update.state == "illegal-relocation"
+    assert update.move == (source, destination)
+    np.testing.assert_array_equal(tracker.reference, reference)
+
+
+def test_b2_b4_is_illegal_when_black_is_to_move() -> None:
+    game = LegalGame(
+        "rnbqkbnr/p3pppp/2p5/1p3P2/2PpP3/3P4/PP4PP/"
+        "RNBQKBNR b KQkq - 0 1"
+    )
+    source = (6, 1)
+    destination = (4, 1)
+    reference = _empty_board()
+    for square, piece in game.position.items():
+        _draw_piece(
+            reference,
+            square,
+            (225, 225, 225) if piece.isupper() else (20, 20, 20),
+        )
+    moved = reference.copy()
+    moved[
+        source[0] * 100 : (source[0] + 1) * 100,
+        source[1] * 100 : (source[1] + 1) * 100,
+    ] = _empty_board()[
+        source[0] * 100 : (source[0] + 1) * 100,
+        source[1] * 100 : (source[1] + 1) * 100,
+    ]
+    _draw_piece(moved, destination, (225, 225, 225))
+    tracker = ReferenceMoveTracker()
+    tracker.set_reference(reference, _camera_grid(), 0)
+
+    update = _accepted_update(
+        tracker,
+        moved,
+        game.position,
+        game.physical_move_signatures,
+    )
+
+    assert update.state == "illegal-relocation"
+    assert update.move == (source, destination)
+    np.testing.assert_array_equal(tracker.reference, reference)
+
+
+def test_c4_c5_wrong_side_move_ignores_stable_a2_residual() -> None:
+    game = LegalGame(
+        "rn2kbnr/p3p1pp/b1p2p2/1p3P2/2P1P3/B2P1N2/P3B1PP/"
+        "3K3R b kq - 0 1"
+    )
+    source = (4, 2)
+    destination = (3, 2)
+    residual = (6, 0)
+    reference = _empty_board()
+    for square, piece in game.position.items():
+        _draw_piece(
+            reference,
+            square,
+            (225, 225, 225) if piece.isupper() else (20, 20, 20),
+        )
+    moved = reference.copy()
+    moved[
+        source[0] * 100 : (source[0] + 1) * 100,
+        source[1] * 100 : (source[1] + 1) * 100,
+    ] = _empty_board()[
+        source[0] * 100 : (source[0] + 1) * 100,
+        source[1] * 100 : (source[1] + 1) * 100,
+    ]
+    _draw_piece(moved, destination, (225, 225, 225))
+    row, column = residual
+    moved[
+        row * 100 : (row + 1) * 100,
+        column * 100 : (column + 1) * 100,
+    ] = cv2.convertScaleAbs(
+        moved[
+            row * 100 : (row + 1) * 100,
+            column * 100 : (column + 1) * 100,
+        ],
+        alpha=1.0,
+        beta=12,
+    )
+    tracker = ReferenceMoveTracker()
+    tracker.set_reference(reference, _camera_grid(), 0)
+
+    update = _accepted_update(
+        tracker,
+        moved,
+        game.position,
+        game.physical_move_signatures,
+    )
+
+    assert update.state == "illegal-relocation"
+    assert update.move == (source, destination)
+    assert update.change_scores is not None
+    assert update.change_scores[residual] >= 0.05
+    np.testing.assert_array_equal(tracker.reference, reference)
+
+
+def test_illegal_bishop_vertical_move_is_not_reduced_to_removal() -> None:
+    game = LegalGame(
+        "rn3bnr/pb1kp1pp/2p2p2/1p3P2/2P1P2P/B2P1NP1/"
+        "P3B3/3K3R b - - 0 1"
+    )
+    source = (1, 1)
+    destination = (2, 1)
+    reference = _empty_board()
+    for square, piece in game.position.items():
+        _draw_piece(
+            reference,
+            square,
+            (225, 225, 225) if piece.isupper() else (20, 20, 20),
+        )
+    moved = reference.copy()
+    moved[
+        source[0] * 100 : (source[0] + 1) * 100,
+        source[1] * 100 : (source[1] + 1) * 100,
+    ] = _empty_board()[
+        source[0] * 100 : (source[0] + 1) * 100,
+        source[1] * 100 : (source[1] + 1) * 100,
+    ]
+    _draw_piece(moved, destination, (20, 20, 20))
+    tracker = ReferenceMoveTracker()
+    tracker.set_reference(reference, _camera_grid(), 0)
+
+    update = _accepted_update(
+        tracker,
+        moved,
+        game.position,
+        game.physical_move_signatures,
+    )
+
+    assert update.state == "illegal-relocation"
+    assert update.move == (source, destination)
+    np.testing.assert_array_equal(tracker.reference, reference)
 
 
 def test_uncapturable_opponent_removal_is_marked_illegal() -> None:

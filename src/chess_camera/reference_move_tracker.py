@@ -31,6 +31,7 @@ ReferenceTrackerState = Literal[
     "pending-castling",
     "pending-en-passant",
     "illegal-removal",
+    "illegal-relocation",
     "accepted",
     "ambiguous",
 ]
@@ -239,6 +240,7 @@ class ReferenceMoveTracker:
         pending_en_passant_destination: Square | None = None
         pending_en_passant_sources: tuple[Square, ...] = ()
         illegal_removed_piece: Square | None = None
+        illegal_relocation = False
         if physical_signatures:
             piece_colors = classify_piece_colors(
                 self._reference,
@@ -337,6 +339,30 @@ class ReferenceMoveTracker:
                         position,
                         minimum_square_change=self._minimum_square_change,
                     )
+            if (
+                move is None
+                and pending_castling is None
+                and pending_en_passant_captured is None
+                and pending_capture_destination is None
+                and piece_colors is not None
+            ):
+                move = self._select_illegal_relocation(
+                    scores,
+                    position,
+                    self._reference,
+                    normalized,
+                    piece_colors,
+                    allow_boundary_residuals=self._camera_grid_remapped,
+                )
+                if move is None:
+                    move = self._select_move(
+                        scores,
+                        position,
+                        self._reference,
+                        normalized,
+                        allow_boundary_residuals=self._camera_grid_remapped,
+                    )
+                illegal_relocation = move is not None
         if (
             move is None
             and pending_castling is not None
@@ -446,10 +472,13 @@ class ReferenceMoveTracker:
                 "A hand or object still obscures multiple board squares.",
                 scores,
             )
-        if not _has_released_piece_footprint(
-            self._reference,
-            normalized,
-            move,
+        if (
+            not illegal_relocation
+            and not _has_released_piece_footprint(
+                self._reference,
+                normalized,
+                move,
+            )
         ):
             self._clear_pending()
             return ReferenceTrackerUpdate(
@@ -472,6 +501,14 @@ class ReferenceMoveTracker:
                 scores,
             )
 
+        if illegal_relocation:
+            return ReferenceTrackerUpdate(
+                "illegal-relocation",
+                move,
+                f"Illegal relocation {square_name(move[0])}-"
+                f"{square_name(move[1])}.",
+                scores,
+            )
         self._pending_reference = normalized.copy()
         return ReferenceTrackerUpdate(
             "accepted",
@@ -579,6 +616,103 @@ class ReferenceMoveTracker:
                         square,
                         source,
                         position,
+                    )
+                ):
+                    return None
+        return source, destination
+
+    def _select_illegal_relocation(
+        self,
+        scores: FloatArray,
+        position: Position,
+        reference: ImageArray,
+        candidate: ImageArray,
+        piece_colors: dict[Square, PieceColorClassification],
+        *,
+        allow_boundary_residuals: bool = False,
+    ) -> tuple[Square, Square] | None:
+        source_candidates = {
+            square
+            for square in position
+            if (
+                classification := piece_colors.get(square)
+            ) is not None
+            and classification.label == "empty"
+        }
+        if not source_candidates:
+            return None
+        sources = sorted(
+            (
+                (float(scores[square]), square)
+                for square in source_candidates
+            ),
+            reverse=True,
+        )
+        source_score, source = sources[0]
+        source_piece = position[source]
+        source_color = "white" if source_piece.isupper() else "black"
+        destination_candidates = {
+            square
+            for square, classification in piece_colors.items()
+            if square not in position and classification.label == source_color
+        }
+        if not destination_candidates:
+            return None
+        destinations = sorted(
+            (
+                (float(scores[square]), square)
+                for square in destination_candidates
+            ),
+            reverse=True,
+        )
+        destination_score, destination = destinations[0]
+        if (
+            source_score < self._minimum_square_change * 0.75
+            or destination_score < self._minimum_square_change
+        ):
+            return None
+        if (
+            len(sources) > 1
+            and source_score - sources[1][0] < self._minimum_dominance
+        ):
+            return None
+        if (
+            len(destinations) > 1
+            and destination_score - destinations[1][0]
+            < self._minimum_dominance
+        ):
+            return None
+        remaining = scores.copy()
+        remaining[source] = 0
+        remaining[destination] = 0
+        remaining_limit = max(
+            self._minimum_square_change,
+            min(source_score, destination_score) * 0.75,
+        )
+        for row in range(8):
+            for column in range(8):
+                square = (row, column)
+                if (
+                    float(remaining[square]) > remaining_limit
+                    and not (
+                        allow_boundary_residuals
+                        and _is_boundary_square(square)
+                    )
+                    and not _is_retained_opposite_piece_residual(
+                        reference,
+                        candidate,
+                        square,
+                        source,
+                        position,
+                    )
+                    and (
+                        classification := piece_colors.get(square)
+                    ) is not None
+                    and (
+                        square in position
+                        and classification.label == "empty"
+                        or square not in position
+                        and classification.label != "empty"
                     )
                 ):
                     return None

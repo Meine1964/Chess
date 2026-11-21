@@ -464,7 +464,7 @@ def test_offline_selected_promotion_commits_selected_piece() -> None:
         _persist_game_state=MagicMock(),
         _update_turn_indicator=MagicMock(),
         _piece_status=MagicMock(),
-        _project_accepted_move=MagicMock(),
+        _project_offline_accepted_move=MagicMock(),
         _fail_promotion_selection=MagicMock(),
     )
 
@@ -477,6 +477,9 @@ def test_offline_selected_promotion_commits_selected_piece() -> None:
     assert game.position[(0, 0)] == "N"
     assert synchronizer.position[(0, 0)] == "N"
     assert window._pending_promotion_selection is None
+    window._project_offline_accepted_move.assert_called_once_with(
+        ((1, 0), (0, 0))
+    )
 
 
 def test_offline_mode_mismatch_is_preserved_for_explicit_recovery() -> None:
@@ -1278,6 +1281,53 @@ def test_illegal_correction_names_squares_legal_choices_and_turn() -> None:
         "requires the piece on b4. White to move. Return the piece to b4, "
         "then make a White move."
     )
+
+
+def test_illegal_relocation_projects_source_and_destination_red() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    move = ((6, 1), (4, 1))
+    tracker = MagicMock()
+    tracker.observe.return_value = ReferenceTrackerUpdate(
+        "illegal-relocation",
+        move,
+        "Illegal relocation b2-b4.",
+    )
+    tracker.rejected_move_is_restored.return_value = False
+    window = SimpleNamespace(
+        _latest_frame=object(),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(camera_grid=object())
+        ),
+        _pending_lichess_local_move=None,
+        _lichess_game_controller=None,
+        _piece_synchronizer=SimpleNamespace(position={}),
+        _legal_game=LegalGame(
+            "rnbqkbnr/p3pppp/2p5/1p3P2/2PpP3/3P4/PP4PP/"
+            "RNBQKBNR b KQkq - 0 1"
+        ),
+        _game_mode="offline-game",
+        _reference_move_tracker=tracker,
+        _board_quarter_turns=0,
+        _occupancy_status=MagicMock(),
+        _last_runtime_tracker_state="watching",
+        _record_runtime_diagnostic=MagicMock(),
+        _restore_pending_lichess_guidance_after_no_change=MagicMock(),
+        _restore_offline_accepted_projection_after_no_change=MagicMock(),
+        _last_rejected_move=None,
+        _board_widget=SimpleNamespace(
+            set_illegal_source=MagicMock(),
+        ),
+        _piece_status=MagicMock(),
+        _project_illegal_move_correction=MagicMock(),
+    )
+
+    CameraWindow._update_reference_move_tracking(window)
+
+    window._board_widget.set_illegal_source.assert_called_once_with(move[0])
+    window._project_illegal_move_correction.assert_called_once_with(move)
+    assert window._last_rejected_move == move
 
 
 def test_accepted_position_message_includes_authoritative_turn() -> None:
