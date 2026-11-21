@@ -1060,21 +1060,27 @@ def test_board_edge_indicator_records_only_state_transitions() -> None:
         ),
         _board_edge_activity_detector=detector,
         _board_edge_indicator_active=False,
+        _board_edge_indicator_active_since=None,
+        _board_edge_indicator_last_stuck_diagnostic_at=None,
         _projector_window=SimpleNamespace(
             set_edge_activity_indicator=MagicMock()
         ),
         _record_runtime_diagnostic=MagicMock(),
     )
 
-    CameraWindow._update_board_edge_activity_indicator(window)
-    CameraWindow._update_board_edge_activity_indicator(window)
-    detector.crossing_detected = False
-    detector.largest_component_pixels = 0
-    detector.largest_component_inside_pixels = 0
-    detector.largest_component_outside_pixels = 0
-    detector.largest_component_outer_halo_pixels = 0
-    detector.largest_component_bounds = None
-    CameraWindow._update_board_edge_activity_indicator(window)
+    with patch(
+        "src.chess_camera.camera_app.monotonic",
+        side_effect=(0.0, 1.0, 2.0),
+    ):
+        CameraWindow._update_board_edge_activity_indicator(window)
+        CameraWindow._update_board_edge_activity_indicator(window)
+        detector.crossing_detected = False
+        detector.largest_component_pixels = 0
+        detector.largest_component_inside_pixels = 0
+        detector.largest_component_outside_pixels = 0
+        detector.largest_component_outer_halo_pixels = 0
+        detector.largest_component_bounds = None
+        CameraWindow._update_board_edge_activity_indicator(window)
 
     assert [
         call.args[0]
@@ -1083,6 +1089,56 @@ def test_board_edge_indicator_records_only_state_transitions() -> None:
         "board-edge-indicator-activated",
         "board-edge-indicator-cleared",
     ]
+    assert all(
+        call.kwargs["include_images"]
+        for call in window._record_runtime_diagnostic.call_args_list
+    )
+
+
+def test_board_edge_indicator_records_periodic_stuck_images() -> None:
+    detector = SimpleNamespace(
+        observe=MagicMock(return_value=True),
+        crossing_detected=True,
+        largest_component_pixels=1400,
+        largest_component_inside_pixels=700,
+        largest_component_outside_pixels=700,
+        largest_component_outer_halo_pixels=100,
+        largest_component_bounds=(100, 200, 30, 40),
+    )
+    window = SimpleNamespace(
+        _latest_frame=object(),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(camera_grid=object())
+        ),
+        _board_edge_activity_detector=detector,
+        _board_edge_indicator_active=False,
+        _board_edge_indicator_active_since=None,
+        _board_edge_indicator_last_stuck_diagnostic_at=None,
+        _projector_window=SimpleNamespace(
+            set_edge_activity_indicator=MagicMock()
+        ),
+        _record_runtime_diagnostic=MagicMock(),
+    )
+
+    with patch(
+        "src.chess_camera.camera_app.monotonic",
+        side_effect=(0.0, 2.9, 3.1, 7.9, 8.2),
+    ):
+        for _index in range(5):
+            CameraWindow._update_board_edge_activity_indicator(window)
+
+    assert [
+        call.args[0]
+        for call in window._record_runtime_diagnostic.call_args_list
+    ] == [
+        "board-edge-indicator-activated",
+        "board-edge-indicator-still-active",
+        "board-edge-indicator-still-active",
+    ]
+    assert [
+        call.kwargs["details"]["active_seconds"]
+        for call in window._record_runtime_diagnostic.call_args_list
+    ] == [0.0, 3.1, 8.2]
     assert all(
         call.kwargs["include_images"]
         for call in window._record_runtime_diagnostic.call_args_list

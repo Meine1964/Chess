@@ -144,6 +144,8 @@ _PROMOTION_MODE_SETTING = "chess/promotion_mode"
 _AUTOMATIC_START_RESET_SETTING = "chess/automatic_start_reset"
 _ALIGNMENT_REMAP_DELAY_MILLISECONDS = 750
 _ALIGNMENT_REMAP_RETRY_MILLISECONDS = 250
+_BOARD_EDGE_STUCK_DIAGNOSTIC_SECONDS = 3.0
+_BOARD_EDGE_STUCK_REPEAT_SECONDS = 5.0
 _ALIGNMENT_REMAP_PROTECTED_TRACKER_STATES = frozenset(
     {
         "candidate",
@@ -1071,6 +1073,8 @@ class CameraWindow(QMainWindow):
         )
         self._board_edge_activity_detector = BoardEdgeActivityDetector()
         self._board_edge_indicator_active = False
+        self._board_edge_indicator_active_since: float | None = None
+        self._board_edge_indicator_last_stuck_diagnostic_at: float | None = None
         self._projector_window.projection_changed.connect(
             self._reset_board_edge_activity_indicator
         )
@@ -3392,6 +3396,8 @@ class CameraWindow(QMainWindow):
     def _reset_board_edge_activity_indicator(self) -> None:
         self._board_edge_activity_detector.reset()
         self._board_edge_indicator_active = False
+        self._board_edge_indicator_active_since = None
+        self._board_edge_indicator_last_stuck_diagnostic_at = None
         self._projector_window.set_edge_activity_indicator(False)
 
     def _update_board_edge_activity_indicator(self) -> None:
@@ -3412,10 +3418,68 @@ class CameraWindow(QMainWindow):
         previous_active = self._board_edge_indicator_active
         self._board_edge_indicator_active = active
         self._projector_window.set_edge_activity_indicator(active)
-        if active == previous_active:
-            return
+        observed_at = monotonic()
+        if active:
+            if (
+                not previous_active
+                or self._board_edge_indicator_active_since is None
+            ):
+                self._board_edge_indicator_active_since = observed_at
+                self._board_edge_indicator_last_stuck_diagnostic_at = None
+            active_seconds = max(
+                0.0,
+                observed_at - self._board_edge_indicator_active_since,
+            )
+        else:
+            active_seconds = (
+                0.0
+                if self._board_edge_indicator_active_since is None
+                else max(
+                    0.0,
+                    observed_at - self._board_edge_indicator_active_since,
+                )
+            )
+            self._board_edge_indicator_active_since = None
+            self._board_edge_indicator_last_stuck_diagnostic_at = None
         detector = self._board_edge_activity_detector
         bounds = detector.largest_component_bounds
+        details = {
+            "active": active,
+            "active_seconds": round(active_seconds, 3),
+            "crossing_detected": detector.crossing_detected,
+            "component_pixels": detector.largest_component_pixels,
+            "inside_pixels": detector.largest_component_inside_pixels,
+            "outside_pixels": detector.largest_component_outside_pixels,
+            "outer_halo_pixels": (
+                detector.largest_component_outer_halo_pixels
+            ),
+            "component_bounds": (
+                None if bounds is None else list(bounds)
+            ),
+        }
+        if active == previous_active:
+            last_stuck = self._board_edge_indicator_last_stuck_diagnostic_at
+            if (
+                not active
+                or active_seconds < _BOARD_EDGE_STUCK_DIAGNOSTIC_SECONDS
+                or (
+                    last_stuck is not None
+                    and observed_at - last_stuck
+                    < _BOARD_EDGE_STUCK_REPEAT_SECONDS
+                )
+            ):
+                return
+            self._board_edge_indicator_last_stuck_diagnostic_at = observed_at
+            self._record_runtime_diagnostic(
+                "board-edge-indicator-still-active",
+                (
+                    "Board-edge crossing indicator remains active after "
+                    f"{active_seconds:.1f} seconds."
+                ),
+                details=details,
+                include_images=True,
+            )
+            return
         message = (
             "Board-edge crossing indicator activated."
             if active
@@ -3428,23 +3492,7 @@ class CameraWindow(QMainWindow):
                 else "board-edge-indicator-cleared"
             ),
             message,
-            details={
-                "active": active,
-                "crossing_detected": detector.crossing_detected,
-                "component_pixels": detector.largest_component_pixels,
-                "inside_pixels": (
-                    detector.largest_component_inside_pixels
-                ),
-                "outside_pixels": (
-                    detector.largest_component_outside_pixels
-                ),
-                "outer_halo_pixels": (
-                    detector.largest_component_outer_halo_pixels
-                ),
-                "component_bounds": (
-                    None if bounds is None else list(bounds)
-                ),
-            },
+            details=details,
             include_images=True,
         )
 
@@ -6975,6 +7023,18 @@ class CameraWindow(QMainWindow):
             "last_state": self._last_runtime_tracker_state,
             "board_edge_indicator": {
                 "active": self._board_edge_indicator_active,
+                "active_seconds": (
+                    None
+                    if self._board_edge_indicator_active_since is None
+                    else round(
+                        max(
+                            0.0,
+                            monotonic()
+                            - self._board_edge_indicator_active_since,
+                        ),
+                        3,
+                    )
+                ),
                 "crossing_detected": (
                     self._board_edge_activity_detector.crossing_detected
                 ),

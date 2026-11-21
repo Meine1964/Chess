@@ -423,6 +423,10 @@ all-64 stepping remain planned test modes.
   pixels, outside-board pixels, outer-halo-rim pixels, and component bounding
   box. Expose the same latest measurements in runtime state so persistent
   false crossings can be traced to their actual image region.
+- If the indicator remains active for three seconds, record a fresh
+  `board-edge-indicator-still-active` event with the current camera image and
+  component measurements. Repeat that evidence at no more than five-second
+  intervals until the indicator clears, then reset the stuck-duration timer.
 
 The operational indicator colors are currently fixed. Brightness, inset, and
 color controls remain possible future enhancements.
