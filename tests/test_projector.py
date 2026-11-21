@@ -92,6 +92,8 @@ def test_promotion_icon_transform_maps_canonical_square_to_perspective() -> None
 def test_projector_renders_patterns_and_calibrated_squares(
     application: QApplication,
 ) -> None:
+    from unittest.mock import patch
+
     window = ProjectorWindow()
     window.resize(320, 180)
     window.show()
@@ -194,9 +196,17 @@ def test_projector_renders_patterns_and_calibrated_squares(
     application.processEvents()
     assert window.output_mode == "promotion_choices"
 
-    window.show_promotion_confirmation("top", "bottom", "n", (0, 0))
-    application.processEvents()
-    promotion_image = window.grab().toImage()
+    with patch.object(
+        ProjectorWindow,
+        "_draw_promotion_glyph",
+    ) as draw_promotion_glyph:
+        window.show_promotion_confirmation("top", "bottom", "n", (0, 0))
+        application.processEvents()
+        promotion_image = window.grab().toImage()
     assert window.output_mode == "promotion_confirmation"
     assert promotion_image.pixelColor(115, 11) == PROJECTED_LEGAL_MOVE
+    rendered_pieces = [
+        call.args[2] for call in draw_promotion_glyph.call_args_list
+    ]
+    assert rendered_pieces[-4:] == ["b", "r", "q", "n"]
     window.close()

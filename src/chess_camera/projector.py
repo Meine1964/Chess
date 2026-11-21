@@ -434,11 +434,25 @@ class ProjectorWindow(QWidget):
                 selected_index = PROMOTION_CHOICES.index(
                     self._promotion_piece
                 )
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(PROJECTED_LEGAL_MOVE)
-                painter.drawPolygon(
-                    self._polygon(choice_polygons[selected_index])
-                )
+                for index, (piece, polygon) in enumerate(
+                    zip(
+                        PROMOTION_CHOICES,
+                        choice_polygons,
+                        strict=True,
+                    )
+                ):
+                    if index == selected_index:
+                        painter.setPen(Qt.PenStyle.NoPen)
+                        painter.setBrush(PROJECTED_LEGAL_MOVE)
+                        painter.drawPolygon(self._polygon(polygon))
+                    else:
+                        self._draw_promotion_glyph(
+                            painter,
+                            polygon,
+                            piece,
+                            self._promotion_edge,
+                            self._promotion_viewer_edge,
+                        )
                 row, column = self._promotion_destination
                 destination = square_polygons(self._projector_grid)[
                     row * 8 + column

@@ -20,7 +20,8 @@ main window.
 
 - **Take snapshot**
 - **Resume live camera**
-- **Reset pieces to starting position**
+- **Reset pieces to starting position**, visible only when automatic
+  starting-position reset is disabled.
 - **Reconcile physical board**, dynamically renamed to **Stop reconciliation**
   while reconciliation is active.
 
@@ -155,7 +156,12 @@ passively verify live occupancy while the projector is black. A stable standard
 starting setup shall automatically trigger the reset even when the application
 is already in Board setup / diagnostic mode; the user shall not have to select
 Offline mode first. An Offline-mode position mismatch shall use the same live
-verification. When disabled, the application shall show the existing recovery
+verification. Once the standard occupancy is provisionally recognized, the UI
+shall report that stability confirmation is underway. The optimized passive
+check shall normally complete within one second after the board becomes clear,
+without weakening the normal occupancy and move-verification detectors. When
+complete, the UI shall explicitly report that the automatic reset succeeded
+and White may move. When disabled, the application shall show the existing recovery
 dialog without attempting an automatic reset. While automatic reset is
 enabled, the Camera menu shall hide **Reset pieces to starting position**
 because the command is redundant. The command shall reappear when automatic
@@ -286,13 +292,18 @@ interaction rows.
 11. A normally closed main window reopens with its previous screen, position,
     size, and maximized state.
 12. A compatible saved Offline legal game reopens in Offline legal mode.
-13. An incompatible saved Offline legal game produces the explicit recovery
-    dialog and is never silently converted to Board setup / diagnostic.
+13. An incompatible saved Offline legal game first performs automatic
+    starting-position verification when that setting is enabled; a confirmed
+    start activates Offline legal mode, while any other setup produces the
+    explicit recovery dialog and is never silently converted to Board setup /
+    diagnostic.
+14. Disabling automatic starting-position reset restores the Camera-menu reset
+    action and bypasses the automatic verification attempt.
 
 ## 7. Validation Status
 
 The implemented menu bar exposes File, Camera, Game, Projector, and
-Calibration menus. The complete automated suite contains 307 passing tests,
+Calibration menus. The complete automated suite contains 309 passing tests,
 including menu structure, transactional selector-copy behavior, existing UI
 state transitions, reconciliation controls, and the readable interaction-font
 minimum. Token-status coverage confirms configured and missing environment
@@ -310,5 +321,6 @@ implemented persistent promotion settings. The local projected virtual-rank
 workflow is automated-test validated and awaits live camera/projector
 acceptance. The setup-mode rename, explicit offline-position recovery dialog,
 camera-confirmed saved-position restoration, verified starting-position reset,
-and no-silent-downgrade behavior are implemented and automated-test validated;
-live recovery acceptance remains pending.
+passive stable-start detection, conditional reset-action visibility, and
+no-silent-downgrade behavior are implemented and automated-test validated;
+live automatic-reset and recovery acceptance remains pending.

@@ -902,7 +902,12 @@ class CameraWindow(QMainWindow):
             self._camera_grid_checked
         )
         self._occupancy_detector = SquareOccupancyDetector()
-        self._automatic_start_occupancy_detector = SquareOccupancyDetector()
+        self._automatic_start_occupancy_detector = SquareOccupancyDetector(
+            canonical_size=400,
+            required_observations=2,
+            required_agreement=2,
+            settling_observations=3,
+        )
         self._guidance_activity_detector = GuidanceActivityDetector()
         self._promotion_activity_detector = (
             ManipulationSettlingDetector()
@@ -3206,7 +3211,7 @@ class CameraWindow(QMainWindow):
                 f"Automatic starting-position detection unavailable: {error}"
             )
             return False
-        if update.state != "stable" or update.result is None:
+        if update.result is None:
             return False
         occupied_ui = frozenset(
             rotate_square(row, column, -self._board_quarter_turns)
@@ -3214,9 +3219,20 @@ class CameraWindow(QMainWindow):
         )
         if occupied_ui != starting_occupied_squares():
             return False
+        if update.state != "stable":
+            self._piece_status.setText(
+                "Starting position detected; confirming stability "
+                f"({update.observation_count}/"
+                f"{update.required_observations})."
+            )
+            return True
         self._activate_offline_after_reset = True
         self._automatic_start_reset_recovery = False
         self._complete_starting_position_reset(occupied_ui)
+        self._piece_status.setText(
+            "Starting position detected automatically; Offline game ready. "
+            "White to move."
+        )
         return True
 
     def _update_reference_move_tracking(self) -> None:
@@ -3625,6 +3641,26 @@ class CameraWindow(QMainWindow):
             self._show_promotion_confirmation()
             return
         if selection.stage == "confirmation-blackout":
+            try:
+                observation = observe_promotion_choices(
+                    selection.reference_frame,
+                    self._latest_frame,
+                    selection.camera_polygons,
+                )
+            except (ValueError, cv2.error) as error:
+                self._fail_promotion_selection(
+                    f"Promotion choice detection failed: {error}"
+                )
+                return
+            if observation.selected_piece is not None:
+                selection.piece = observation.selected_piece
+                self._show_promotion_confirmation()
+                return
+            if observation.occupied_choices:
+                self._show_promotion_confirmation(
+                    "Multiple promotion choices were detected."
+                )
+                return
             selection.stage = "verifying"
             self._promotion_activity_detector.reset()
             self._reference_move_tracker.reset_activity()
@@ -3663,7 +3699,10 @@ class CameraWindow(QMainWindow):
         self._piece_status.setText(message)
         self._projector_status.setText(message)
 
-    def _show_promotion_confirmation(self) -> None:
+    def _show_promotion_confirmation(
+        self,
+        reason: str | None = None,
+    ) -> None:
         selection = self._pending_promotion_selection
         if selection is None or selection.piece is None:
             return
@@ -3694,9 +3733,14 @@ class CameraWindow(QMainWindow):
             "b": "bishop",
             "n": "knight",
         }[selection.piece]
+        instruction = (
+            f"{piece_name.capitalize()} selected. Move the pawn to another "
+            "option or place that replacement piece on the promotion square."
+        )
         message = (
-            f"{piece_name.capitalize()} selected. Replace the highlighted "
-            "pawn with that piece on the promotion square."
+            instruction
+            if reason is None
+            else f"{reason} {instruction}"
         )
         self._piece_status.setText(message)
         self._projector_status.setText(message)

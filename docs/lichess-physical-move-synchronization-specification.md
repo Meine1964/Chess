@@ -1,7 +1,7 @@
 # Lichess Physical Move Synchronization Specification
 
-**Version:** 0.3
-**Status:** Ordinary moves live-accepted; capture and castling slices implemented and awaiting live acceptance
+**Version:** 0.4
+**Status:** Full physical move synchronization and local promotion selection implemented; extended move kinds awaiting live acceptance
 **Platform:** Python on Windows
 
 **Related specifications:**
@@ -13,10 +13,10 @@
 
 ## 1. Purpose
 
-This specification defines the ordinary-move and capture slices of Phases 7
-and 8 of the Lichess physical-board integration: synchronizing moves already
+This specification defines the physical-move synchronization slices of Phases
+7 and 8 of the Lichess physical-board integration: synchronizing moves already
 accepted by Lichess onto the physical board and submitting local physical
-moves.
+moves, including captures, castling, en passant, and promotion.
 
 When Lichess advances the remote game, the application shall:
 
@@ -108,7 +108,8 @@ The first implementation shall support:
 - An ordered queue of moves not yet confirmed physically.
 - Ordinary moves, non-promotion captures, castling, en passant, auto-queen
   promotion, and auto-queen capture-promotion for both colors.
-- Direct submission of those supported local-player move kinds.
+- Direct submission of those supported local-player move kinds and exact local
+  underpromotion suffixes selected through the projected virtual rank.
 - Opponent-move projection and physical confirmation.
 - Durable UI guidance.
 - Incorrect physical-action correction.
@@ -119,26 +120,18 @@ The first implementation shall support:
 
 ### 3.2 Staged extensions
 
-After ordinary moves and captures are live-accepted, the same state machine
-shall be extended to:
-
-- Underpromotion selection.
-
-The legal-signature model already represents these move kinds. Their rollout
-may be staged because projection and multi-action physical workflows require
-additional acceptance testing.
+Dedicated projected replacement-piece guidance for incoming server-directed
+underpromotion remains staged. Incoming underpromotion already preserves the
+exact authoritative suffix and uses ordinary source/destination guidance.
 
 ### 3.3 Excluded
 
-The implemented ordinary/capture slice shall not:
+The implemented synchronization slice shall not:
 
-- Create or accept challenges.
-- Offer or accept draws.
-- Abort or resign games.
+- Accept incoming challenges.
 - Infer missing server moves from a camera image.
 - Automatically assign piece identity from occupancy alone.
 - Accept a physical move that is absent from Lichess history.
-- Support underpromotion selection.
 
 ## 4. State Model
 
@@ -585,28 +578,36 @@ measurement.
   every choice measurement shall use a black-projector frame.
 
 After a choice is detected, the application shall retain the selected piece
-and provide immediate visible confirmation:
+provisionally and provide immediate visible confirmation:
 
 - The occupied virtual square containing the detected pawn shall be illuminated
   as a solid white square.
 - The promotion destination on the playing grid shall display the icon of the
   selected piece.
-- The other three choice icons shall no longer be projected.
+- The other three choice icons shall remain projected and selectable.
 
-This confirmation projection shall remain visible while the player removes the
-pawn from the virtual square and places the corresponding physical piece on the
-promotion destination. When the hand is gone and the scene is settled, the
-projector shall turn black before completion evidence is measured. If
-completion evidence is not yet present, the same white pawn highlight and
-selected-piece destination icon shall reappear.
+The player may move the pawn from the selected virtual square to any other
+projected choice before completing replacement. After each manipulation
+settles, the projector shall briefly turn black and evaluate all four virtual
+squares. Exactly one occupied choice shall become the new provisional
+selection, move the solid white highlight to that square, and replace the icon
+on the promotion destination. Multiple occupied choices shall preserve the
+previous selection and request an unambiguous choice.
 
-Completion shall require the selected virtual square to be empty, the promotion
+This reversible confirmation projection shall remain visible while the player
+changes the choice or removes the pawn from the virtual row and places the
+corresponding physical piece on the promotion destination. Final replacement
+verification shall begin only when all four virtual choice squares are empty.
+If completion evidence is not yet present, all options shall reappear together
+with the last selected white highlight and selected-piece destination icon.
+
+Completion shall require all four virtual squares to be empty, the promotion
 source to remain empty, and the destination to be occupied by the moving color.
-The camera cannot prove physical piece type, so the selected virtual square is
-authoritative for the UCI promotion suffix; the destination icon is instruction
-and confirmation feedback, not optical proof. Only then shall the exact move be
-submitted to Lichess and, after server acceptance, committed to the physical
-position and camera reference.
+The camera cannot prove physical piece type, so the last unambiguous virtual
+selection is authoritative for the UCI promotion suffix; the destination icon
+is instruction and confirmation feedback, not optical proof. Only then shall
+the exact move be submitted to Lichess and, after server acceptance, committed
+to the physical position and camera reference.
 
 Cancellation, loss of calibration, an uncertain network result, or failure to
 complete replacement shall not silently apply a queen. The existing authority,
@@ -989,12 +990,12 @@ promotion slices are implemented:
   commit the authoritative queen from exact occupancy/color evidence.
 - Queen capture-promotion accepts complete evidence or captured-piece-first
   physical handling.
-- Auto-queen remains the implemented default. Select-promoted-piece behavior
-  shall satisfy the virtual-rank projection, settled black-frame choice,
-  physical replacement, and exact UCI suffix requirements in section 10.4
-  before underpromotion is considered implemented.
+- Auto-queen remains the default. Select promoted piece implements the
+  virtual-rank projection, settled black-frame choice, physical replacement,
+  perspective-correct player-facing bright icons, and exact UCI suffix
+  requirements in section 10.4.
 
-The validated automated suite contains 307 passing tests. Live ordinary-move,
+The validated automated suite contains 309 passing tests. Live ordinary-move,
 polling, reconciliation, and guidance acceptance has been exercised on the
 target camera/projector setup. Lichess capture, castling, en passant, and
 auto-queen behavior is automated-test validated and awaits live acceptance.
@@ -1002,8 +1003,8 @@ The dedicated player, clock, status, and result display is automated-test
 validated and awaits live acceptance. Draw-offer, draw-response, and
 resignation and abort controls are automated-test validated and await live
 acceptance. Local select-promoted-piece geometry on all four physical edges,
-viewer-side-oriented bright fitted icons, steady manipulation projection, settled
-black-frame choice, projection feedback, exact UCI suffix handling, and
+viewer-side-oriented bright fitted icons, steady manipulation projection,
+settled black-frame choice, projection feedback, exact UCI suffix handling, and
 offline/Lichess commit paths are automated-test validated and await live
 acceptance. Incoming
 server-directed underpromotion uses the exact authoritative suffix and ordinary

@@ -1,7 +1,7 @@
 # Reference-Image Chess Move Tracking Specification
 
-**Version:** 0.2
-**Status:** Implemented for ordinary one-piece relocations
+**Version:** 0.3
+**Status:** Implemented for ordinary moves, captures, castling, en passant, and promotion signatures
 **Platform:** Python on Windows  
 
 **Related specifications:**
@@ -22,8 +22,8 @@ After initialization, move tracking shall answer:
 1. Has activity occurred above the board?
 2. Has the hand or other obstruction left the board?
 3. Which squares changed relative to the last accepted position?
-4. Do the two dominant changed squares represent one piece leaving a known
-   source and appearing at a destination?
+4. Do the changed squares match one permitted physical signature, including
+   multi-square and staged special-move evidence?
 
 The system shall not continuously derive a complete logical position from
 independent absolute classifications of all 64 squares.
@@ -42,7 +42,8 @@ store:
 - The camera-grid generation and orientation used to create the reference.
 
 The logical position and reference shall change only after an unambiguous
-single-piece relocation is accepted or the user explicitly resets the setup.
+permitted physical signature is accepted, a verified starting-position reset
+completes, or explicit reconciliation adopts an authoritative position.
 
 Rejected, obstructed, unstable, or ambiguous observations shall never replace
 the reference.
@@ -202,19 +203,23 @@ similar frames to ensure the candidate position is stationary.
 
 ### 7.6 `candidate`
 
-A settled image differs from the reference primarily on two squares. Targeted
-source and destination vacancy tests are running.
+A settled image differs from the reference on the squares required by one
+ordinary relocation or supplied legal physical signature. Targeted source,
+destination, captured-piece, rook, or en-passant-square tests are running as
+required by that signature.
 
 ### 7.7 `accepted`
 
-One unambiguous source/destination relocation has been accepted atomically.
-The UI and reference are updated before returning to `watching`.
+One unambiguous relocation or completed legal physical signature has been
+accepted atomically. The UI and reference are updated before returning to
+`watching`.
 
 ### 7.8 `ambiguous`
 
-The settled image cannot be represented safely as one supported relocation.
-The accepted position and reference remain unchanged. The tracker continues
-comparing future clear frames with the same reference.
+The settled image cannot be represented safely as one supported relocation or
+permitted legal physical signature. The accepted position and reference remain
+unchanged. The tracker continues comparing future clear frames with the same
+reference.
 
 ## 8. Lightweight Activity Detection
 
@@ -335,8 +340,18 @@ A candidate one-piece relocation requires:
 
 No chess movement rule shall constrain the source/destination pair.
 
-If more than two squares remain materially changed after normalization and
-boundary suppression, the observation shall normally be ambiguous. A
+The unrestricted two-square rule applies to Board setup / diagnostic movement.
+When Offline legal play or Lichess synchronization supplies permitted physical
+signatures, candidate selection shall instead match one exact signature.
+Supported signatures may include an occupied capture destination, four
+castling squares, a separate en passant captured-pawn square, or promotion
+source/destination evidence. Recognized captured-piece-first, king-first, and
+captured-pawn-first evidence shall remain pending against the original
+reference until the signature completes.
+
+If more squares remain materially changed than the active signature permits
+after normalization and boundary suppression, the observation shall normally
+be ambiguous. A
 high-scoring square adjacent to the provisional source may be treated as a
 silhouette residual only when it is logically occupied by the opposite color
 and its current lower/base color signature still matches the accepted
@@ -345,8 +360,8 @@ place; logical color alone shall not suppress the ambiguity.
 
 ## 13. Targeted Vacancy Tests
 
-Absolute vacancy classification shall be performed only on the candidate
-source and destination.
+Absolute vacancy classification shall be performed only on squares involved
+in the candidate relocation or active legal signature.
 
 ### 13.1 Source test
 
@@ -362,7 +377,7 @@ The source test shall confirm that:
 
 The destination test shall confirm that:
 
-- The logical destination was empty.
+- The logical destination was empty, unless the active signature is a capture.
 - Piece-base evidence increased substantially.
 - The candidate destination no longer resembles its reference empty square.
 
@@ -375,8 +390,10 @@ the move is accepted.
 
 An accepted move shall be applied atomically:
 
-1. Remove the known logical piece from the source.
-2. Place the same piece on the destination.
+1. Apply the complete accepted relocation or legal move signature to the
+   authoritative physical position.
+2. Preserve the selected promotion identity and every capture, rook, or en
+   passant side effect represented by that signature.
 3. Update the UI piece map.
 4. Highlight source and destination on the UI until the next accepted move.
 5. Optionally illuminate both physical squares for two seconds when a matching
@@ -395,11 +412,11 @@ The tracker shall reject, without changing the reference or logical position:
 - A hand or object still above the board.
 - Global or non-uniform illumination changes.
 - Camera-grid alignment uncertainty.
-- More than two materially changed squares.
+- More materially changed squares than the candidate signature permits.
 - No dominant source.
 - No dominant destination.
 - Source without a known logical piece.
-- Destination already logically occupied.
+- Destination occupancy that is inconsistent with the candidate signature.
 - Weak or contradictory base-region vacancy evidence.
 - Candidate frames that do not agree.
 
@@ -578,6 +595,11 @@ The replacement tracker is accepted when:
     elsewhere still blocks acceptance.
 13. An adjacent opposite-color residual is suppressed only when its retained
     lower/base signature matches the accepted reference.
+14. Captures, castling, en passant, and promotion advance the position and
+    reference only after their exact legal physical signatures complete.
+15. Captured-piece-first, king-first, and captured-pawn-first intermediate
+    states preserve the original reference until the remaining action
+    completes.
 
 ## 22. Migration Plan
 
@@ -613,7 +635,8 @@ After reference tracking passes recorded and live acceptance tests:
 Superseded logic shall not remain active as a fallback because competing move
 trackers can produce contradictory state transitions.
 
-All four migration phases are implemented for ordinary non-capturing
-relocations. Absolute occupancy remains available for initialization, explicit
-reset verification, orientation, and future reconciliation rather than as a
-parallel post-initialization move trigger.
+All four migration phases are implemented for ordinary relocations and the
+supported legal special-move signatures. Absolute occupancy remains available
+for initialization, explicit and automatic starting-position reset
+verification, orientation, and reconciliation rather than as a competing
+general post-initialization move trigger.

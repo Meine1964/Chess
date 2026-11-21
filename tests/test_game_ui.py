@@ -291,6 +291,51 @@ def test_promotion_blackout_detects_choice_and_shows_confirmation() -> None:
     window._show_promotion_confirmation.assert_called_once_with()
 
 
+def test_promotion_confirmation_allows_changing_selected_piece() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    import cv2
+    import numpy as np
+
+    from src.chess_camera.camera_app import _PendingPromotionSelection
+    from src.chess_camera.promotion_selection import (
+        promotion_choice_polygons,
+    )
+
+    grid = np.asarray(
+        [
+            [[100 + column * 50, 100 + row * 50] for column in range(9)]
+            for row in range(9)
+        ],
+        dtype=np.float32,
+    )
+    polygons = promotion_choice_polygons(grid, "top")
+    reference = np.full((600, 600, 3), 120, dtype=np.uint8)
+    current = reference.copy()
+    cv2.circle(current, (275, 75), 14, (20, 20, 20), -1)
+    selection = _PendingPromotionSelection(
+        ((1, 4), (0, 4)),
+        "top",
+        polygons,
+        reference,
+        stage="confirmation-blackout",
+        piece="r",
+        generation=4,
+    )
+    window = SimpleNamespace(
+        _pending_promotion_selection=selection,
+        _latest_frame=current,
+        _show_promotion_confirmation=MagicMock(),
+        _fail_promotion_selection=MagicMock(),
+    )
+
+    CameraWindow._finish_promotion_blackout(window, 4)
+
+    assert selection.piece == "b"
+    window._show_promotion_confirmation.assert_called_once_with()
+
+
 def test_verified_replacement_submits_selected_promotion() -> None:
     from types import SimpleNamespace
     from unittest.mock import MagicMock
@@ -517,6 +562,7 @@ def test_stable_starting_occupancy_triggers_automatic_reset() -> None:
         _activate_offline_after_reset=False,
         _automatic_start_reset_recovery=True,
         _occupancy_status=MagicMock(),
+        _piece_status=MagicMock(),
         _complete_starting_position_reset=MagicMock(),
     )
 
@@ -527,6 +573,51 @@ def test_stable_starting_occupancy_triggers_automatic_reset() -> None:
     assert window._automatic_start_reset_recovery is False
     window._complete_starting_position_reset.assert_called_once_with(
         starting_occupied_squares()
+    )
+    window._piece_status.setText.assert_called_once_with(
+        "Starting position detected automatically; Offline game ready. "
+        "White to move."
+    )
+
+
+def test_provisional_starting_occupancy_reports_fast_confirmation() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.chess_position import starting_occupied_squares
+
+    detector = MagicMock()
+    detector.observe.return_value = SimpleNamespace(
+        state="stabilizing",
+        observation_count=1,
+        required_observations=2,
+        result=SimpleNamespace(
+            occupied_squares=starting_occupied_squares()
+        ),
+    )
+    window = SimpleNamespace(
+        _automatic_start_reset=True,
+        _lichess_game_controller=None,
+        _latest_frame=object(),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(camera_grid=object())
+        ),
+        _game_mode="diagnostic",
+        _legal_game=LegalGame(),
+        _piece_synchronizer=SimpleNamespace(position={}),
+        _automatic_start_occupancy_detector=detector,
+        _board_quarter_turns=0,
+        _occupancy_status=MagicMock(),
+        _piece_status=MagicMock(),
+        _complete_starting_position_reset=MagicMock(),
+    )
+
+    detected = CameraWindow._detect_automatic_starting_position(window)
+
+    assert detected is True
+    window._complete_starting_position_reset.assert_not_called()
+    window._piece_status.setText.assert_called_once_with(
+        "Starting position detected; confirming stability (1/2)."
     )
 
 

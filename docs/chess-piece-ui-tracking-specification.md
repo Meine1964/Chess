@@ -1,7 +1,7 @@
 # Chess-Piece UI Rendering and Move Synchronization Specification
 
-**Version:** 0.3
-**Status:** Implemented ordinary-move and offline legal-game workflow
+**Version:** 0.4
+**Status:** Implemented offline legal play, special moves, recovery, and automatic starting-position reset
 **Platform:** Python on Windows  
 **Piece artwork:** Lichess `cburnett` SVG set  
 
@@ -27,8 +27,9 @@ Define how the application shall:
 5. Keep White at the bottom of the UI.
 6. Refuse ambiguous updates rather than moving the wrong UI piece.
 
-The first milestone supports one ordinary, non-capturing physical piece move
-at a time.
+The implemented workflow supports ordinary moves, captures, castling, en
+passant, auto-queen promotion, and projected physical underpromotion
+selection.
 
 ## 2. Piece Artwork
 
@@ -407,7 +408,12 @@ When automatic starting-position reset is enabled, the same stable occupancy
 check shall run passively while the projector is black and no Lichess game is
 active, including in Board setup / diagnostic mode. Physically arranging the
 standard setup shall therefore trigger reset and Offline legal readiness
-without requiring a mode-selection attempt.
+without requiring a mode-selection attempt. This passive start-only detector
+may use a lower-resolution canonical image and shorter observation window than
+general occupancy tracking because it accepts only the complete standard
+32-square pattern. It shall still require two agreeing classified observations
+after motion settling, report provisional recognition immediately, and target
+completion within one second after the board becomes clear.
 
 - **Restore saved offline position** keeps the saved FEN authoritative and
   enters persistent correction guidance until the camera confirms that
@@ -555,6 +561,9 @@ Asset diagnostics shall include:
 - Explicit reset uses live occupancy rather than a cached pre-reference result.
 - Explicit reset automatically returns the projector to black before occupancy
   verification.
+- With automatic reset enabled and no active Lichess game, stable standard
+  occupancy triggers the same reset from Board setup / diagnostic mode.
+- Disabling automatic reset restores the explicit Camera-menu action.
 - Opening black projector output resumes occupancy processing without requiring
   a separate **Black** action.
 - Failed reset verification preserves the logical position and reference.
@@ -573,11 +582,12 @@ Asset diagnostics shall include:
 
 ## 18. Acceptance Criteria
 
-The first piece-synchronization milestone is accepted when:
+The piece-synchronization workflow is accepted when:
 
 1. The UI displays the official cburnett SVG pieces in the standard position.
 2. White appears at the bottom after camera-derived side detection.
-3. An ordinary physical move updates exactly one UI piece.
+3. An ordinary physical move updates exactly one UI piece, while supported
+   special moves update their complete legal signature atomically.
 4. The UI update occurs only after a clear, settled reference comparison.
 5. Hand motion does not create intermediate UI moves.
 6. Ambiguous physical changes preserve the previous logical position.
@@ -593,7 +603,8 @@ The first piece-synchronization milestone is accepted when:
 The twelve pinned SVGs, checksum manifest, GPLv2-or-later text, and attribution
 notice are vendored with the application. The standard position model, Qt SVG
 rendering, reference-image one-source/one-destination synchronization,
-ambiguity handling, and explicit starting-position reset are implemented.
+ambiguity handling, and explicit and automatic starting-position reset are
+implemented.
 Offline legal authority, persistent turn indication, illegal-move correction,
 targeted opposite-color residual resolution, legal physical signatures, and
 single-action captures are implemented and have passed live physical-board
@@ -640,7 +651,8 @@ Implemented.
 - Move the known UI piece and commit the new reference atomically.
 - Report accepted and rejected changes.
 
-Implemented for non-capturing one-piece relocations.
+Implemented for ordinary relocations and the multi-square legal signatures
+listed in Milestone 6.
 
 ### Milestone 4: Recovery
 
@@ -650,7 +662,10 @@ Implemented for non-capturing one-piece relocations.
 - Restore only metadata-compatible persisted references.
 - Verify reset requests asynchronously using the current camera frame.
 
-Implemented. Reset requires confirmed starting-position occupancy.
+Implemented. Reset requires confirmed starting-position occupancy. When the
+persistent automatic-reset setting is enabled, stable starting occupancy
+triggers the same atomic reset and activates Offline legal mode without an
+explicit command.
 
 ### Milestone 5: Offline legal moves
 
@@ -658,7 +673,7 @@ Implemented. Reset requires confirmed starting-position occupancy.
 - Reject illegal physical moves without changing logical/reference state.
 - Add persistent turn and correction guidance.
 
-Implemented for ordinary non-capturing moves.
+Implemented for all currently supported legal physical signatures.
 
 ### Milestone 6: Captures and special physical signatures
 
@@ -668,9 +683,11 @@ Implemented for ordinary non-capturing moves.
 - Support castling, en passant, and promotion workflows.
 - Reconcile multi-square physical signatures before atomic commit.
 
-Ordinary single-action legal capture commit is implemented. Stronger
-piece-color classification, multi-action capture handling, and special moves
-remain future work.
+Implemented. Ordinary and captured-piece-first captures, king-first castling,
+captured-pawn-first en passant, auto-queen promotion, and projected local
+underpromotion selection preserve atomic legal/reference commits. Exact
+incoming underpromotion suffixes are retained; dedicated incoming
+replacement-piece projection remains staged.
 
 ## 20. Open Decisions
 

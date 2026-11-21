@@ -394,8 +394,9 @@ After a stable pre-move and post-move position are available:
 - Ask for user confirmation when evidence is ambiguous.
 - Never silently update game state from a low-confidence candidate.
 
-The initial non-capturing one-piece synchronization contract is specified in
-[Chess-Piece UI Rendering and Move Synchronization](./chess-piece-ui-tracking-specification.md).
+The physical synchronization contract, including ordinary moves and supported
+legal special-move signatures, is specified in [Chess-Piece UI Rendering and
+Move Synchronization](./chess-piece-ui-tracking-specification.md).
 
 ## 14. Diagnostics
 
