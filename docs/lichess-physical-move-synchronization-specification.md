@@ -218,26 +218,30 @@ countdown behavior. Segment thickness, colon-dot radii, and result fraction-bar
 thickness shall compensate for the calibrated projector-pixel density at each
 clock or result quadrilateral. Compensation shall be direction-aware: vertical
 segments use the local horizontal density and horizontal segments use the
-local vertical density. The densest displayed clock or result region on each
+local vertical density. The fixed White-clock, Black-clock, and center-result
+layout shall always define the density reference, regardless of whether a
+result is currently visible. The densest region in that fixed layout on each
 axis shall retain the established base thickness; regions with lower density
 shall widen inversely, subject to a conservative upper bound that prevents
-segments from merging. Compensation shall not move or resize a clock or result
-quadrilateral, change its text, or alter its perspective transform. For a
-calibration with unequal near-side and far-side density, corresponding
-projected strokes shall rasterize to comparable projector-pixel thickness
-within antialiasing tolerance. The clocks shall be bright white on the
-otherwise black edge, shall not replace or suppress projected move and
-correction markings, and shall inherit the same locally advancing display
-values as the on-screen clocks.
+segments from merging. Showing or hiding a timeout or draw result shall not
+change either clock face's rasterized strokes. Compensation shall not move or
+resize a clock or result quadrilateral, change its text, or alter its
+perspective transform. For a calibration with unequal near-side and far-side
+density, corresponding projected strokes shall rasterize to comparable
+projector-pixel thickness within antialiasing tolerance. The clocks shall be
+bright white on the otherwise black edge, shall not replace or suppress
+projected move and correction markings, and shall inherit the same locally
+advancing display values as the on-screen clocks.
 
 Implementation status (2026-11-21): calibrated direction-aware stroke
 compensation is implemented for clocks, result glyphs, colon dots, and draw
-fraction bars. Focused raster tests verify inverse density compensation,
-bounded enlargement, and preservation of timeout and agreed-draw rendering.
-The remaining limitation is that compensation uses calibrated geometric pixel
-density rather than a camera-measured photometric response map, so projector
-optical falloff that is independent of geometry may still require later
-brightness equalization.
+fraction bars. The fixed full edge layout supplies a content-independent
+density reference. Focused raster tests verify inverse density compensation,
+bounded enlargement, unchanged clock rasterization when a result appears, and
+preservation of timeout and agreed-draw rendering. The remaining limitation is
+that compensation uses calibrated geometric pixel density rather than a
+camera-measured photometric response map, so projector optical falloff that is
+independent of geometry may still require later brightness equalization.
 
 Projected clocks shall remain hidden until a complete White-side orientation
 and a calibrated projector grid are available. They shall also remain hidden

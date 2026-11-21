@@ -557,18 +557,17 @@ class ProjectorWindow(QWidget):
                 2,
                 board_quarter_turns=self._clock_board_quarter_turns,
             )
-            result_polygon = (
-                self._edge_result_polygon(
-                    self._projector_grid,
-                    board_quarter_turns=self._clock_board_quarter_turns,
-                )
-                if self._result_text is not None
-                else None
+            result_polygon = self._edge_result_polygon(
+                self._projector_grid,
+                board_quarter_turns=self._clock_board_quarter_turns,
             )
-            edge_polygons = [white_clock_polygon, black_clock_polygon]
-            if result_polygon is not None:
-                edge_polygons.append(result_polygon)
-            stroke_scales = self._edge_stroke_compensation(edge_polygons)
+            stroke_scales = self._edge_stroke_compensation(
+                [
+                    white_clock_polygon,
+                    black_clock_polygon,
+                    result_polygon,
+                ]
+            )
             self._draw_edge_clock(
                 painter,
                 white_clock_polygon,
@@ -581,7 +580,7 @@ class ProjectorWindow(QWidget):
                 self._black_clock_text,
                 stroke_scale=stroke_scales[1],
             )
-            if self._result_text is not None and result_polygon is not None:
+            if self._result_text is not None:
                 self._draw_edge_result(
                     painter,
                     result_polygon,

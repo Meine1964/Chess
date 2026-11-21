@@ -292,6 +292,53 @@ def test_edge_clock_compensates_lower_projector_pixel_density() -> None:
     assert abs(len(dense_columns) - len(sparse_columns)) <= 1
 
 
+def test_result_visibility_does_not_change_clock_rasterization(
+    application: QApplication,
+) -> None:
+    window = ProjectorWindow()
+    window.resize(360, 180)
+    window.show()
+    x_values = np.linspace(80, 280, 9, dtype=np.float32)
+    y_values = np.asarray(
+        (10, 20, 30, 40, 80, 120, 130, 140, 150),
+        dtype=np.float32,
+    )
+    x_grid, y_grid = np.meshgrid(x_values, y_values)
+    grid = np.stack((x_grid, y_grid), axis=2).astype(np.float32)
+    window.set_projector_grid(grid)
+    window.set_edge_clocks(
+        "1:05",
+        "9:42",
+        board_quarter_turns=0,
+    )
+    window.show_black()
+    application.processEvents()
+    active_game = window.grab().toImage()
+
+    window.set_edge_clocks(
+        "1:05",
+        "9:42",
+        board_quarter_turns=0,
+        result="1-0",
+    )
+    application.processEvents()
+    terminal_game = window.grab().toImage()
+
+    for left, top, right, bottom in (
+        (50, 5, 82, 35),
+        (50, 125, 82, 155),
+    ):
+        for x_coordinate in range(left, right + 1):
+            for y_coordinate in range(top, bottom + 1):
+                assert active_game.pixelColor(
+                    x_coordinate,
+                    y_coordinate,
+                ) == terminal_game.pixelColor(
+                    x_coordinate,
+                    y_coordinate,
+                )
+
+
 def test_projector_renders_seven_segment_clocks_outside_board(
     application: QApplication,
 ) -> None:
