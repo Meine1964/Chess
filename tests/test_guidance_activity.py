@@ -165,6 +165,39 @@ def test_castling_guidance_projects_all_four_squares() -> None:
     )
 
 
+def test_en_passant_guidance_projects_all_three_squares() -> None:
+    window = SimpleNamespace(
+        _camera_only_calibration=False,
+        _calibration_result=object(),
+        _open_projector=lambda: True,
+        _physical_board_square=lambda row, column: (row, column),
+        _projector_window=MagicMock(),
+        _board_widget=MagicMock(),
+        _alignment_monitor=MagicMock(),
+        _guidance_activity_detector=MagicMock(),
+        _projector_status=MagicMock(),
+        _lichess_guidance_generation=0,
+        _lichess_guidance_projection_active=False,
+        _lichess_guidance_blackout_pending=False,
+    )
+    squares = ((3, 4), (2, 3), (3, 3))
+
+    CameraWindow._project_lichess_move_guidance(
+        window,
+        (squares[0], squares[1]),
+        squares[2:],
+    )
+
+    window._board_widget.set_guidance_squares.assert_called_once_with(squares)
+    window._projector_window.show_move_squares.assert_called_once_with(
+        (
+            (3, 4, False),
+            (2, 3, False),
+            (3, 3, True),
+        )
+    )
+
+
 def test_hand_activity_blacks_projector_and_waits_for_settling() -> None:
     window = SimpleNamespace(
         _lichess_guidance_projection_active=True,

@@ -222,3 +222,51 @@ def test_controller_prepares_and_commits_local_castling() -> None:
     assert committed.fen == preview.fen
     assert controller.server_moves == ("e1g1",)
     assert controller.physical_fen == controller.server_fen
+
+
+def test_controller_queues_and_confirms_incoming_en_passant() -> None:
+    initial_fen = (
+        "rnbqkbnr/1pp1pppp/p7/3pP3/8/8/PPPP1PPP/"
+        "RNBQKBNR w KQkq d6 0 3"
+    )
+    controller = LichessGameController(
+        "game1234",
+        initial_fen,
+        "black",
+        "Remote",
+    )
+
+    update = controller.accept_server_history(("e5d6",))
+
+    assert update.state == "guidance"
+    signature = controller.expected_signature
+    assert signature is not None
+    assert signature.kind == "en-passant"
+    assert controller.confirm_expected_move(
+        (signature.source, signature.destination)
+    ).state == "synchronized"
+    assert controller.physical_fen == controller.server_fen
+
+
+def test_controller_prepares_and_commits_local_en_passant() -> None:
+    initial_fen = (
+        "rnbqkbnr/1pp1pppp/p7/3pP3/8/8/PPPP1PPP/"
+        "RNBQKBNR w KQkq d6 0 3"
+    )
+    controller = LichessGameController(
+        "game1234",
+        initial_fen,
+        "white",
+        "Remote",
+    )
+    controller.accept_server_history(())
+
+    uci, preview = controller.prepare_local_move(((3, 4), (2, 3)))
+
+    assert uci == "e5d6"
+    assert preview.position[(2, 3)] == "P"
+    assert (3, 3) not in preview.position
+    committed = controller.commit_local_move(((3, 4), (2, 3)))
+    assert committed.fen == preview.fen
+    assert controller.server_moves == ("e5d6",)
+    assert controller.physical_fen == controller.server_fen

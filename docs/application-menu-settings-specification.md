@@ -164,7 +164,7 @@ interaction rows.
 ## 7. Validation Status
 
 The implemented menu bar exposes File, Camera, Game, Projector, and
-Calibration menus. The complete automated suite contains 246 passing tests,
+Calibration menus. The complete automated suite contains 252 passing tests,
 including menu structure, transactional selector-copy behavior, existing UI
 state transitions, reconciliation controls, and the readable interaction-font
 minimum. Token-status coverage confirms configured and missing environment

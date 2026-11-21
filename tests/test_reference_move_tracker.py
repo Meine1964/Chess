@@ -377,6 +377,66 @@ def test_king_first_castling_waits_for_rook_before_accepting() -> None:
     assert accepted.move == (king_source, king_destination)
 
 
+def test_captured_pawn_first_en_passant_waits_for_attacker() -> None:
+    game = LegalGame(
+        "rnbqkbnr/1pp1pppp/p7/3pP3/8/8/PPPP1PPP/"
+        "RNBQKBNR w KQkq d6 0 3"
+    )
+    source = (3, 4)
+    destination = (2, 3)
+    captured = (3, 3)
+    reference = _empty_board()
+    for square, piece in game.position.items():
+        _draw_piece(
+            reference,
+            square,
+            (225, 225, 225) if piece.isupper() else (20, 20, 20),
+        )
+    empty = _empty_board()
+    captured_removed = reference.copy()
+    captured_removed[
+        captured[0] * 100 : (captured[0] + 1) * 100,
+        captured[1] * 100 : (captured[1] + 1) * 100,
+    ] = empty[
+        captured[0] * 100 : (captured[0] + 1) * 100,
+        captured[1] * 100 : (captured[1] + 1) * 100,
+    ]
+    tracker = ReferenceMoveTracker()
+    tracker.set_reference(reference, _camera_grid(), 0)
+
+    pending = _accepted_update(
+        tracker,
+        captured_removed,
+        game.position,
+        game.physical_move_signatures,
+    )
+
+    assert pending.state == "pending-en-passant"
+    assert pending.move is None
+    assert "from e5 to d6" in pending.message
+    np.testing.assert_array_equal(tracker.reference, reference)
+
+    completed = captured_removed.copy()
+    completed[
+        source[0] * 100 : (source[0] + 1) * 100,
+        source[1] * 100 : (source[1] + 1) * 100,
+    ] = empty[
+        source[0] * 100 : (source[0] + 1) * 100,
+        source[1] * 100 : (source[1] + 1) * 100,
+    ]
+    _draw_piece(completed, destination, (225, 225, 225))
+
+    accepted = _accepted_update(
+        tracker,
+        completed,
+        game.position,
+        game.physical_move_signatures,
+    )
+
+    assert accepted.state == "accepted"
+    assert accepted.move == (source, destination)
+
+
 def test_capture_explains_residuals_that_preserve_authoritative_state() -> None:
     game = LegalGame(
         "r1bqk1nr/pp1n1ppp/2p1p3/1Bb5/4p3/"

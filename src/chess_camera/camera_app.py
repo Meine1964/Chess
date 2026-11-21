@@ -2492,6 +2492,7 @@ class CameraWindow(QMainWindow):
                 "illegal-removal",
                 "pending-capture",
                 "pending-castling",
+                "pending-en-passant",
             }
         ):
             self._last_runtime_tracker_state = update.state

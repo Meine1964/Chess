@@ -43,6 +43,15 @@ class PendingCastlingMatch:
     message: str
 
 
+@dataclass(frozen=True)
+class PendingEnPassantMatch:
+    captured_square: Square | None
+    destination: Square | None
+    sources: tuple[Square, ...]
+    signatures: tuple[LegalMoveSignature, ...]
+    message: str
+
+
 def match_legal_move_signature(
     change_scores: FloatArray,
     signatures: Sequence[LegalMoveSignature],
@@ -68,7 +77,7 @@ def match_legal_move_signature(
             continue
         if (
             piece_colors is not None
-            and signature.kind == "castling"
+            and signature.kind in ("castling", "en-passant")
             and not _changed_square_colors_match(signature, piece_colors)
         ):
             continue
@@ -81,7 +90,7 @@ def match_legal_move_signature(
         source_score = expected_scores.get(signature.source)
         required_change = (
             minimum_square_change * LEGAL_SOURCE_CHANGE_RATIO
-            if signature.kind == "castling"
+            if signature.kind in ("castling", "en-passant")
             else minimum_square_change
         )
         if (
@@ -321,6 +330,95 @@ def match_pending_castling(
         rook_source,
         rook_destination,
         "The king move matches pending physical castling.",
+    )
+
+
+def match_pending_en_passant(
+    change_scores: FloatArray,
+    signatures: Sequence[LegalMoveSignature],
+    piece_colors: Mapping[Square, PieceColorClassification],
+    *,
+    minimum_square_change: float = 0.08,
+) -> PendingEnPassantMatch:
+    scores = np.asarray(change_scores, dtype=np.float32)
+    if scores.shape != (8, 8):
+        raise ValueError("Change scores must describe an 8x8 board.")
+    if minimum_square_change <= 0:
+        raise ValueError("The movement threshold must be positive.")
+    candidates: list[tuple[LegalMoveSignature, Square]] = []
+    for signature in signatures:
+        if signature.kind != "en-passant":
+            continue
+        captured_square = next(
+            (
+                change.square
+                for change in signature.changes
+                if change.square
+                not in (signature.source, signature.destination)
+                and change.before in ("P", "p")
+                and change.after is None
+            ),
+            None,
+        )
+        moving_piece = next(
+            (
+                change.before
+                for change in signature.changes
+                if change.square == signature.source
+            ),
+            None,
+        )
+        expected_color = (
+            None
+            if moving_piece is None
+            else "white"
+            if moving_piece.isupper()
+            else "black"
+        )
+        if (
+            captured_square is None
+            or expected_color is None
+            or float(scores[signature.source]) >= minimum_square_change
+            or float(scores[signature.destination]) >= minimum_square_change
+            or float(scores[captured_square])
+            < minimum_square_change * LEGAL_SOURCE_CHANGE_RATIO
+            or piece_colors.get(signature.source) is None
+            or piece_colors[signature.source].label != expected_color
+            or piece_colors.get(signature.destination) is None
+            or piece_colors[signature.destination].label != "empty"
+            or piece_colors.get(captured_square) is None
+            or piece_colors[captured_square].label != "empty"
+        ):
+            continue
+        unexplained = scores.copy()
+        unexplained[captured_square] = 0
+        unexpected_limit = max(
+            minimum_square_change,
+            float(scores[captured_square]) * 0.75,
+        )
+        if float(np.max(unexplained)) > unexpected_limit:
+            continue
+        candidates.append((signature, captured_square))
+    target_pairs = {
+        (captured_square, signature.destination)
+        for signature, captured_square in candidates
+    }
+    if len(target_pairs) != 1:
+        return PendingEnPassantMatch(
+            None,
+            None,
+            (),
+            tuple(signature for signature, _square in candidates),
+            "No unique captured-pawn-first en passant signature matches "
+            "the board.",
+        )
+    captured_square, destination = target_pairs.pop()
+    return PendingEnPassantMatch(
+        captured_square,
+        destination,
+        tuple(sorted({signature.source for signature, _square in candidates})),
+        tuple(signature for signature, _square in candidates),
+        "The removed pawn matches pending physical en passant.",
     )
 
 

@@ -28,9 +28,9 @@ When Lichess advances the remote game, the application shall:
 6. Advance the physical position and replace the camera reference only after
    exact confirmation.
 
-Outgoing ordinary moves, non-promotion captures, and castling are supported.
-En passant and promotion remain reconciliation-only until their outgoing
-slices are implemented.
+Outgoing ordinary moves, non-promotion captures, castling, and en passant are
+supported. Promotion remains reconciliation-only until its outgoing slice is
+implemented.
 
 ## 2. Design Principles
 
@@ -87,8 +87,9 @@ The first implementation shall support:
 - Complete move-history prefix validation.
 - One or more newly reported moves in a single update.
 - An ordered queue of moves not yet confirmed physically.
-- Ordinary moves and non-promotion captures for both colors.
-- Direct submission of the local player's ordinary moves and captures.
+- Ordinary moves, non-promotion captures, castling, and en passant for both
+  colors.
+- Direct submission of those supported local-player move kinds.
 - Opponent-move projection and physical confirmation.
 - Durable UI guidance.
 - Incorrect physical-action correction.
@@ -102,8 +103,6 @@ The first implementation shall support:
 After ordinary moves and captures are live-accepted, the same state machine
 shall be extended to:
 
-- Castling.
-- En passant.
 - Queen promotion.
 - Capture-promotion.
 
@@ -461,14 +460,28 @@ four changed squares when classified post-move occupancy and piece colors
 match the expected castled position exactly. This permits lower-contrast rook
 movement without weakening the exact four-square state check.
 
+En passant shall support complete final-position evidence and a
+captured-pawn-first workflow. Removing only the bypassed pawn from its square
+shall enter a non-authoritative pending-en-passant state while retaining the
+original position and camera reference. Moving the attacking pawn from its
+source to the en passant destination shall then confirm the complete
+three-square signature against the original reference.
+
+Complete en passant may use the reduced legal-source change threshold on all
+three changed squares only when classified post-move occupancy and piece
+colors exactly match the expected source-empty, destination-attacker, and
+captured-pawn-square-empty state.
+
 ### 10.3 Special-move projection
 
 Castling guidance shall mark the king source/destination and rook
 source/destination in white on both the physical UI board and projector.
 
+En passant guidance shall mark the attacking pawn source, destination, and
+captured-pawn square in white on both the physical UI board and projector.
+
 Later slices shall derive involved squares from the expected signature:
 
-- En passant: source, destination, and captured-pawn square.
 - Promotion: source and destination plus queen-replacement guidance.
 
 ## 11. Camera Confirmation
@@ -539,6 +552,11 @@ A completed king relocation remains pending rather than illegal when it is the
 king-first step of an active expected castling signature. The authoritative
 state and reference shall remain unchanged until the rook completes castling.
 
+A captured pawn removed from its separate square remains pending rather than
+illegal when it is the captured-pawn-first step of an active expected en
+passant signature. The authoritative state and reference shall remain
+unchanged until the attacker reaches the en passant destination.
+
 ### 12.3 Correction completion
 
 The user may:
@@ -549,11 +567,12 @@ The user may:
 After restoration, the application shall resume guidance for the same pending
 move. After an exact expected final position, it may commit normally.
 
-## 13. Local Ordinary-Move, Capture, and Castling Submission
+## 13. Local Ordinary-Move, Capture, Castling, and En Passant Submission
 
 Local submission is available only when the physical and server positions are
 synchronized, it is the configured player's turn, and the camera identifies a
-unique ordinary move, non-promotion capture, or completed castling signature.
+unique ordinary move, non-promotion capture, completed castling signature, or
+completed en passant signature.
 
 The application shall use a two-phase commit:
 
@@ -799,7 +818,8 @@ Phase 7 slices are declared complete.
 
 ## 21. Implementation Status
 
-The ordinary-move, non-promotion capture, and castling slices are implemented:
+The ordinary-move, non-promotion capture, castling, and en passant slices are
+implemented:
 
 - A pure synchronization controller validates complete history prefixes.
 - Server and physical legal cursors advance independently.
@@ -830,11 +850,13 @@ The ordinary-move, non-promotion capture, and castling slices are implemented:
   evidence.
 - Incoming and local castling use four-square guidance and accept either the
   complete final position or king-first, rook-second physical handling.
-- Promotions, en passant, and capture-promotions explicitly enter
-  reconciliation until their staged slices are implemented.
+- Incoming and local en passant use three-square guidance and accept either
+  the complete final position or captured-pawn-first physical handling.
+- Promotions and capture-promotions explicitly enter reconciliation until
+  their staged slices are implemented.
 
-The validated automated suite contains 246 passing tests. Live ordinary-move,
+The validated automated suite contains 252 passing tests. Live ordinary-move,
 polling, reconciliation, and guidance acceptance has been exercised on the
-target camera/projector setup. Lichess capture and castling behavior is automated-test validated and awaits
-live acceptance. Promotions, en passant, and capture-promotions remain staged
-limitations.
+target camera/projector setup. Lichess capture, castling, and en passant
+behavior is automated-test validated and awaits live acceptance. Promotions
+and capture-promotions remain staged limitations.

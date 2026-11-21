@@ -12,6 +12,7 @@ from .legal_signature_matcher import (
     match_legal_move_signature,
     match_pending_castling,
     match_pending_capture,
+    match_pending_en_passant,
 )
 from .piece_color_classifier import (
     PieceColorClassification,
@@ -28,6 +29,7 @@ ReferenceTrackerState = Literal[
     "candidate",
     "pending-capture",
     "pending-castling",
+    "pending-en-passant",
     "illegal-removal",
     "accepted",
     "ambiguous",
@@ -233,6 +235,9 @@ class ReferenceMoveTracker:
         pending_castling: LegalMoveSignature | None = None
         pending_castling_rook_source: Square | None = None
         pending_castling_rook_destination: Square | None = None
+        pending_en_passant_captured: Square | None = None
+        pending_en_passant_destination: Square | None = None
+        pending_en_passant_sources: tuple[Square, ...] = ()
         illegal_removed_piece: Square | None = None
         if physical_signatures:
             piece_colors = classify_piece_colors(
@@ -294,16 +299,35 @@ class ReferenceMoveTracker:
                     castling_match.rook_destination
                 )
                 if pending_castling is None:
-                    pending_capture = match_pending_capture(
+                    pending_en_passant = match_pending_en_passant(
                         scores,
                         physical_signatures,
                         piece_colors,
                         minimum_square_change=self._minimum_square_change,
                     )
-                    pending_capture_destination = pending_capture.destination
-                    pending_capture_sources = pending_capture.sources
+                    pending_en_passant_captured = (
+                        pending_en_passant.captured_square
+                    )
+                    pending_en_passant_destination = (
+                        pending_en_passant.destination
+                    )
+                    pending_en_passant_sources = (
+                        pending_en_passant.sources
+                    )
+                    if pending_en_passant_captured is None:
+                        pending_capture = match_pending_capture(
+                            scores,
+                            physical_signatures,
+                            piece_colors,
+                            minimum_square_change=self._minimum_square_change,
+                        )
+                        pending_capture_destination = (
+                            pending_capture.destination
+                        )
+                        pending_capture_sources = pending_capture.sources
                 if (
                     pending_castling is None
+                    and pending_en_passant_captured is None
                     and pending_capture_destination is None
                 ):
                     illegal_removed_piece = find_illegal_removed_piece(
@@ -330,6 +354,27 @@ class ReferenceMoveTracker:
                 f"castling by moving the rook from "
                 f"{square_name(pending_castling_rook_source)} to "
                 f"{square_name(pending_castling_rook_destination)}.",
+                scores,
+            )
+        if (
+            move is None
+            and pending_en_passant_captured is not None
+            and pending_en_passant_destination is not None
+            and not has_large_obstruction
+        ):
+            self._candidate_move = None
+            self._candidate_count = 0
+            source_names = ", ".join(
+                square_name(source)
+                for source in pending_en_passant_sources
+            )
+            return ReferenceTrackerUpdate(
+                "pending-en-passant",
+                None,
+                f"Captured pawn removed from "
+                f"{square_name(pending_en_passant_captured)}; complete en "
+                f"passant from {source_names} to "
+                f"{square_name(pending_en_passant_destination)}.",
                 scores,
             )
         if (

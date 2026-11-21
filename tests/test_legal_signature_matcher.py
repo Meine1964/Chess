@@ -6,6 +6,7 @@ from src.chess_camera.legal_signature_matcher import (
     match_legal_move_signature,
     match_pending_castling,
     match_pending_capture,
+    match_pending_en_passant,
 )
 from src.chess_camera.piece_color_classifier import PieceColorClassification
 
@@ -117,6 +118,57 @@ def test_pending_castling_matches_king_first() -> None:
     assert pending.signature.uci == "e1g1"
     assert pending.rook_source == (7, 7)
     assert pending.rook_destination == (7, 5)
+
+
+def test_matches_complete_low_contrast_en_passant_signature() -> None:
+    game = LegalGame(
+        "rnbqkbnr/1pp1pppp/p7/3pP3/8/8/PPPP1PPP/"
+        "RNBQKBNR w KQkq d6 0 3"
+    )
+    colors = {
+        (3, 4): PieceColorClassification("empty", 0.01, 0.2),
+        (2, 3): PieceColorClassification("white", 0.01, 0.2),
+        (3, 3): PieceColorClassification("empty", 0.01, 0.2),
+    }
+
+    match = match_legal_move_signature(
+        _scores(
+            ((3, 4), 0.065),
+            ((2, 3), 0.067),
+            ((3, 3), 0.064),
+        ),
+        game.physical_move_signatures,
+        piece_colors=colors,
+    )
+
+    assert match.signature is not None
+    assert match.signature.uci == "e5d6"
+    assert match.signature.kind == "en-passant"
+
+
+def test_pending_en_passant_matches_captured_pawn_first() -> None:
+    game = LegalGame(
+        "rnbqkbnr/1pp1pppp/p7/3pP3/8/8/PPPP1PPP/"
+        "RNBQKBNR w KQkq d6 0 3"
+    )
+    colors = {
+        (3, 4): PieceColorClassification("white", 0.01, 0.2),
+        (2, 3): PieceColorClassification("empty", 0.01, 0.2),
+        (3, 3): PieceColorClassification("empty", 0.01, 0.2),
+    }
+
+    pending = match_pending_en_passant(
+        _scores(((3, 3), 0.065)),
+        game.physical_move_signatures,
+        colors,
+    )
+
+    assert pending.captured_square == (3, 3)
+    assert pending.destination == (2, 3)
+    assert pending.sources == ((3, 4),)
+    assert tuple(signature.uci for signature in pending.signatures) == (
+        "e5d6",
+    )
 
 
 def test_capture_requires_vacated_source_and_mover_color_destination() -> None:

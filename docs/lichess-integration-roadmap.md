@@ -587,6 +587,9 @@ captures are implemented and automated-test validated, including complete
 single-action and captured-piece-first evidence, and await live acceptance.
 Incoming and locally submitted castling is implemented with four-square white
 guidance and king-first, rook-second confirmation, and awaits live acceptance.
+Incoming and locally submitted en passant is implemented with three-square
+white guidance and captured-pawn-first confirmation, and awaits live
+acceptance.
 The synchronization flow maintains separate server and physical legal cursors,
 validates streamed history prefixes and verified polling transitions,
 queues one or more reported moves in server order, shows one pending move at a
@@ -594,9 +597,8 @@ time in white on the physical UI board and projector, and commits the physical
 position and camera reference only after exact expected evidence. It also
 supports explicit game selection, automatic current-position reconciliation,
 manual trusted acceptance through **Stop reconciliation** when the visible
-board already matches Lichess,
-and ordinary/capture/castling local move submission. Promotions, en passant,
-and other special-move synchronization remain staged work.
+board already matches Lichess, and ordinary/capture/castling/en-passant local
+move submission. Promotions and capture-promotions remain staged work.
 
 When Lichess reports an opponent move:
 
