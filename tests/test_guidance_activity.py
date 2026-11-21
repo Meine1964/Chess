@@ -10,6 +10,7 @@ from src.chess_camera.guidance_activity import (
     BlackoutSettlingUpdate,
     GuidanceActivityDetector,
 )
+from src.chess_camera.legal_game import LegalGame
 from src.chess_camera.reference_move_tracker import ReferenceTrackerUpdate
 
 
@@ -304,37 +305,24 @@ def test_pending_lichess_guidance_has_no_fixed_timeout() -> None:
     )
 
 
-def test_castling_guidance_projects_all_four_squares() -> None:
+def test_castling_guidance_projects_only_king_move() -> None:
+    signature = LegalGame(
+        "r3k2r/8/8/8/8/8/8/4K3 b kq - 0 1"
+    ).legal_move_signature("e8g8")
     window = SimpleNamespace(
-        _camera_only_calibration=False,
-        _calibration_result=object(),
-        _open_projector=lambda: True,
-        _physical_board_square=lambda row, column: (row, column),
-        _projector_window=MagicMock(),
+        _lichess_game_controller=SimpleNamespace(
+            expected_signature=signature
+        ),
+        _last_projected_lichess_uci=None,
         _board_widget=MagicMock(),
-        _alignment_monitor=MagicMock(),
-        _guidance_activity_detector=MagicMock(),
-        _projector_status=MagicMock(),
-        _lichess_guidance_generation=0,
-        _lichess_guidance_projection_active=False,
-        _lichess_guidance_blackout_pending=False,
-    )
-    squares = ((7, 4), (7, 6), (7, 5), (7, 7))
-
-    CameraWindow._project_lichess_move_guidance(
-        window,
-        (squares[0], squares[1]),
-        squares[2:],
+        _project_lichess_move_guidance=MagicMock(),
     )
 
-    window._board_widget.set_guidance_squares.assert_called_once_with(squares)
-    window._projector_window.show_move_squares.assert_called_once_with(
-        (
-            (7, 4, False),
-            (7, 6, False),
-            (7, 5, True),
-            (7, 7, True),
-        )
+    CameraWindow._update_lichess_synchronization_projection(window)
+
+    window._project_lichess_move_guidance.assert_called_once_with(
+        (signature.source, signature.destination),
+        (),
     )
 
 

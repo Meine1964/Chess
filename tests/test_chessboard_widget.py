@@ -316,7 +316,7 @@ def test_widget_shows_pending_legal_move_in_white(
     widget.close()
 
 
-def test_widget_shows_all_castling_guidance_squares_in_white(
+def test_widget_shows_multiple_guidance_squares_in_white(
     application: QApplication,
 ) -> None:
     widget = ChessboardWidget()

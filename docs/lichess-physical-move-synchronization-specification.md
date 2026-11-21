@@ -502,7 +502,10 @@ rook-second workflow. Moving the king to its castling destination shall enter
 a non-authoritative pending-castling state while retaining the original
 position and camera reference. Moving the rook from its castling source to its
 castling destination shall then confirm the complete four-square signature
-against the original reference.
+against the original reference. Incoming castling guidance shall mark only the
+king's source and destination from the authoritative Lichess move; the rook
+source and destination shall remain part of verification but shall not be
+projected or highlighted as guidance.
 
 Complete castling may use the reduced legal-source change threshold on all
 four changed squares when classified post-move occupancy and piece colors
@@ -1033,8 +1036,9 @@ promotion slices are implemented:
 - Incoming and local captures use the same two-phase authority boundaries as
   ordinary moves, including one-action and captured-piece-first camera
   evidence.
-- Incoming and local castling use four-square guidance and accept either the
-  complete final position or king-first, rook-second physical handling.
+- Incoming castling uses two-square king-move guidance while verification
+  still accepts only the complete four-square final position or king-first,
+  rook-second physical handling.
 - Incoming and local en passant use three-square guidance and accept either
   the complete final position or captured-pawn-first physical handling.
 - Incoming and local queen promotion use source/destination guidance and

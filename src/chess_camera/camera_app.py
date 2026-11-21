@@ -4612,7 +4612,9 @@ class CameraWindow(QMainWindow):
         self._last_projected_lichess_uci = signature.uci
         self._project_lichess_move_guidance(
             (signature.source, signature.destination),
-            tuple(
+            ()
+            if signature.kind == "castling"
+            else tuple(
                 change.square
                 for change in signature.changes
                 if change.square
