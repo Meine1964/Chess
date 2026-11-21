@@ -576,9 +576,11 @@ class LichessConnectionWorker(QObject):
                 "The polling clock snapshot belongs to another game."
             )
         try:
-            authoritative_fen = chess.Board(
+            authoritative_board = chess.Board(
                 authoritative.game.state.fen
-            ).fen()
+            )
+            authoritative_fen = authoritative_board.fen()
+            current_board = chess.Board(snapshot.game.state.fen)
         except ValueError as error:
             raise LichessProtocolError(
                 "The polling clock snapshot has an invalid FEN."
@@ -589,7 +591,7 @@ class LichessConnectionWorker(QObject):
             one_move_behind = False
             if game.last_move is not None:
                 try:
-                    export_board = chess.Board(authoritative_fen)
+                    export_board = authoritative_board.copy()
                     missing_move = export_board.parse_uci(game.last_move)
                     export_board.push(missing_move)
                 except ValueError:
@@ -598,7 +600,8 @@ class LichessConnectionWorker(QObject):
                     one_move_behind = (
                         export_board.fen() == snapshot.game.state.fen
                     )
-            if one_move_behind:
+            missing_plies = current_board.ply() - authoritative_board.ply()
+            if one_move_behind or missing_plies > 1:
                 white_time_ms = (
                     authoritative.raw_white_time_ms
                     if authoritative.raw_white_time_ms is not None
@@ -609,16 +612,21 @@ class LichessConnectionWorker(QObject):
                     if authoritative.raw_black_time_ms is not None
                     else state.black_time_ms
                 )
-                if state.turn == "white":
-                    white_time_ms = max(
-                        0,
-                        white_time_ms - _POLLING_INTERVAL_SECONDS * 1000,
-                    ) + state.white_increment_ms
-                else:
-                    black_time_ms = max(
-                        0,
-                        black_time_ms - _POLLING_INTERVAL_SECONDS * 1000,
-                    ) + state.black_increment_ms
+                turn = authoritative_board.turn
+                for _ in range(missing_plies):
+                    if turn == chess.WHITE:
+                        white_time_ms = max(
+                            0,
+                            white_time_ms
+                            - _POLLING_INTERVAL_SECONDS * 1000,
+                        ) + state.white_increment_ms
+                    else:
+                        black_time_ms = max(
+                            0,
+                            black_time_ms
+                            - _POLLING_INTERVAL_SECONDS * 1000,
+                        ) + state.black_increment_ms
+                    turn = not turn
                 state = LichessGameState(
                     snapshot.game.state.moves,
                     snapshot.game.state.fen,

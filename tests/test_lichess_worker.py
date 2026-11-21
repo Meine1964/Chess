@@ -819,7 +819,8 @@ def test_active_polling_accepts_position_three_moves_ahead_of_export() -> None:
     assert snapshot.game.state.fen == current_board.fen()
     assert snapshot.game.state.turn == "white"
     assert snapshot.game.state.white_time_ms == 541000
-    assert not snapshot.clocks_available
+    assert snapshot.game.state.black_time_ms == 602000
+    assert snapshot.clocks_available
 
 
 def test_reconnect_accepts_current_position_when_export_is_one_move_behind(

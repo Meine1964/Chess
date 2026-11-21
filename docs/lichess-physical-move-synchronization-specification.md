@@ -101,11 +101,14 @@ When its FEN is exactly one reported legal move behind, polling shall accept and
 emit the newer ongoing position, use the ongoing `secondsLeft` value for the
 local player's clock, estimate the missing mover's clock from the preceding
 sample and increment, and continue polling until the export catches up. A
-lag of multiple plies shall likewise emit the newer ongoing position but mark
-the delayed export clocks unavailable until the export catches up, because
-their ownership cannot be reconstructed safely. A lagging export shall never
-reject an official move, reset a valid polling cursor, or terminate the polling
-worker. A malformed ongoing position or wrong-game export shall still fail
+lag of multiple plies shall likewise emit the newer ongoing position and
+advance each delayed clock sample once per missing turn using the polling
+interval and that player's increment. The authenticated ongoing `secondsLeft`
+value shall then replace the local player's estimate. This estimate keeps both
+clocks visible until the export catches up without presenting a delayed sample
+as exact. A lagging export shall never reject an official move, reset a valid
+polling cursor, terminate the polling worker, or hide otherwise available
+clocks. A malformed ongoing position or wrong-game export shall still fail
 explicitly rather than be merged speculatively.
 
 Export clock samples shall retain their server sample timestamp. Elapsed time
