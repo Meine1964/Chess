@@ -129,8 +129,9 @@ menu actions. Moving a command shall not change its operational behavior.
 - **Devices:** camera and projector display selectors.
 - **Chess:** promotion mode with **Auto-queen** and
   **Select promoted piece** choices, plus **Automatically reset a detected
-  starting position**. Auto-queen and automatic starting-position reset remain
-  the defaults.
+  starting position** and **Project turn indicator beside the board**.
+  Auto-queen, automatic starting-position reset, and physical turn projection
+  remain the defaults.
 - **Diagnostics:** the **Save diagnostic snapshots** setting.
 - **Lichess:** current connection status, persistent AI-game defaults for AI
   level, player color, and clock, plus a fresh configured/not-configured check
@@ -168,6 +169,20 @@ because the command is redundant. The command shall reappear when automatic
 reset is disabled. The recovery dialog's **Reset to starting position** choice
 shall remain available as a fallback after an automatic check does not find the
 standard setup.
+
+The physical turn-indicator setting shall persist and default to enabled. When
+enabled during an active Offline or Lichess game, the projector shall show one
+white dot on the continuation of the h1-a8 diagonal: half a square beyond h1
+for White's turn and half a square beyond a8 for Black's turn. Board
+orientation shall transform those logical corners to their calibrated physical
+corners. The dot shall remain outside the calibrated 8x8 evidence area, shall
+not block camera move processing, and shall be suppressed by move guidance, correction,
+reconciliation, promotion, calibration patterns, and other higher-priority
+projection modes. It shall return with the current side when projector output
+returns to its idle board-black state. During that idle state it shall remain
+steadily illuminated and shall not blink for camera observations while the
+8x8 playing area remains dark. No dot shall be shown in Board setup /
+diagnostic mode or after game completion.
 
 The dialog shall be populated from the current live selectors each time it is
 opened so camera and screen hot-plug changes remain authoritative.
@@ -303,7 +318,7 @@ interaction rows.
 ## 7. Validation Status
 
 The implemented menu bar exposes File, Camera, Game, Projector, and
-Calibration menus. The complete automated suite contains 309 passing tests,
+Calibration menus. The complete automated suite contains 311 passing tests,
 including menu structure, transactional selector-copy behavior, existing UI
 state transitions, reconciliation controls, and the readable interaction-font
 minimum. Token-status coverage confirms configured and missing environment

@@ -16,6 +16,7 @@ from src.chess_camera.camera_app import (
     _ongoing_game_label,
     _physical_player_edge,
     _physical_promotion_edge,
+    _projected_turn_corner,
     _reference_tracking_status_message,
     _turn_indicator_state,
 )
@@ -63,6 +64,52 @@ def test_promotion_edge_follows_physical_board_orientation() -> None:
     assert _physical_promotion_edge(move, 3) == "left"
 
 
+def test_projected_turn_dot_tracks_diagonal_corner_and_board_orientation() -> None:
+    from types import SimpleNamespace
+
+    game = LegalGame()
+
+    assert (
+        _projected_turn_corner(True, "offline-game", game, None, 0)
+        == "bottom-right"
+    )
+    assert (
+        _projected_turn_corner(True, "offline-game", game, None, 1)
+        == "bottom-left"
+    )
+    game.apply_move((6, 4), (4, 4))
+    assert (
+        _projected_turn_corner(True, "offline-game", game, None, 0)
+        == "top-left"
+    )
+    assert (
+        _projected_turn_corner(False, "offline-game", game, None, 0) is None
+    )
+    assert _projected_turn_corner(True, "diagnostic", game, None, 0) is None
+    lichess_state = SimpleNamespace(result="*", turn="black")
+    assert (
+        _projected_turn_corner(
+            True,
+            "diagnostic",
+            game,
+            lichess_state,
+            1,
+        )
+        == "top-right"
+    )
+    lichess_state.result = "1-0"
+    assert (
+        _projected_turn_corner(
+            True,
+            "diagnostic",
+            game,
+            lichess_state,
+            0,
+        )
+        is None
+    )
+
+
 def test_promotion_icons_face_local_player_from_either_promotion_edge() -> None:
     assert _physical_player_edge("white", 0) == "bottom"
     assert _physical_player_edge("black", 0) == "top"
@@ -80,25 +127,32 @@ def test_stable_menu_preferences_are_persisted() -> None:
         _preferred_lichess_game_id="",
         _promotion_mode="auto-queen",
         _automatic_start_reset=True,
+        _project_turn_indicator=True,
         _reset_pieces_button=MagicMock(),
+        _projector_window=MagicMock(),
+        _update_projected_turn_indicator=MagicMock(),
     )
 
     CameraWindow._save_diagnostics_preference_changed(window, False)
     CameraWindow._remember_lichess_game_selection(window, "game1234")
     CameraWindow._set_promotion_mode(window, "select-promoted-piece")
     CameraWindow._set_automatic_start_reset(window, False)
+    CameraWindow._set_project_turn_indicator(window, False)
 
     assert settings.setValue.call_args_list == [
         call("diagnostics/save_snapshots", False),
         call("lichess/selected_game_id", "game1234"),
         call("chess/promotion_mode", "select-promoted-piece"),
         call("chess/automatic_start_reset", False),
+        call("chess/project_turn_indicator", False),
     ]
-    assert settings.sync.call_count == 4
+    assert settings.sync.call_count == 5
     assert window._preferred_lichess_game_id == "game1234"
     assert window._promotion_mode == "select-promoted-piece"
     assert window._automatic_start_reset is False
+    assert window._project_turn_indicator is False
     window._reset_pieces_button.setVisible.assert_called_once_with(True)
+    window._update_projected_turn_indicator.assert_called_once_with()
 
 
 def test_created_ai_game_follows_exact_returned_id() -> None:

@@ -590,6 +590,7 @@ def test_lichess_ai_defaults_apply_and_cancel_transactionally(
             self._lichess_status = QLabel("Disconnected")
             self._promotion_mode = "auto-queen"
             self._automatic_start_reset = True
+            self._project_turn_indicator = True
 
         def _refresh_projector_screens(
             self,

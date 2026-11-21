@@ -439,6 +439,17 @@ The indicator is driven only by the authoritative legal position. Camera,
 alignment, occupancy, and correction messages shall not change it. Its tooltip
 and accessible name shall state the same turn or game-over information.
 
+When the persistent physical turn-indicator setting is enabled, an active game
+shall also project one white dot on the continuation of the h1-a8 diagonal,
+half a square beyond h1 for White's turn and half a square beyond a8 for
+Black's turn. The dot's location, rather than its color, identifies White or
+Black. Calibrated board orientation shall rotate the logical corners to the
+physical board. The dot shall remain outside the 8x8 camera-evidence area,
+yield to every actionable projector mode, and return only with idle board-black
+output. In that idle state the dot shall be steady and remain visible through
+camera observation while the playing grid stays dark. Board setup / diagnostic
+mode and completed games shall project no turn dot.
+
 ## 14. Recovery and Reset
 
 When automatic starting-position reset is disabled, the UI shall provide an

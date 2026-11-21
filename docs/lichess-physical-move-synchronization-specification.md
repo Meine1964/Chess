@@ -995,7 +995,7 @@ promotion slices are implemented:
   perspective-correct player-facing bright icons, and exact UCI suffix
   requirements in section 10.4.
 
-The validated automated suite contains 309 passing tests. Live ordinary-move,
+The validated automated suite contains 311 passing tests. Live ordinary-move,
 polling, reconciliation, and guidance acceptance has been exercised on the
 target camera/projector setup. Lichess capture, castling, en passant, and
 auto-queen behavior is automated-test validated and awaits live acceptance.

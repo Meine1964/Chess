@@ -89,6 +89,22 @@ def test_promotion_icon_transform_maps_canonical_square_to_perspective() -> None
         assert actual.y() == pytest.approx(float(expected[1]))
 
 
+def test_turn_indicator_uses_diagonal_corner_and_half_square_offset() -> None:
+    x_values = np.linspace(40, 280, 9, dtype=np.float32)
+    y_values = np.linspace(20, 160, 9, dtype=np.float32)
+    x_grid, y_grid = np.meshgrid(x_values, y_values)
+    grid = np.stack((x_grid, y_grid), axis=2).astype(np.float32)
+
+    center, radius = ProjectorWindow._turn_indicator_geometry(
+        grid,
+        "bottom-right",
+    )
+
+    assert center.x() == pytest.approx(295.0)
+    assert center.y() == pytest.approx(168.75)
+    assert radius == pytest.approx(2.45)
+
+
 def test_projector_renders_patterns_and_calibrated_squares(
     application: QApplication,
 ) -> None:
@@ -111,6 +127,12 @@ def test_projector_renders_patterns_and_calibrated_squares(
     x_grid, y_grid = np.meshgrid(x_values, y_values)
     grid = np.stack((x_grid, y_grid), axis=2).astype(np.float32)
     window.set_projector_grid(grid)
+    window.set_turn_indicator("bottom-right")
+    window.show_black()
+    application.processEvents()
+    turn_image = window.grab().toImage()
+    assert turn_image.pixelColor(295, 169).red() > 150
+
     window.show_all_squares()
     application.processEvents()
 
@@ -155,6 +177,12 @@ def test_projector_renders_patterns_and_calibrated_squares(
     assert move_image.pixelColor(115, 64) == PROJECTED_LEGAL_MOVE
     assert move_image.pixelColor(205, 99) == PROJECTED_LEGAL_MOVE
     assert move_image.pixelColor(145, 64).red() == 0
+    assert move_image.pixelColor(295, 169).red() == 0
+
+    window.show_black()
+    application.processEvents()
+    restored_turn_image = window.grab().toImage()
+    assert restored_turn_image.pixelColor(295, 169).red() > 150
 
     window.show_move_squares(
         (

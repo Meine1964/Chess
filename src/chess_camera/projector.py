@@ -38,6 +38,12 @@ DisplayMode = Literal[
     "promotion_choices",
     "promotion_confirmation",
 ]
+TurnIndicatorCorner = Literal[
+    "top-left",
+    "top-right",
+    "bottom-right",
+    "bottom-left",
+]
 PROJECTED_ON_LIGHT_SQUARE = QColor("#007fff")
 PROJECTED_ON_DARK_SQUARE = QColor("#00ffff")
 PROJECTED_LEGAL_MOVE = QColor("#ffffff")
@@ -105,6 +111,7 @@ class ProjectorWindow(QWidget):
         self._promotion_viewer_edge: PromotionEdge | None = None
         self._promotion_piece: PromotionPiece | None = None
         self._promotion_destination: tuple[int, int] | None = None
+        self._turn_indicator_corner: TurnIndicatorCorner | None = None
         self.setWindowTitle("Chess Projector Output")
         self.setCursor(Qt.CursorShape.BlankCursor)
 
@@ -133,6 +140,13 @@ class ProjectorWindow(QWidget):
 
     def show_black(self) -> None:
         self._display_mode = "black"
+        self.update()
+
+    def set_turn_indicator(
+        self,
+        corner: TurnIndicatorCorner | None,
+    ) -> None:
+        self._turn_indicator_corner = corner
         self.update()
 
     def show_pattern(self, pattern: NDArray[np.uint8]) -> None:
@@ -464,6 +478,19 @@ class ProjectorWindow(QWidget):
                     self._promotion_edge,
                     self._promotion_viewer_edge,
                 )
+        if (
+            self._display_mode == "black"
+            and self._projector_grid is not None
+            and self._turn_indicator_corner is not None
+        ):
+            center, radius = self._turn_indicator_geometry(
+                self._projector_grid,
+                self._turn_indicator_corner,
+            )
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(PROJECTED_LEGAL_MOVE)
+            painter.drawEllipse(center, radius, radius)
         painter.end()
         event.accept()
 
@@ -483,6 +510,34 @@ class ProjectorWindow(QWidget):
         if self._projector_grid is None:
             raise RuntimeError("No calibrated projector grid is available.")
         return promotion_choice_polygons(self._projector_grid, edge)
+
+    @staticmethod
+    def _turn_indicator_geometry(
+        grid: NDArray[np.float32],
+        corner: TurnIndicatorCorner,
+    ) -> tuple[QPointF, float]:
+        indices = {
+            "top-left": (0, 0, 1, 1),
+            "top-right": (0, 8, 1, 7),
+            "bottom-right": (8, 8, 7, 7),
+            "bottom-left": (8, 0, 7, 1),
+        }
+        row, column, inward_row, inward_column = indices[corner]
+        boundary = grid[row, column]
+        inward = grid[inward_row, inward_column]
+        outward = boundary - inward
+        center = boundary + outward * 0.5
+        adjacent_row = 1 if row == 0 else 7
+        adjacent_column = 1 if column == 0 else 7
+        radius = max(
+            2.0,
+            min(
+                float(np.linalg.norm(grid[row, adjacent_column] - boundary)),
+                float(np.linalg.norm(grid[adjacent_row, column] - boundary)),
+            )
+            * 0.14,
+        )
+        return QPointF(float(center[0]), float(center[1])), radius
 
     @staticmethod
     def _promotion_rotation(viewer_edge: PromotionEdge) -> float:

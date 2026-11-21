@@ -102,7 +102,7 @@ from .occupancy import (
     detect_starting_position_orientation,
 )
 from .piece_color_classifier import PieceColorLabel, classify_piece_colors
-from .projector import ProjectorWindow, focus_pattern
+from .projector import ProjectorWindow, TurnIndicatorCorner, focus_pattern
 from .promotion_selection import (
     ManipulationSettlingDetector,
     PromotionEdge,
@@ -135,6 +135,7 @@ _SAVE_DIAGNOSTICS_SETTING = "diagnostics/save_snapshots"
 _LICHESS_GAME_SETTING = "lichess/selected_game_id"
 _PROMOTION_MODE_SETTING = "chess/promotion_mode"
 _AUTOMATIC_START_RESET_SETTING = "chess/automatic_start_reset"
+_PROJECT_TURN_INDICATOR_SETTING = "chess/project_turn_indicator"
 _WINDOW_GEOMETRY_SETTING = "window/main_geometry"
 _WINDOW_SCREEN_SETTING = "window/main_screen"
 _WINDOW_X_OFFSET_SETTING = "window/main_x_offset"
@@ -358,6 +359,38 @@ def _physical_player_edge(
     if physical_column == 0:
         return "left"
     return "right"
+
+
+def _projected_turn_corner(
+    enabled: bool,
+    game_mode: GameMode,
+    offline_game: LegalGame,
+    lichess_state: LichessGameState | None,
+    board_quarter_turns: int,
+) -> TurnIndicatorCorner | None:
+    if not enabled:
+        return None
+    if lichess_state is not None:
+        if lichess_state.result != "*":
+            return None
+        turn = lichess_state.turn
+    else:
+        if game_mode != "offline-game" or offline_game.status.result != "*":
+            return None
+        turn = offline_game.status.turn
+    if turn == "white":
+        return (
+            "bottom-right",
+            "bottom-left",
+            "top-left",
+            "top-right",
+        )[board_quarter_turns % 4]
+    return (
+        "top-left",
+        "top-right",
+        "bottom-right",
+        "bottom-left",
+    )[board_quarter_turns % 4]
 
 
 def _lichess_game_state_message(state: LichessGameState) -> str:
@@ -923,6 +956,10 @@ class CameraWindow(QMainWindow):
         self._automatic_start_reset_recovery = False
         self._automatic_start_reset = _stored_boolean(
             self._settings.value(_AUTOMATIC_START_RESET_SETTING, True),
+            True,
+        )
+        self._project_turn_indicator = _stored_boolean(
+            self._settings.value(_PROJECT_TURN_INDICATOR_SETTING, True),
             True,
         )
         stored_promotion_mode = str(
@@ -1717,6 +1754,11 @@ class CameraWindow(QMainWindow):
         )
         automatic_start_reset.setChecked(self._automatic_start_reset)
         chess_layout.addRow(automatic_start_reset)
+        project_turn_indicator = QCheckBox(
+            "Project turn indicator beside the board"
+        )
+        project_turn_indicator.setChecked(self._project_turn_indicator)
+        chess_layout.addRow(project_turn_indicator)
         chess_tab.setLayout(chess_layout)
         tabs.addTab(chess_tab, "Chess")
 
@@ -1819,6 +1861,9 @@ class CameraWindow(QMainWindow):
             self._set_automatic_start_reset(
                 automatic_start_reset.isChecked()
             )
+            self._set_project_turn_indicator(
+                project_turn_indicator.isChecked()
+            )
             selected_ai_color = ai_color.currentData()
             selected_ai_clock = ai_clock.currentData()
             if not isinstance(selected_ai_color, str):
@@ -1897,6 +1942,13 @@ class CameraWindow(QMainWindow):
             reset_action.setVisible(not enabled)
         self._settings.setValue(_AUTOMATIC_START_RESET_SETTING, enabled)
         self._settings.sync()
+
+    def _set_project_turn_indicator(self, enabled: bool) -> None:
+        self._project_turn_indicator = enabled
+        self._settings.setValue(_PROJECT_TURN_INDICATOR_SETTING, enabled)
+        self._settings.sync()
+        if hasattr(self, "_projector_window"):
+            self._update_projected_turn_indicator()
 
     @staticmethod
     def _default_projector_index(
@@ -6105,6 +6157,7 @@ class CameraWindow(QMainWindow):
             self._turn_text.setText("Not enforced")
             self._turn_indicator.setToolTip("")
             self._turn_indicator.setAccessibleName("No enforced chess turn")
+            self._update_projected_turn_indicator()
             return
         color, description = state
         self._turn_indicator.setStyleSheet(
@@ -6114,6 +6167,17 @@ class CameraWindow(QMainWindow):
         self._turn_indicator.setAccessibleName(description)
         self._turn_indicator.show()
         self._turn_text.setText(description)
+        self._update_projected_turn_indicator()
+
+    def _update_projected_turn_indicator(self) -> None:
+        corner = _projected_turn_corner(
+            self._project_turn_indicator,
+            self._game_mode,
+            self._legal_game,
+            self._latest_lichess_state,
+            self._board_quarter_turns,
+        )
+        self._projector_window.set_turn_indicator(corner)
 
     def _restore_move_reference(self) -> None:
         if (
