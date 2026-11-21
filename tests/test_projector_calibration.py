@@ -15,6 +15,7 @@ from src.chess_camera.projector_calibration import (
     CalibrationError,
     MappingResult,
     ValidationResult,
+    board_circle_polygon,
     coded_marker_pattern,
     decode_gray_code,
     detect_coded_marker_correspondences,
@@ -1012,11 +1013,23 @@ def test_active_reconciliation_button_stops_instead_of_restarting() -> None:
     accept.assert_called_once_with()
 
 
-def test_reconciliation_button_changes_to_stop_action() -> None:
+def test_reconciliation_waits_for_initial_blackout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from types import SimpleNamespace
     from unittest.mock import MagicMock
 
-    from src.chess_camera.camera_app import CameraWindow
+    from src.chess_camera.camera_app import CameraWindow, QTimer
+
+    callback: Callable[[], None] | None = None
+
+    def capture_timer(
+        milliseconds: int,
+        pending_callback: Callable[[], None],
+    ) -> None:
+        nonlocal callback
+        assert milliseconds == 1000
+        callback = pending_callback
 
     window = SimpleNamespace(
         _reconciliation_requested=False,
@@ -1030,7 +1043,9 @@ def test_reconciliation_button_changes_to_stop_action() -> None:
         _reference_move_tracker=MagicMock(),
         _occupancy_status=MagicMock(),
         _piece_status=MagicMock(),
+        _finish_reconciliation_blackout=MagicMock(),
     )
+    monkeypatch.setattr(QTimer, "singleShot", capture_timer)
 
     CameraWindow._begin_physical_reconciliation(window, "Starting.")
 
@@ -1038,6 +1053,10 @@ def test_reconciliation_button_changes_to_stop_action() -> None:
         "Stop reconciliation"
     )
     assert window._reconciliation_requested is True
+    assert window._reconciliation_blackout_pending is True
+    assert callback is not None
+    callback()
+    window._finish_reconciliation_blackout.assert_called_once_with(1)
 
 
 def test_reconciliation_projects_and_draws_every_mismatch(
@@ -1643,6 +1662,31 @@ def test_square_polygons_build_64_inset_quadrilaterals() -> None:
     )
     assert interpolate_grid_point(projector_grid, 4.5, 4.5) == pytest.approx(
         np.asarray([450, 450], dtype=np.float32)
+    )
+
+
+def test_board_circle_polygon_prewarps_affine_grid() -> None:
+    rows, columns = np.indices((9, 9), dtype=np.float32)
+    grid = np.stack(
+        (
+            100 + columns * 30 - rows * 4,
+            50 + columns * 6 + rows * 18,
+        ),
+        axis=2,
+    )
+
+    polygon = board_circle_polygon(grid, 4.0, 3.0, 0.2)
+    center = interpolate_grid_point(grid, 4.0, 3.0)
+
+    np.testing.assert_allclose(
+        polygon[0],
+        center + np.asarray([6.0, 1.2]),
+        atol=0.001,
+    )
+    np.testing.assert_allclose(
+        polygon[8],
+        center + np.asarray([-0.8, 3.6]),
+        atol=0.001,
     )
 
 

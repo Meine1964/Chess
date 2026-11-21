@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, TypeAlias
 
 import cv2
@@ -104,6 +104,7 @@ class StableBoardTracker:
             return self._confirmed
 
         if self._confirmed is not None:
+            detection = self._match_grid_order(detection, self._confirmed)
             confirmed_displacement = self._corner_displacement(
                 detection,
                 self._confirmed,
@@ -156,6 +157,39 @@ class StableBoardTracker:
         return (
             moving_board_pixels / board_pixels
             >= self._motion_fraction_threshold
+        )
+
+    @staticmethod
+    def _match_grid_order(
+        detection: BoardDetection,
+        reference: BoardDetection,
+    ) -> BoardDetection:
+        grid = detection.grid_points
+        candidates = [
+            np.rot90(grid, turns, axes=(0, 1))
+            for turns in range(4)
+        ]
+        flipped = np.flip(grid, axis=1)
+        candidates.extend(
+            np.rot90(flipped, turns, axes=(0, 1))
+            for turns in range(4)
+        )
+        aligned = min(
+            candidates,
+            key=lambda candidate: float(
+                np.max(
+                    np.linalg.norm(
+                        candidate - reference.grid_points,
+                        axis=2,
+                    )
+                )
+            ),
+        )
+        if np.shares_memory(aligned, grid) and np.array_equal(aligned, grid):
+            return detection
+        return replace(
+            detection,
+            grid_points=np.asarray(aligned, dtype=np.float32).copy(),
         )
 
     @staticmethod

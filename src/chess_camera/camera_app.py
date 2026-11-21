@@ -288,6 +288,12 @@ def _format_lichess_clock(milliseconds: int) -> str:
     return f"{minutes}:{seconds:02d}"
 
 
+def _format_projected_lichess_clock(milliseconds: int) -> str:
+    clock = _format_lichess_clock(milliseconds)
+    minutes, separator, seconds = clock.partition(":")
+    return f"{minutes.zfill(2)}{separator}{seconds}"
+
+
 def _displayed_lichess_clock_state(
     state: LichessGameState,
     *,
@@ -467,10 +473,10 @@ def _projected_turn_corner(
         turn = offline_game.status.turn
     if turn == "white":
         return (
-            "bottom-right",
             "bottom-left",
             "top-left",
             "top-right",
+            "bottom-right",
         )[board_quarter_turns % 4]
     return (
         "top-left",
@@ -5191,9 +5197,10 @@ class CameraWindow(QMainWindow):
         occupancy_message: str,
     ) -> None:
         self._reconciliation_requested = True
-        self._reconciliation_blackout_pending = False
+        self._reconciliation_blackout_pending = True
         self._reconciliation_reference_acceptance_pending = False
         self._reconciliation_blackout_generation += 1
+        generation = self._reconciliation_blackout_generation
         self._reconcile_button.setText("Stop reconciliation")
         self._board_widget.set_illegal_source(None)
         self._board_widget.set_guidance_move(None)
@@ -5205,6 +5212,10 @@ class CameraWindow(QMainWindow):
         self._occupancy_status.setText(occupancy_message)
         self._piece_status.setText(
             "Keep the board clear while mismatching squares are checked."
+        )
+        QTimer.singleShot(
+            1000,
+            lambda: self._finish_reconciliation_blackout(generation),
         )
 
     def _start_automatic_lichess_reconciliation(self) -> None:
@@ -6578,8 +6589,8 @@ class CameraWindow(QMainWindow):
             )
             return
         self._projector_window.set_edge_clocks(
-            _format_lichess_clock(game.state.white_time_ms),
-            _format_lichess_clock(game.state.black_time_ms),
+            _format_projected_lichess_clock(game.state.white_time_ms),
+            _format_projected_lichess_clock(game.state.black_time_ms),
             board_quarter_turns=self._board_quarter_turns,
         )
 

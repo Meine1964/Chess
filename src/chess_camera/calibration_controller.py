@@ -14,6 +14,7 @@ from .projector_calibration import (
     GrayImage,
     MappingResult,
     ValidationResult,
+    board_circle_polygon,
     bgr_to_gray,
     coded_marker_pattern,
     decode_gray_code,
@@ -643,11 +644,6 @@ class ProjectorCalibrationController(QObject):
         board_x, board_y = self._validation_coordinates[
             self._validation_index
         ]
-        projector_point = interpolate_grid_point(
-            self._mapping.projector_grid,
-            board_x,
-            board_y,
-        )
         expected = interpolate_grid_point(
             self._mapping.camera_grid,
             board_x,
@@ -657,23 +653,19 @@ class ProjectorCalibrationController(QObject):
         self._validation_expected.append(expected)
         self._validation_widths.append(square_width)
 
-        projector_square_width = self._local_projector_square_width(
+        target_polygon = board_circle_polygon(
+            self._mapping.projector_grid,
             board_x,
             board_y,
+            0.14,
         )
-        radius = max(4, min(20, round(projector_square_width * 0.14)))
         width, height = self._projector_size
         pattern = np.zeros((height, width), dtype=np.uint8)
-        cv2.circle(
+        cv2.fillPoly(
             pattern,
-            (
-                round(float(projector_point[0])),
-                round(float(projector_point[1])),
-            ),
-            radius,
+            [np.rint(target_polygon).astype(np.int32)],
             self._intensity,
-            -1,
-            cv2.LINE_AA,
+            lineType=cv2.LINE_AA,
         )
         self.status_changed.emit(
             f"Validating target {self._validation_index + 1}/"
@@ -958,34 +950,6 @@ class ProjectorCalibrationController(QObject):
         if horizontal <= 0 or vertical <= 0 or not np.all(np.isfinite(center)):
             raise CalibrationError("Could not measure local board square size.")
         return (horizontal + vertical) / 2.0
-
-    def _local_projector_square_width(self, x: float, y: float) -> float:
-        if self._mapping is None:
-            raise RuntimeError("Calibration mapping is not available.")
-        left = interpolate_grid_point(
-            self._mapping.projector_grid,
-            max(0.0, x - 0.5),
-            y,
-        )
-        right = interpolate_grid_point(
-            self._mapping.projector_grid,
-            min(8.0, x + 0.5),
-            y,
-        )
-        top = interpolate_grid_point(
-            self._mapping.projector_grid,
-            x,
-            max(0.0, y - 0.5),
-        )
-        bottom = interpolate_grid_point(
-            self._mapping.projector_grid,
-            x,
-            min(8.0, y + 0.5),
-        )
-        return (
-            float(np.linalg.norm(right - left))
-            + float(np.linalg.norm(bottom - top))
-        ) / 2.0
 
     def _fail(self, message: str) -> None:
         self._active = False

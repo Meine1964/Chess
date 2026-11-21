@@ -348,9 +348,15 @@ for both its source and destination.
 For a capture, destination occupancy remains occupied. The visual transition
 is the destination changing from the captured piece's color appearance to the
 mover's color appearance. The legal signature supplies both before and after
-piece colors; reference-image evidence must show a material destination change
-even though no empty-destination transition occurs. Regression cases include
-`a3xb4` and `Nb4xd3`.
+piece colors. When the source is visibly vacated and current color
+classification confidently identifies the destination as the mover's color,
+the destination may use a lower change floor than an ordinary move because
+similarly shaped pieces can produce little pixel change on an occupied square.
+The destination must still exceed the capture noise floor, the complete
+signature must remain unique, and source/destination color state must match the
+authoritative capture result. A source-only lift with the captured piece still
+present must remain an illegal removal. Regression cases include `a3xb4`,
+`Nb4xd3`, and the low-contrast `Rd1xh1` replacement of one rook by another.
 
 For a two-action capture, removing only the captured destination piece shall
 display pending-capture guidance naming the empty destination and every
@@ -531,14 +537,17 @@ alignment, occupancy, and correction messages shall not change it. Its tooltip
 and accessible name shall state the same turn or game-over information.
 
 When the persistent physical turn-indicator setting is enabled, an active game
-shall also project one white dot on the continuation of the h1-a8 diagonal,
-half a square beyond h1 for White's turn and half a square beyond a8 for
+shall also project one white dot on the logical a-file side beside the clocks:
+half a square beyond a1 for White's turn and half a square beyond a8 for
 Black's turn. The dot's location, rather than its color, identifies White or
 Black. Calibrated board orientation shall rotate the logical corners to the
-physical board. The dot shall remain outside the 8x8 camera-evidence area,
-yield to every actionable projector mode, and return only with idle board-black
-output. In that idle state the dot shall be steady and remain visible through
-camera observation while the playing grid stays dark. Board setup / diagnostic mode, completed games, and an Offline game waiting
+physical board. The dot shall be defined as a circle in calibrated board-plane
+coordinates and pre-warped into projector pixels so projector perspective does
+not turn it into a physical ellipse. It shall remain outside the 8x8
+camera-evidence area, yield to every actionable projector mode, and return only
+with idle board-black output. In that idle state the dot shall be steady and
+remain visible through camera observation while the playing grid stays dark.
+Board setup / diagnostic mode, completed games, and an Offline game waiting
 for first-move turn inference shall project no turn dot.
 
 ## 14. Recovery and Reset

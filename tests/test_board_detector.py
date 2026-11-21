@@ -348,6 +348,29 @@ def test_tracker_freezes_through_motion_and_confirms_stable_move() -> None:
     assert tracker.state == "stable_board"
 
 
+def test_tracker_ignores_reflected_grid_order_for_stationary_board() -> None:
+    image, _expected_corners = _perspective_board()
+    initial = BoardDetector().detect(image)
+    assert initial is not None
+    reflected_detection = replace(
+        initial,
+        grid_points=np.flip(initial.grid_points, axis=1).copy(),
+    )
+
+    class ReflectedDetector:
+        @staticmethod
+        def detect(_frame: np.ndarray):
+            return reflected_detection
+
+    tracker = StableBoardTracker(ReflectedDetector(), stable_frame_count=3)
+    tracker.reset(initial)
+    frame = np.zeros_like(image)
+
+    for _index in range(4):
+        assert tracker.detect(frame) is initial
+        assert tracker.state == "stable_board"
+
+
 def test_tracker_keeps_confirmed_board_when_detection_is_occluded() -> None:
     image, _expected_corners = _perspective_board()
     initial = BoardDetector().detect(image)

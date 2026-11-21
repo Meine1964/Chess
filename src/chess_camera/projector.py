@@ -16,7 +16,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QWidget
 
-from .projector_calibration import square_polygons
+from .projector_calibration import board_circle_polygon, square_polygons
 from .legal_game import PromotionPiece
 from .promotion_selection import (
     PROMOTION_CHOICES,
@@ -557,14 +557,14 @@ class ProjectorWindow(QWidget):
             and self._projector_grid is not None
             and self._turn_indicator_corner is not None
         ):
-            center, radius = self._turn_indicator_geometry(
+            polygon = self._turn_indicator_polygon(
                 self._projector_grid,
                 self._turn_indicator_corner,
             )
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(PROJECTED_LEGAL_MOVE)
-            painter.drawEllipse(center, radius, radius)
+            painter.drawPolygon(self._polygon(polygon))
         painter.end()
         event.accept()
 
@@ -586,32 +586,23 @@ class ProjectorWindow(QWidget):
         return promotion_choice_polygons(self._projector_grid, edge)
 
     @staticmethod
-    def _turn_indicator_geometry(
+    def _turn_indicator_polygon(
         grid: NDArray[np.float32],
         corner: TurnIndicatorCorner,
-    ) -> tuple[QPointF, float]:
-        indices = {
-            "top-left": (0, 0, 1, 1),
-            "top-right": (0, 8, 1, 7),
-            "bottom-right": (8, 8, 7, 7),
-            "bottom-left": (8, 0, 7, 1),
+    ) -> NDArray[np.float32]:
+        centers = {
+            "top-left": (-0.5, -0.5),
+            "top-right": (8.5, -0.5),
+            "bottom-right": (8.5, 8.5),
+            "bottom-left": (-0.5, 8.5),
         }
-        row, column, inward_row, inward_column = indices[corner]
-        boundary = grid[row, column]
-        inward = grid[inward_row, inward_column]
-        outward = boundary - inward
-        center = boundary + outward * 0.5
-        adjacent_row = 1 if row == 0 else 7
-        adjacent_column = 1 if column == 0 else 7
-        radius = max(
-            2.0,
-            min(
-                float(np.linalg.norm(grid[row, adjacent_column] - boundary)),
-                float(np.linalg.norm(grid[adjacent_row, column] - boundary)),
-            )
-            * 0.14,
+        x, y = centers[corner]
+        return board_circle_polygon(
+            grid,
+            x,
+            y,
+            0.14,
         )
-        return QPointF(float(center[0]), float(center[1])), radius
 
     @staticmethod
     def _edge_clock_polygon(

@@ -143,7 +143,11 @@ its prior height around the clock region's unchanged center. Rotation and
 scaling shall be composed in canonical clock space before the perspective warp
 so they cannot rotate or translate the complete region around the projector
 origin. Clock digits shall use a geometric seven-segment design with a colon
-rather than depend on an operating-system font. The clocks shall be bright
+rather than depend on an operating-system font. Times below 100 minutes shall
+use a fixed two-digit minute field so both clocks allocate identical width to
+each digit regardless of whether the minute value has one or two digits. This
+visual normalization shall not change clock values, visibility, placement, or
+countdown behavior. The clocks shall be bright
 white on the otherwise black edge, shall not replace or suppress projected
 move and correction markings, and shall inherit the same locally advancing
 display values as the on-screen clocks.
@@ -379,9 +383,13 @@ Without stable live reconciliation, it shall not:
 
 When attachment requires reconciliation and calibrated live observation is
 available, the application shall automatically black the projector, reset
-occupancy stabilization, and compare stable live observations with the current
-authoritative Lichess piece map rather than with a stale persisted physical
-map. **Reconcile physical board** remains available to restart or repeat this
+occupancy stabilization, discard camera observations for one second while the
+projector and exposure settle, reset stabilization again, and only then compare
+stable live observations with the current authoritative Lichess piece map
+rather than with a stale persisted physical map. This initial blackout wait is
+required even when the preceding output contained only clocks or turn
+indicators; projected light must not create a false first reconciliation grid.
+**Reconcile physical board** remains available to restart or repeat this
 process manually.
 
 Discrepancies are:

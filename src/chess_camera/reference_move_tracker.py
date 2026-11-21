@@ -260,6 +260,7 @@ class ReferenceMoveTracker:
             complete_signatures = prefilter_complete_signatures(
                 scores,
                 physical_signatures,
+                piece_colors=piece_colors,
                 minimum_square_change=self._minimum_square_change,
             )
             explained_residuals = {

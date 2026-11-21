@@ -89,20 +89,25 @@ def test_promotion_icon_transform_maps_canonical_square_to_perspective() -> None
         assert actual.y() == pytest.approx(float(expected[1]))
 
 
-def test_turn_indicator_uses_diagonal_corner_and_half_square_offset() -> None:
+def test_turn_indicator_prewarps_board_plane_circle() -> None:
     x_values = np.linspace(40, 280, 9, dtype=np.float32)
     y_values = np.linspace(20, 160, 9, dtype=np.float32)
     x_grid, y_grid = np.meshgrid(x_values, y_values)
     grid = np.stack((x_grid, y_grid), axis=2).astype(np.float32)
 
-    center, radius = ProjectorWindow._turn_indicator_geometry(
+    polygon = ProjectorWindow._turn_indicator_polygon(
         grid,
         "bottom-right",
     )
 
-    assert center.x() == pytest.approx(295.0)
-    assert center.y() == pytest.approx(168.75)
-    assert radius == pytest.approx(2.45)
+    center = np.mean(polygon, axis=0)
+    assert center[0] == pytest.approx(295.0)
+    assert center[1] == pytest.approx(168.75)
+    assert polygon[0, 0] - center[0] == pytest.approx(4.2, abs=0.0001)
+    assert polygon[8, 1] - center[1] == pytest.approx(
+        2.45,
+        abs=0.0001,
+    )
 
 
 def test_edge_clock_polygons_follow_logical_a_file_orientation() -> None:

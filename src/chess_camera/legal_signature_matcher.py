@@ -9,6 +9,7 @@ from .legal_game import LegalMoveSignature
 from .piece_color_classifier import PieceColorClassification
 
 LEGAL_SOURCE_CHANGE_RATIO = 0.7
+COLOR_CONFIRMED_CAPTURE_CHANGE_RATIO = 0.3
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,7 @@ def prefilter_complete_signatures(
     change_scores: FloatArray,
     signatures: Sequence[LegalMoveSignature],
     *,
+    piece_colors: Mapping[Square, PieceColorClassification] | None = None,
     minimum_square_change: float = 0.08,
 ) -> tuple[LegalMoveSignature, ...]:
     scores = np.asarray(change_scores, dtype=np.float32)
@@ -64,11 +66,22 @@ def prefilter_complete_signatures(
     if minimum_square_change <= 0:
         raise ValueError("The movement threshold must be positive.")
     relaxed_threshold = minimum_square_change * LEGAL_SOURCE_CHANGE_RATIO
+    capture_threshold = (
+        minimum_square_change * COLOR_CONFIRMED_CAPTURE_CHANGE_RATIO
+    )
     return tuple(
         signature
         for signature in signatures
         if float(scores[signature.source]) >= relaxed_threshold
-        and float(scores[signature.destination]) >= relaxed_threshold
+        and (
+            float(scores[signature.destination]) >= relaxed_threshold
+            or (
+                piece_colors is not None
+                and signature.kind in ("capture", "capture-promotion")
+                and float(scores[signature.destination]) >= capture_threshold
+                and _capture_colors_match(signature, piece_colors)
+            )
+        )
     )
 
 
@@ -108,18 +121,27 @@ def match_legal_move_signature(
         if not expected_scores:
             continue
         source_score = expected_scores.get(signature.source)
+        capture_colors_confirmed = (
+            signature.kind in ("capture", "capture-promotion")
+            and piece_colors is not None
+            and _capture_colors_match(signature, piece_colors)
+        )
         ordinary_colors_confirmed = (
             signature.kind == "ordinary"
             and piece_colors is not None
             and _changed_square_colors_match(signature, piece_colors)
         )
         required_change = (
-            minimum_square_change * LEGAL_SOURCE_CHANGE_RATIO
-            if (
-                signature.kind in ("castling", "en-passant", "promotion")
-                or ordinary_colors_confirmed
+            minimum_square_change * COLOR_CONFIRMED_CAPTURE_CHANGE_RATIO
+            if capture_colors_confirmed
+            else (
+                minimum_square_change * LEGAL_SOURCE_CHANGE_RATIO
+                if (
+                    signature.kind in ("castling", "en-passant", "promotion")
+                    or ordinary_colors_confirmed
+                )
+                else minimum_square_change
             )
-            else minimum_square_change
         )
         if (
             source_score is None

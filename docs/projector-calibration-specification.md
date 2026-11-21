@@ -439,7 +439,9 @@ The application shall also support validation at all 64 square centers.
 
 Targets should be compact filled circles, squares, or crosses on a black
 background. Their size and color shall maximize localization accuracy without
-covering adjacent squares.
+covering adjacent squares. Circular targets shall be defined in calibrated
+board-plane coordinates and pre-warped into projector pixels so they remain
+physically circular despite projector perspective.
 
 ### 12.2 Target measurement
 
@@ -507,13 +509,19 @@ After calibration is completed or restored, the application:
 
 1. Runs empty-board detection in a background worker up to five times per
    second. A new task is skipped while the previous detection is still running.
-2. Compares all 81 current camera-grid points with the calibrated grid.
-3. Remaps the 9x9 projector grid after approximately 1.5 camera pixels of
+2. Normalizes every detected 9x9 grid to the equivalent rotation or reflection
+   whose indexed points are closest to the last confirmed grid before comparing
+   geometry. A detector ordering reversal of an unchanged square board is not
+   board movement and shall never remap projected clocks, move guidance, turn
+   indicators, or reconciliation marks.
+3. Compares all 81 normalized current camera-grid points with the calibrated
+   grid.
+4. Remaps the 9x9 projector grid after approximately 1.5 camera pixels of
    movement and immediately redraws any active square.
-4. Transfers the calibrated local correction field to the moved board using a
+5. Transfers the calibrated local correction field to the moved board using a
    smooth quadratic camera-space model.
-5. Geometrically warps the stored black reference with the board motion.
-6. While an unoccupied selected square is projected, locates its illuminated
+6. Geometrically warps the stored black reference with the board motion.
+7. While an unoccupied selected square is projected, locates its illuminated
    region and compares its centroid with the expected physical-square center.
    Occupancy shall be checked with the selected UI `(row, column)` coordinate,
    which is the key type used by the authoritative accepted position, rather
@@ -521,18 +529,18 @@ After calibration is completed or restored, the application:
    continue camera-grid drift monitoring but shall not use the illuminated
    centroid as projector-plane evidence, because projection onto a raised
    piece is displaced by parallax.
-7. Accepts in-plane board movement when the updated square remains aligned.
-8. Requires two consecutive projected-square or remapping failures before
+8. Accepts in-plane board movement when the updated square remains aligned.
+9. Requires two consecutive projected-square or remapping failures before
    invalidation.
-9. Silently retains the last confirmed mapping while a hand, piece, or other
+10. Silently retains the last confirmed mapping while a hand, piece, or other
    temporary obstruction prevents board detection. A missed detection never
    constitutes evidence of board movement or calibration loss.
-10. After a positive remap, follows the board immediately but waits for five
+11. After a positive remap, follows the board immediately but waits for five
    consecutive visible stable-board checks before resuming optical failure
    counting.
-11. Classifies failure after a camera-grid remap as camera calibration loss and
+12. Classifies failure after a camera-grid remap as camera calibration loss and
     failure with a stable camera grid as projector calibration loss.
-12. Makes the projector black and changes the corresponding persistent UI
+13. Makes the projector black and changes the corresponding persistent UI
     indicator to red after confirmed calibration loss. The last optically
     verified mesh remains available only as diagnostic evidence; it shall not
     remain usable for square projection after calibration loss.

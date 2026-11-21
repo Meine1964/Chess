@@ -10,6 +10,7 @@ from src.chess_camera.camera_app import (
     _current_lichess_game_text,
     _displayed_lichess_clock_state,
     _format_lichess_clock,
+    _format_projected_lichess_clock,
     _illegal_correction_message,
     _lichess_board_state,
     _lichess_game_information,
@@ -69,18 +70,18 @@ def test_promotion_edge_follows_physical_board_orientation() -> None:
     assert _physical_promotion_edge(move, 3) == "left"
 
 
-def test_projected_turn_dot_tracks_diagonal_corner_and_board_orientation() -> None:
+def test_projected_turn_dot_tracks_a_file_and_board_orientation() -> None:
     from types import SimpleNamespace
 
     game = LegalGame()
 
     assert (
         _projected_turn_corner(True, "offline-game", game, None, 0)
-        == "bottom-right"
+        == "bottom-left"
     )
     assert (
         _projected_turn_corner(True, "offline-game", game, None, 1)
-        == "bottom-left"
+        == "top-left"
     )
     game.apply_move((6, 4), (4, 4))
     assert (
@@ -1159,6 +1160,11 @@ def test_lichess_game_state_message_reports_clocks_and_result() -> None:
         "#000000",
         "Black to move (Lichess)",
     )
+
+
+def test_projected_lichess_clocks_use_fixed_minute_width() -> None:
+    assert _format_projected_lichess_clock(9 * 60_000 + 42_000) == "09:42"
+    assert _format_projected_lichess_clock(10 * 60_000 + 5_000) == "10:05"
 
 
 def test_displayed_lichess_clock_counts_down_only_active_player() -> None:

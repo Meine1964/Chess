@@ -1339,8 +1339,51 @@ def interpolate_grid_point(grid: FloatArray, x: float, y: float) -> FloatArray:
         raise ValueError("Grid must have shape (9, 9, 2).")
     if not 0 <= x <= 8 or not 0 <= y <= 8:
         raise ValueError("Board coordinates must be between 0 and 8.")
+    return _interpolate_grid_point_extrapolated(grid, x, y)
+
+
+def board_circle_polygon(
+    grid: FloatArray,
+    x: float,
+    y: float,
+    radius: float,
+    *,
+    point_count: int = 32,
+) -> FloatArray:
+    if grid.shape != (9, 9, 2):
+        raise ValueError("Grid must have shape (9, 9, 2).")
+    if radius <= 0:
+        raise ValueError("Circle radius must be positive.")
+    if point_count < 8:
+        raise ValueError("A circle polygon requires at least eight points.")
+    angles = np.linspace(
+        0.0,
+        2.0 * np.pi,
+        point_count,
+        endpoint=False,
+    )
+    return np.asarray(
+        [
+            _interpolate_grid_point_extrapolated(
+                grid,
+                x + radius * float(np.cos(angle)),
+                y + radius * float(np.sin(angle)),
+            )
+            for angle in angles
+        ],
+        dtype=np.float32,
+    )
+
+
+def _interpolate_grid_point_extrapolated(
+    grid: FloatArray,
+    x: float,
+    y: float,
+) -> FloatArray:
     column = min(int(x), 7)
     row = min(int(y), 7)
+    column = max(column, 0)
+    row = max(row, 0)
     local_x = x - column
     local_y = y - row
     corners = np.asarray(

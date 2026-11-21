@@ -68,6 +68,47 @@ def test_complete_signature_prefilter_preserves_partial_action_set() -> None:
     assert pending.destination == (4, 1)
 
 
+def test_matches_color_confirmed_low_contrast_rook_capture() -> None:
+    game = LegalGame(
+        "rn2kb1r/p4ppp/3qpn2/1p1p4/2P2P2/4PQ1P/"
+        "PPB2KP1/RNBr3R b - - 0 1"
+    )
+    scores = _scores(
+        ((7, 3), 0.122),
+        ((7, 7), 0.028),
+        ((7, 4), 0.048),
+    )
+    colors = {
+        (7, 3): PieceColorClassification("empty", 0.01, 0.2),
+        (7, 7): PieceColorClassification("black", 0.03, 0.12),
+    }
+
+    candidates = prefilter_complete_signatures(
+        scores,
+        game.physical_move_signatures,
+        piece_colors=colors,
+    )
+    match = match_legal_move_signature(
+        scores,
+        candidates,
+        piece_colors=colors,
+    )
+    source_only_candidates = prefilter_complete_signatures(
+        scores,
+        game.physical_move_signatures,
+        piece_colors={
+            **colors,
+            (7, 7): PieceColorClassification("white", 0.02, 0.18),
+        },
+    )
+
+    assert tuple(signature.uci for signature in candidates) == ("d1h1",)
+    assert match.signature is not None
+    assert match.signature.uci == "d1h1"
+    assert match.signature.kind == "capture"
+    assert source_only_candidates == ()
+
+
 def test_matches_legal_move_with_weaker_vacated_source_evidence() -> None:
     game = LegalGame()
 
