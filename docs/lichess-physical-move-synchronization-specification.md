@@ -83,46 +83,24 @@ hide an unperformed opponent move.
 
 Opponent-move guidance shall remain projected until camera evidence shows both
 that a real hand or arm entered the board region and that it subsequently left.
-The detector shall expose the lifecycle states **arming**, **entering**,
-**manipulating**, **exiting**, and **departed**. It shall:
+Lichess guidance shall use the same calibrated boundary-crossing detector as
+the visible edge indicator. It shall:
 
-- continuously adapt its no-hand baseline before confirmed manipulation so
-  projector warm-up, refresh variation, and camera exposure settling do not
-  count as a hand;
-- remove smooth local photometric drift before activity segmentation so a
-  persistent camera auto-exposure or projector-illumination field cannot hold
-  the detector in **manipulating** after the hand has left, while retaining
-  structural hand, arm, and piece-boundary evidence;
-- use a projection mask while arming and a separate expected-change mask after
-  entry;
-- construct the expected-change mask from the union of every changed square in
-  the pending move, including auxiliary capture, castling, en passant, and
-  promotion squares, then apply a bounded square-size-scaled image-space guard
-  band to that union so adjacent edge squares cannot leave gaps;
-- confirm entry only when one connected activity component straddles the
-  calibrated board boundary with material pixels in both the outside and
-  inside edge bands, rather than accepting board-confined illumination or
-  unrelated activity wholly outside the board; and
-- preserve the pre-manipulation no-hand reference after activity begins, so a
-  stationary hand is not mistaken for a departed hand merely because the image
-  stopped changing.
+- arm against the projected scene before accepting activity;
+- latch entry when one connected component contains material activity inside
+  the board, outside the board, and at the outer rim of the one-square
+  observation halo;
+- keep guidance projected while that boundary crossing remains active; and
+- begin blackout and move verification on the first subsequent clear boundary
+  observation.
 
-After confirmed entry, outside-halo changes alone shall no longer be hand
-evidence. Blackout shall begin only after the non-ignored physical board,
-including its inside edge band, returns to the no-hand reference for the
-required consecutive observations. A stationary hand remaining on the board
-shall therefore keep guidance visible, while a person, chair, shadow, or
-illumination change wholly outside the calibrated board cannot block
-departure. The guard band shall scale with calibrated square size. Before
-confirmed entry it shall remain narrow enough to detect a boundary crossing.
-After entry, expected-move attribution may extend no farther than half a
-calibrated square from the union of expected squares, including across the
-board boundary, so an edge-piece silhouette or shadow cannot impersonate a
-hand indefinitely. Runtime diagnostics shall record initial projection or
-reprojection, first confirmed hand entry, blackout after departure, and
-black-frame verification readiness once per lifecycle. They shall also expose
-the current hand lifecycle state, guard-band size, largest qualifying activity
-component, and its inside/outside edge-band pixel counts.
+Board-confined changes after entry, including the completed opponent move,
+projector spill, piece silhouettes, or shadows, shall not delay blackout once
+the boundary detector reports clear. Runtime diagnostics shall record initial
+projection or reprojection, first confirmed boundary entry, blackout after
+departure, and black-frame verification readiness once per lifecycle. The
+edge-indicator diagnostics remain the authoritative component measurements for
+this lifecycle.
 
 When exactly one Lichess move is pending, its legal physical signature and
 resulting position are authoritative verification inputs, distinct from the
@@ -138,16 +116,11 @@ results shall remain rejected. Offline and local-move discovery shall retain
 their ordinary candidate-ranking rules.
 
 Implementation status (2026-11-21): authoritative required-signature
-verification, separate pre-entry and post-entry guard bands over the union of
-expected squares, smooth local photometric-drift normalization, explicit hand
-lifecycle states, calibrated boundary-crossing entry, board-only departure,
-and decision diagnostics are implemented. The smooth illumination estimate is
-normalized independently inside and outside the board so external changes
-cannot manufacture activity across the calibrated boundary. Focused
-regressions cover exact `e8-f8` fallback, wrong-relocation rejection, adjacent
-edge-square spill, stationary activity, departure, persistent exposure drift,
-halo-only activity, genuine boundary crossing, and unrelated halo obstruction.
-The guard band is bounded and calibrated by square size; automatic camera
+verification, shared boundary-detector guidance lifecycle, smooth local
+photometric-drift normalization, outer-halo entry qualification, and decision
+diagnostics are implemented. Focused regressions cover exact `e8-f8` fallback,
+wrong-relocation rejection, halo-only activity, genuine boundary crossing,
+completed edge-piece changes, and transition diagnostics. Automatic camera
 measurement of projector-specific optical spill remains a possible later
 refinement rather than an acceptance dependency.
 

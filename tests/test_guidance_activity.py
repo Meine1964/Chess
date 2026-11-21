@@ -659,7 +659,6 @@ def test_pending_lichess_guidance_has_no_fixed_timeout() -> None:
         _projector_window=MagicMock(),
         _board_widget=MagicMock(),
         _alignment_monitor=MagicMock(),
-        _guidance_activity_detector=MagicMock(),
         _projector_status=MagicMock(),
         _lichess_guidance_generation=0,
         _lichess_guidance_projection_active=False,
@@ -684,7 +683,7 @@ def test_pending_lichess_guidance_has_no_fixed_timeout() -> None:
     window._board_widget.set_guidance_move.assert_called_once_with(
         ((1, 4), (3, 4))
     )
-    window._guidance_activity_detector.reset.assert_called_once_with()
+    assert window._lichess_guidance_edge_entered is False
     window._projector_status.setText.assert_called_once_with(
         "Projecting pending Lichess move e7-e5 until the hand leaves the "
         "board."
@@ -904,40 +903,34 @@ def test_stable_blackout_observations_finish_guidance_early() -> None:
     )
 
 
-def test_active_manipulation_keeps_opponent_guidance_projected() -> None:
-    detector = MagicMock()
-    detector.observe.return_value = False
-    detector.manipulation_active = True
+def test_boundary_departure_starts_lichess_guidance_blackout() -> None:
     window = SimpleNamespace(
-        _latest_frame=object(),
-        _calibration_result=SimpleNamespace(
-            mapping=SimpleNamespace(camera_grid=object())
-        ),
         _lichess_guidance_projection_active=True,
-        _lichess_guidance_squares=((1, 4), (3, 4)),
+        _board_edge_indicator_active=False,
+        _lichess_guidance_edge_entered=False,
         _lichess_guidance_activity_logged=False,
         _lichess_guidance_generation=3,
-        _guidance_activity_detector=detector,
         _projector_status=MagicMock(),
         _record_runtime_diagnostic=MagicMock(),
         _begin_lichess_guidance_observation=MagicMock(),
     )
 
     CameraWindow._observe_lichess_guidance_activity(window)
-    CameraWindow._observe_lichess_guidance_activity(window)
-
     window._begin_lichess_guidance_observation.assert_not_called()
-    detector.observe.assert_called_with(
-        window._latest_frame,
-        window._calibration_result.mapping.camera_grid,
-        ((1, 4), (3, 4)),
-    )
-    assert detector.observe.call_count == 2
+
+    window._board_edge_indicator_active = True
+    CameraWindow._observe_lichess_guidance_activity(window)
+    window._begin_lichess_guidance_observation.assert_not_called()
+    assert window._lichess_guidance_edge_entered
     window._projector_status.setText.assert_called_with(
         "Opponent move in progress; guidance remains projected until the hand "
         "leaves the board."
     )
     window._record_runtime_diagnostic.assert_called_once()
+
+    window._board_edge_indicator_active = False
+    CameraWindow._observe_lichess_guidance_activity(window)
+    window._begin_lichess_guidance_observation.assert_called_once_with()
 
 
 def test_offline_move_marking_uses_fixed_one_second_intervals() -> None:

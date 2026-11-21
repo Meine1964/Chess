@@ -1069,10 +1069,6 @@ class CameraWindow(QMainWindow):
             required_agreement=2,
             settling_observations=3,
         )
-        self._guidance_activity_detector = GuidanceActivityDetector(
-            rolling_baseline_before_activity=True,
-            require_halo_activity=True,
-        )
         self._board_edge_activity_detector = BoardEdgeActivityDetector()
         self._board_edge_indicator_active = False
         self._projector_window.projection_changed.connect(
@@ -1166,6 +1162,7 @@ class CameraWindow(QMainWindow):
         self._lichess_guidance_squares: (
             tuple[tuple[int, int], ...]
         ) = ()
+        self._lichess_guidance_edge_entered = False
         self._lichess_guidance_activity_logged = False
         self._offline_move_marking_active = False
         self._offline_move_marking_blackout_pending = False
@@ -4957,8 +4954,8 @@ class CameraWindow(QMainWindow):
         self._lichess_guidance_blackout_pending = False
         self._lichess_guidance_reprojection_pending = False
         self._lichess_guidance_squares = guidance_squares
+        self._lichess_guidance_edge_entered = False
         self._lichess_guidance_activity_logged = False
-        self._guidance_activity_detector.reset()
         status_message = (
             f"Projecting pending Lichess move {move_name} until the hand "
             "leaves the board."
@@ -4984,41 +4981,28 @@ class CameraWindow(QMainWindow):
         return True
 
     def _observe_lichess_guidance_activity(self) -> None:
-        if (
-            self._latest_frame is None
-            or self._calibration_result is None
-            or not self._lichess_guidance_projection_active
-        ):
+        if not self._lichess_guidance_projection_active:
             return
-        try:
-            manipulation_settled = self._guidance_activity_detector.observe(
-                self._latest_frame,
-                self._calibration_result.mapping.camera_grid,
-                self._lichess_guidance_squares,
-            )
-        except (ValueError, RuntimeError, cv2.error) as error:
-            self._projector_status.setText(
-                f"Opponent-move hand detection unavailable: {error}"
-            )
+        if not self._board_edge_indicator_active:
+            if self._lichess_guidance_edge_entered:
+                self._begin_lichess_guidance_observation()
             return
-        if manipulation_settled:
-            self._begin_lichess_guidance_observation()
-        elif self._guidance_activity_detector.manipulation_active:
-            status_message = (
-                "Opponent move in progress; guidance remains projected until "
-                "the hand leaves the board."
+        self._lichess_guidance_edge_entered = True
+        status_message = (
+            "Opponent move in progress; guidance remains projected until "
+            "the hand leaves the board."
+        )
+        self._projector_status.setText(status_message)
+        if not self._lichess_guidance_activity_logged:
+            self._lichess_guidance_activity_logged = True
+            self._record_runtime_diagnostic(
+                "lichess-guidance-hand-entered",
+                status_message,
+                details={
+                    "generation": self._lichess_guidance_generation,
+                },
+                include_images=True,
             )
-            self._projector_status.setText(status_message)
-            if not self._lichess_guidance_activity_logged:
-                self._lichess_guidance_activity_logged = True
-                self._record_runtime_diagnostic(
-                    "lichess-guidance-hand-entered",
-                    status_message,
-                    details={
-                        "generation": self._lichess_guidance_generation,
-                    },
-                    include_images=True,
-                )
 
     def _begin_lichess_guidance_observation(self) -> None:
         if not self._lichess_guidance_projection_active:
@@ -5027,7 +5011,7 @@ class CameraWindow(QMainWindow):
         self._lichess_guidance_projection_active = False
         self._lichess_guidance_blackout_pending = True
         self._lichess_guidance_reprojection_pending = True
-        self._guidance_activity_detector.reset()
+        self._lichess_guidance_edge_entered = False
         self._projector_window.show_black()
         self._alignment_monitor.set_black()
         self._lichess_blackout_settling_detector.reset()
@@ -5119,8 +5103,8 @@ class CameraWindow(QMainWindow):
         self._lichess_guidance_blackout_pending = False
         self._lichess_guidance_reprojection_pending = False
         self._lichess_guidance_squares = ()
+        self._lichess_guidance_edge_entered = False
         self._lichess_guidance_activity_logged = False
-        self._guidance_activity_detector.reset()
         self._lichess_blackout_settling_detector.reset()
 
     def _restore_pending_lichess_guidance_after_no_change(
@@ -7037,25 +7021,16 @@ class CameraWindow(QMainWindow):
                     for row, column in self._lichess_guidance_squares
                 ],
                 "detector_manipulation_active": (
-                    self._guidance_activity_detector.manipulation_active
+                    self._lichess_guidance_edge_entered
                 ),
                 "lifecycle_state": (
-                    self._guidance_activity_detector.lifecycle_state
+                    "manipulating"
+                    if self._board_edge_indicator_active
+                    else "arming"
                 ),
-                "guard_band_pixels": (
-                    self._guidance_activity_detector.guard_band_pixels
-                ),
-                "largest_component_pixels": (
-                    self._guidance_activity_detector
-                    .largest_component_pixels
-                ),
-                "largest_component_halo_pixels": (
-                    self._guidance_activity_detector
-                    .largest_component_halo_pixels
-                ),
-                "largest_component_inside_pixels": (
-                    self._guidance_activity_detector
-                    .largest_component_inside_pixels
+                "boundary_active": self._board_edge_indicator_active,
+                "edge_entry_confirmed": (
+                    self._lichess_guidance_edge_entered
                 ),
             },
             "illegal_correction": {
