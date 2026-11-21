@@ -14,6 +14,7 @@ from src.chess_camera.lichess_client import (
     LichessPollingSnapshot,
     LichessReadOnlyClient,
     OngoingGame,
+    PlayerColor,
 )
 from src.chess_camera.lichess_worker import (
     LichessAiGameCreationWorker,
@@ -131,6 +132,9 @@ class ClosedAccountStreamClient:
 
 
 class PollingFallbackClient:
+    def __init__(self) -> None:
+        self.snapshot_calls: list[str] = []
+
     def stream_account_events(
         self,
         *,
@@ -152,6 +156,33 @@ class PollingFallbackClient:
                 "Stockfish level 1",
                 True,
             ),
+        )
+
+    def get_game_snapshot(
+        self,
+        game_id: str,
+    ) -> LichessPollingSnapshot:
+        self.snapshot_calls.append(game_id)
+        return LichessPollingSnapshot(
+            LichessGameFull(
+                game_id,
+                chess.STARTING_FEN,
+                LichessPlayer("white", "Meine", 1500),
+                LichessPlayer("black", "Stockfish level 1", None),
+                LichessGameState(
+                    (),
+                    chess.STARTING_FEN,
+                    "white",
+                    173000,
+                    604000,
+                    5000,
+                    5000,
+                    "started",
+                    None,
+                    "*",
+                ),
+            ),
+            True,
         )
 
 class MultiplePollingGamesClient:
@@ -178,6 +209,33 @@ class MultiplePollingGamesClient:
     def get_ongoing_games(self) -> tuple[OngoingGame, ...]:
         return self.games
 
+    def get_game_snapshot(
+        self,
+        game_id: str,
+    ) -> LichessPollingSnapshot:
+        game = next(item for item in self.games if item.game_id == game_id)
+        return LichessPollingSnapshot(
+            LichessGameFull(
+                game_id,
+                chess.STARTING_FEN,
+                LichessPlayer("white", "White", None),
+                LichessPlayer("black", "Black", None),
+                LichessGameState(
+                    (),
+                    game.current_fen,
+                    "white",
+                    300000,
+                    300000,
+                    0,
+                    0,
+                    "started",
+                    None,
+                    "*",
+                ),
+            ),
+            True,
+        )
+
 
 class SubmissionClient:
     def __init__(
@@ -186,10 +244,16 @@ class SubmissionClient:
         submit_error: Exception | None = None,
         server_moves: tuple[str, ...] = (),
         refresh_error: Exception | None = None,
+        status: str = "started",
+        winner: PlayerColor | None = None,
+        result: str = "*",
     ) -> None:
         self._submit_error = submit_error
         self._server_moves = server_moves
         self._refresh_error = refresh_error
+        self._status = status
+        self._winner = winner
+        self._result = result
         self.submissions: list[tuple[str, str]] = []
 
     def submit_move(self, game_id: str, uci: str) -> None:
@@ -211,9 +275,9 @@ class SubmissionClient:
             0,
             0,
             0,
-            "started",
-            None,
-            "*",
+            self._status,
+            self._winner,
+            self._result,
         )
         return LichessPollingSnapshot(
             LichessGameFull(
@@ -328,7 +392,7 @@ def test_game_action_worker_submits_draw_and_resignation() -> None:
 
 
 def test_move_submission_worker_emits_acceptance() -> None:
-    client = SubmissionClient()
+    client = SubmissionClient(server_moves=("e2e4",))
     worker = LichessMoveSubmissionWorker(
         cast(LichessReadOnlyClient, client),
         "game1234",
@@ -344,6 +408,59 @@ def test_move_submission_worker_emits_acceptance() -> None:
 
     assert client.submissions == [("game1234", "e2e4")]
     assert accepted == [("game1234", "e2e4")]
+
+
+def test_successful_submission_is_rejected_after_time_forfeit() -> None:
+    client = SubmissionClient(
+        status="outoftime",
+        winner="black",
+        result="0-1",
+    )
+    worker = LichessMoveSubmissionWorker(
+        cast(LichessReadOnlyClient, client),
+        "game1234",
+        "e2e4",
+        (),
+    )
+    rejected: list[tuple[str, str, str]] = []
+    worker.rejected.connect(
+        lambda game_id, uci, message: rejected.append(
+            (game_id, uci, message)
+        )
+    )
+
+    worker.run()
+
+    assert len(rejected) == 1
+    assert "outoftime; result 0-1" in rejected[0][2]
+
+
+def test_polling_submission_confirms_by_authoritative_fen() -> None:
+    confirmed_board = chess.Board()
+    confirmed_board.push_uci("e2e4")
+    expected_board = confirmed_board.copy()
+    expected_board.push_uci("e7e5")
+    client = SubmissionClient(
+        server_moves=("e2e4", "e7e5"),
+    )
+    worker = LichessMoveSubmissionWorker(
+        cast(LichessReadOnlyClient, client),
+        "game1234",
+        "e7e5",
+        (),
+        confirmed_fen=confirmed_board.fen(),
+    )
+    accepted: list[tuple[str, str]] = []
+    worker.accepted.connect(
+        lambda game_id, uci: accepted.append((game_id, uci))
+    )
+
+    worker.run()
+
+    assert accepted == [("game1234", "e7e5")]
+    assert expected_board.fen() == client.get_game_snapshot(
+        "game1234"
+    ).game.state.fen
 
 
 def test_move_submission_worker_resolves_lost_response_from_history() -> None:
@@ -528,8 +645,9 @@ def test_worker_reports_when_account_stream_closes() -> None:
 
 
 def test_worker_falls_back_to_read_only_polling() -> None:
+    client = PollingFallbackClient()
     worker = LichessConnectionWorker(
-        cast(LichessReadOnlyClient, PollingFallbackClient()),
+        cast(LichessReadOnlyClient, client),
         wait=lambda delay: delay == 5,
     )
     statuses: list[str] = []
@@ -546,7 +664,11 @@ def test_worker_falls_back_to_read_only_polling() -> None:
         "instead."
     ]
     assert account_events[0].game_id == "oozTO3xk"
-    assert isinstance(game_events[0], LichessPollingSnapshot)
+    snapshot = cast(LichessPollingSnapshot, game_events[0])
+    assert client.snapshot_calls == ["oozTO3xk"]
+    assert snapshot.clocks_available
+    assert snapshot.game.state.white_time_ms == 173000
+    assert snapshot.game.state.black_time_ms == 604000
 
 
 def test_polling_fetches_terminal_move_when_game_disappears() -> None:
@@ -591,6 +713,33 @@ def test_polling_fetches_terminal_move_when_game_disappears() -> None:
             game_id: str,
         ) -> LichessPollingSnapshot:
             self.snapshot_calls.append(game_id)
+            if self.ongoing_calls == 1:
+                state = LichessGameState(
+                    moves,
+                    before_mate.fen(),
+                    "black",
+                    120000,
+                    300000,
+                    0,
+                    0,
+                    "started",
+                    None,
+                    "*",
+                )
+                return LichessPollingSnapshot(
+                    LichessGameFull(
+                        game_id,
+                        chess.STARTING_FEN,
+                        LichessPlayer("white", "Meine", None),
+                        LichessPlayer(
+                            "black",
+                            "Stockfish level 1",
+                            None,
+                        ),
+                        state,
+                    ),
+                    True,
+                )
             state = LichessGameState(
                 (*moves, "h4f2"),
                 after_mate.fen(),
@@ -629,13 +778,97 @@ def test_polling_fetches_terminal_move_when_game_disappears() -> None:
     assert worker._poll_ongoing_game("Fz54fOC3") is None
 
     final_snapshot = cast(LichessPollingSnapshot, game_events[-1])
-    assert client.snapshot_calls == ["Fz54fOC3"]
+    assert client.snapshot_calls == ["Fz54fOC3", "Fz54fOC3"]
     assert final_snapshot.game.initial_fen == before_mate.fen()
     assert final_snapshot.game.state.moves == ("h4f2",)
     assert final_snapshot.game.state.fen == after_mate.fen()
     assert final_snapshot.game.state.status == "mate"
     assert final_snapshot.game.state.result == "0-1"
     assert worker._polling_game_id is None
+
+
+def test_terminal_timeout_rolls_back_uncommitted_local_move() -> None:
+    official_moves = ("e2e4", "e7e5")
+    official_board = chess.Board()
+    for uci in official_moves:
+        official_board.push_uci(uci)
+    optimistic_board = official_board.copy()
+    optimistic_board.push_uci("g1f3")
+
+    class TimedOutGameClient:
+        def __init__(self) -> None:
+            self.ongoing_calls = 0
+
+        def get_ongoing_games(self) -> tuple[OngoingGame, ...]:
+            self.ongoing_calls += 1
+            if self.ongoing_calls > 1:
+                return ()
+            return (
+                OngoingGame(
+                    "timeout1",
+                    "timeout1abcd",
+                    "white",
+                    official_board.fen(),
+                    "Stockfish level 1",
+                    True,
+                    "e7e5",
+                ),
+            )
+
+        def get_game_snapshot(
+            self,
+            game_id: str,
+        ) -> LichessPollingSnapshot:
+            status = "started" if self.ongoing_calls == 1 else "outoftime"
+            result = "*" if status == "started" else "0-1"
+            winner = None if status == "started" else "black"
+            return LichessPollingSnapshot(
+                LichessGameFull(
+                    game_id,
+                    chess.STARTING_FEN,
+                    LichessPlayer("white", "Meine", None),
+                    LichessPlayer(
+                        "black",
+                        "Stockfish level 1",
+                        None,
+                    ),
+                    LichessGameState(
+                        official_moves,
+                        official_board.fen(),
+                        "white",
+                        0,
+                        610000,
+                        5000,
+                        5000,
+                        status,
+                        winner,
+                        result,
+                    ),
+                ),
+                True,
+            )
+
+    client = TimedOutGameClient()
+    worker = LichessConnectionWorker(
+        cast(LichessReadOnlyClient, client)
+    )
+    game_events: list[object] = []
+    worker.game_event_received.connect(game_events.append)
+
+    assert worker._poll_ongoing_game(None) == "timeout1"
+    assert worker.note_local_move(
+        "timeout1",
+        "g1f3",
+        optimistic_board.fen(),
+    )
+    assert worker._poll_ongoing_game("timeout1") is None
+
+    final_snapshot = cast(LichessPollingSnapshot, game_events[-1])
+    assert final_snapshot.game.state.moves == ()
+    assert final_snapshot.game.state.fen == official_board.fen()
+    assert final_snapshot.game.state.status == "outoftime"
+    assert final_snapshot.game.state.winner == "black"
+    assert final_snapshot.game.state.result == "0-1"
 
 
 def test_polling_waits_for_selection_when_multiple_games_are_active() -> None:

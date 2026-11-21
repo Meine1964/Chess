@@ -259,6 +259,8 @@ def test_connected_status_enables_disconnect_button() -> None:
         _lichess_disconnect_requested=False,
         _lichess_connection_button=MagicMock(),
         _lichess_status=MagicMock(),
+        _latest_lichess_game=None,
+        _lichess_clocks_available=False,
         _record_runtime_diagnostic=MagicMock(),
         _show_lichess_connected=lambda: CameraWindow._show_lichess_connected(
             window
@@ -286,6 +288,7 @@ def test_polling_result_establishes_connected_button_state() -> None:
         _show_lichess_connected=MagicMock(),
         _mark_lichess_game_finished=MagicMock(),
         _lichess_game_id=None,
+        _latest_lichess_game=None,
         _preferred_lichess_game_id="",
         _last_lichess_game_prompt_ids=frozenset(),
         _lichess_game_selector=MagicMock(),
@@ -300,6 +303,89 @@ def test_polling_result_establishes_connected_button_state() -> None:
     CameraWindow._lichess_ongoing_games_received(window, ())
 
     window._show_lichess_connected.assert_called_once_with()
+
+
+def test_waiting_status_does_not_overwrite_time_forfeit() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    game = LichessGameFull(
+        "timeout1",
+        "unused",
+        LichessPlayer("white", "Local", 1510),
+        LichessPlayer("black", "Remote", 1490),
+        LichessGameState(
+            (),
+            "unused",
+            "white",
+            0,
+            610000,
+            5000,
+            5000,
+            "outoftime",
+            "black",
+            "0-1",
+        ),
+    )
+    window = SimpleNamespace(
+        _show_lichess_connected=MagicMock(),
+        _latest_lichess_game=game,
+        _lichess_clocks_available=True,
+        _lichess_status=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
+    )
+
+    CameraWindow._lichess_connection_status_changed(
+        window,
+        "Connected to Lichess by polling; waiting for a game.",
+    )
+
+    message = window._lichess_status.setText.call_args.args[0]
+    assert "White lost on time; result 0-1" in message
+    assert "waiting for a game" not in message
+
+
+def test_no_ongoing_games_retains_terminal_game_information() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    terminal_game = LichessGameFull(
+        "timeout1",
+        "unused",
+        LichessPlayer("white", "Local", 1510),
+        LichessPlayer("black", "Remote", 1490),
+        LichessGameState(
+            (),
+            "unused",
+            "white",
+            0,
+            610000,
+            5000,
+            5000,
+            "outoftime",
+            "black",
+            "0-1",
+        ),
+    )
+    window = SimpleNamespace(
+        _show_lichess_connected=MagicMock(),
+        _mark_lichess_game_finished=MagicMock(),
+        _lichess_game_id=terminal_game.game_id,
+        _latest_lichess_game=terminal_game,
+        _preferred_lichess_game_id=terminal_game.game_id,
+        _last_lichess_game_prompt_ids=frozenset(),
+        _lichess_game_selector=MagicMock(),
+        _clear_lichess_game_information=MagicMock(),
+        _start_new_lichess_game_button=MagicMock(),
+        _lichess_ai_creation_thread=None,
+        _pending_created_lichess_game_id=None,
+        _rebuild_lichess_games_menu=MagicMock(),
+        _lichess_worker=None,
+    )
+
+    CameraWindow._lichess_ongoing_games_received(window, ())
+
+    window._clear_lichess_game_information.assert_not_called()
 
 
 def test_promotion_blackout_detects_choice_and_shows_confirmation() -> None:
@@ -1351,6 +1437,37 @@ def test_lichess_game_information_formats_completed_game() -> None:
         "White: Local (1510)",
         "White clock: 1:05",
         "Status: mate; result 1-0",
+    )
+
+
+def test_lichess_game_information_formats_time_forfeit() -> None:
+    game = LichessGameFull(
+        "timeout1",
+        "unused",
+        LichessPlayer("white", "Local", 1510),
+        LichessPlayer("black", "Remote", 1490),
+        LichessGameState(
+            (),
+            "unused",
+            "white",
+            0,
+            610000,
+            5000,
+            5000,
+            "outoftime",
+            "black",
+            "0-1",
+        ),
+    )
+
+    assert _lichess_game_information(
+        game,
+        clocks_available=True,
+    )[-1] == "Status: White lost on time; result 0-1"
+    assert "White lost on time; result 0-1" in (
+        _lichess_polling_snapshot_message(
+            LichessPollingSnapshot(game, True)
+        )
     )
 
 

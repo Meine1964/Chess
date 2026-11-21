@@ -89,11 +89,17 @@ result. Full snapshots establish player identity and state; incremental state
 events update clocks, turn, status, and result without discarding player
 identity.
 
-When polling cannot provide authoritative clocks, both clocks shall display
-`--:--` rather than `0:00`. Zero is a valid displayed clock only when the
-transport identifies clock values as available. Before an active game is
-loaded, the panel shall explicitly report that no game information is
-available rather than displaying stale values from another selected game.
+Polling shall retrieve an authoritative non-streaming JSON game export for the
+selected game on every polling interval and use its move history, White and
+Black clock values, increments, status, and result. Both clocks shall therefore
+remain visible during timed games even when the long-lived Board event stream
+is unavailable. The export clock samples shall be advanced by elapsed server
+time for the side to move. When no authoritative export can be retrieved,
+polling shall fail explicitly rather than continue a timed game with hidden
+clocks. Zero is a valid displayed clock only when the authoritative export
+reports zero. Before an active game is loaded, the panel shall explicitly
+report that no game information is available rather than displaying stale
+values from another selected game.
 
 ## 3. Scope
 
@@ -210,6 +216,19 @@ emitted may polling return to the selection-required state. If final-snapshot
 retrieval fails, the cursor shall remain intact and polling shall report the
 failure through its normal retry path rather than silently dropping the final
 move.
+
+The final authoritative snapshot shall also supersede an optimistic local move
+that was submitted concurrently with game termination but is absent from the
+official move history. Polling shall rebuild its relative move suffix from the
+official history and its remembered baseline, remove the uncommitted local
+move, and emit the terminal status, winner, result, and clocks. In particular,
+a time-forfeit snapshot ending before the optimistic move shall be accepted as
+authoritative rather than treated as an impossible backward transition.
+
+After a terminal snapshot, the main Lichess status and retained current-game
+information shall state the result and termination reason. A time forfeit shall
+be presented explicitly, for example `White lost on time; result 0-1`, and
+shall not be overwritten by the generic polling text `waiting for a game`.
 
 ## 6. Runtime States
 
@@ -453,6 +472,18 @@ physical board shall start manipulation tracking but shall not remove the
 guidance. The guidance shall be removed only after the manipulation has become
 quiet for the required consecutive observations, indicating that the hand has
 left the board. It shall not use a fixed display timeout.
+
+Physical move guidance shall be projected only after the complete White-side
+board orientation is resolved. While orientation is unresolved, the logical
+source and destination shall remain highlighted in the Physical position UI,
+the projector shall remain black, and the pending move shall remain unmarked
+as projected so that it can be rendered after orientation resolution.
+
+Whenever the complete board orientation or active projector mapping changes,
+pending guidance shall be regenerated from its logical move. For example,
+`f8-d8` at a two-quarter-turn orientation shall be rendered through the
+corresponding physical cells for that orientation; coordinates cached from a
+temporary one-quarter-turn state shall never remain displayed as `h3-h5`.
 
 Intent detection shall cover the calibrated 8x8 board plus a
 perspective-aware one-square margin around every edge. Motion elsewhere in the
@@ -749,22 +780,25 @@ The application shall use a two-phase commit:
    reference, physical position, server position, UI position, or turn.
 2. Submit the UCI move once with
    `POST /api/board/game/{gameId}/move/{move}`.
-3. After a successful response, advance the controller's server and physical
-   positions, commit the preserved image as the accepted reference, update the
-   UI, persist synchronized state, and display the accepted move.
+3. After a successful response, fetch an authoritative game snapshot. Advance
+   the controller's server and physical positions, commit the preserved image
+   as the accepted reference, update the UI, persist synchronized state, and
+   display the accepted move only when authoritative history contains the
+   previously confirmed moves followed by the submitted move.
 4. After an explicit HTTP rejection, preserve the previous authoritative state
    and reference and require the physical move to be restored.
 
 The application shall pause further camera move inference while submission is
 pending. It shall never retry a move automatically.
 
-If the POST outcome is uncertain because the response is interrupted or
-invalid, the submission worker shall fetch the authoritative game snapshot:
+After every POST response, including an apparently successful response, the
+submission worker shall fetch the authoritative game snapshot:
 
 - If history equals the previously confirmed history plus the submitted move,
   treat the move as accepted and commit it once.
 - If history still equals the previously confirmed history, treat the move as
-  rejected and require restoration.
+  rejected and require restoration when the game is terminal; if the game is
+  still active, report an uncertain result without committing either state.
 - If the refresh fails or history has another shape, enter reconciliation and
   preserve both the previous reference and the pending physical discrepancy.
 

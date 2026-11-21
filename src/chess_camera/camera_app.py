@@ -287,6 +287,16 @@ def _format_lichess_clock(milliseconds: int) -> str:
     return f"{minutes}:{seconds:02d}"
 
 
+def _lichess_terminal_status(state: LichessGameState) -> str:
+    if state.status == "outoftime":
+        if state.winner == "white":
+            return f"Black lost on time; result {state.result}"
+        if state.winner == "black":
+            return f"White lost on time; result {state.result}"
+        return f"Game ended on time; result {state.result}"
+    return f"{state.status}; result {state.result}"
+
+
 def _lichess_game_information(
     game: LichessGameFull,
     *,
@@ -313,7 +323,7 @@ def _lichess_game_information(
             f"Status: {state.status}; {state.turn.capitalize()} to move"
         )
     else:
-        status = f"Status: {state.status}; result {state.result}"
+        status = f"Status: {_lichess_terminal_status(state)}"
     if state.white_draw_offer:
         status += "; White offers a draw"
     if state.black_draw_offer:
@@ -475,6 +485,13 @@ def _lichess_polling_snapshot_message(
         if snapshot.clocks_available
         else "clocks unavailable for this game; "
     )
+    if state.result != "*":
+        return (
+            f"Lichess game {game.game_id}: "
+            f"{game.white.name} (White) vs {game.black.name} (Black). "
+            f"{clock_text}{_lichess_terminal_status(state)}. "
+            "Connected by polling."
+        )
     return (
         f"Lichess game {game.game_id}: "
         f"{game.white.name} (White) vs {game.black.name} (Black). "
@@ -3173,6 +3190,7 @@ class CameraWindow(QMainWindow):
                 f"Board moved {displacement:.1f} camera pixels; projected "
                 "coordinates were updated without full recalibration."
             )
+        self._refresh_pending_lichess_guidance()
 
     def _alignment_mapping_verified(self, _mapping: MappingResult) -> None:
         if self._calibration_result is None:
@@ -3292,6 +3310,7 @@ class CameraWindow(QMainWindow):
             return
         if (
             self._reference_move_tracker.initialized
+            and not self._piece_side_orientation_needs_detection
             and not self._reset_to_start_requested
             and not self._reconciliation_requested
             and not self._offline_restore_requested
@@ -3352,6 +3371,7 @@ class CameraWindow(QMainWindow):
                     self._board_quarter_turns,
                 )
                 self._settings.sync()
+                self._refresh_pending_lichess_guidance()
                 occupied_ui = {
                     rotate_square(
                         row,
@@ -4207,6 +4227,7 @@ class CameraWindow(QMainWindow):
             controller.game_id,
             uci,
             controller.server_moves,
+            confirmed_fen=controller.server_fen,
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -4494,6 +4515,15 @@ class CameraWindow(QMainWindow):
         self,
         move: tuple[tuple[int, int], tuple[int, int]],
     ) -> None:
+        if (
+            self._board_orientation_needs_detection
+            or self._piece_side_orientation_needs_detection
+        ):
+            self._projector_status.setText(
+                "Move accepted; physical projection is waiting for "
+                "White-side orientation."
+            )
+            return
         if self._camera_only_calibration:
             self._projector_status.setText(
                 "Move accepted; physical projection is unavailable."
@@ -4533,6 +4563,15 @@ class CameraWindow(QMainWindow):
         self,
         move: tuple[tuple[int, int], tuple[int, int]],
     ) -> None:
+        if (
+            self._board_orientation_needs_detection
+            or self._piece_side_orientation_needs_detection
+        ):
+            self._projector_status.setText(
+                "Accepted Offline move; physical marking is waiting for "
+                "White-side orientation."
+            )
+            return
         if self._camera_only_calibration:
             return
         if self._calibration_result is None or not self._open_projector():
@@ -4609,8 +4648,7 @@ class CameraWindow(QMainWindow):
             self._board_widget.set_guidance_move(None)
             self._cancel_lichess_guidance_activity()
             return
-        self._last_projected_lichess_uci = signature.uci
-        self._project_lichess_move_guidance(
+        projected = self._project_lichess_move_guidance(
             (signature.source, signature.destination),
             ()
             if signature.kind == "castling"
@@ -4621,12 +4659,22 @@ class CameraWindow(QMainWindow):
                 not in (signature.source, signature.destination)
             ),
         )
+        self._last_projected_lichess_uci = (
+            signature.uci if projected else None
+        )
+
+    def _refresh_pending_lichess_guidance(self) -> None:
+        controller = self._lichess_game_controller
+        if controller is None or controller.expected_signature is None:
+            return
+        self._last_projected_lichess_uci = None
+        self._update_lichess_synchronization_projection()
 
     def _project_lichess_move_guidance(
         self,
         move: tuple[tuple[int, int], tuple[int, int]],
         additional_squares: tuple[tuple[int, int], ...] = (),
-    ) -> None:
+    ) -> bool:
         source, destination = move
         guidance_squares = tuple(
             dict.fromkeys((source, destination, *additional_squares))
@@ -4638,18 +4686,30 @@ class CameraWindow(QMainWindow):
             self._board_widget.set_guidance_squares(guidance_squares)
         else:
             self._board_widget.set_guidance_move(move)
+        if (
+            self._board_orientation_needs_detection
+            or self._piece_side_orientation_needs_detection
+        ):
+            self._cancel_lichess_guidance_activity()
+            self._projector_window.show_black()
+            self._alignment_monitor.set_black()
+            self._projector_status.setText(
+                f"Lichess move {move_name} is pending until White-side "
+                "orientation is resolved."
+            )
+            return False
         if self._camera_only_calibration:
             self._projector_status.setText(
                 f"Lichess move {move_name} is pending; physical projection "
                 "is unavailable."
             )
-            return
+            return False
         if self._calibration_result is None or not self._open_projector():
             self._projector_status.setText(
                 f"Lichess move {move_name} is pending, but no calibrated "
                 "projector is available."
             )
-            return
+            return False
         try:
             if additional_squares:
                 self._projector_window.show_move_squares(
@@ -4672,7 +4732,7 @@ class CameraWindow(QMainWindow):
             self._projector_status.setText(
                 f"Lichess move guidance failed: {error}"
             )
-            return
+            return False
         self._alignment_monitor.set_paused("Lichess move guidance")
         self._lichess_guidance_generation += 1
         self._lichess_guidance_projection_active = True
@@ -4683,6 +4743,7 @@ class CameraWindow(QMainWindow):
             f"Projecting pending Lichess move {move_name} until the hand "
             "leaves the board."
         )
+        return True
 
     def _observe_lichess_guidance_activity(self) -> None:
         if (
@@ -6125,7 +6186,13 @@ class CameraWindow(QMainWindow):
             )
             self._lichess_game_selector.setEnabled(False)
             selected: str | None = None
-            self._clear_lichess_game_information()
+            if (
+                self._latest_lichess_game is None
+                or not _can_start_new_lichess_game(
+                    self._latest_lichess_game.state
+                )
+            ):
+                self._clear_lichess_game_information()
             self._start_new_lichess_game_button.setEnabled(
                 self._lichess_ai_creation_thread is None
                 and self._pending_created_lichess_game_id is None
@@ -6222,6 +6289,21 @@ class CameraWindow(QMainWindow):
     def _lichess_connection_status_changed(self, message: str) -> None:
         if message.startswith("Connected to Lichess"):
             self._show_lichess_connected()
+        if (
+            message
+            == "Connected to Lichess by polling; waiting for a game."
+            and self._latest_lichess_game is not None
+            and _can_start_new_lichess_game(
+                self._latest_lichess_game.state
+            )
+            and self._latest_lichess_game.state.result != "*"
+        ):
+            message = _lichess_polling_snapshot_message(
+                LichessPollingSnapshot(
+                    self._latest_lichess_game,
+                    self._lichess_clocks_available,
+                )
+            )
         self._lichess_status.setText(message)
         self._record_runtime_diagnostic(
             "lichess-connection-status",
@@ -6492,16 +6574,20 @@ class CameraWindow(QMainWindow):
             return
         if signature.uci == self._last_projected_lichess_uci:
             return
-        self._last_projected_lichess_uci = signature.uci
         self._piece_status.setText(update.message)
-        self._project_lichess_move_guidance(
+        projected = self._project_lichess_move_guidance(
             (signature.source, signature.destination),
-            tuple(
+            ()
+            if signature.kind == "castling"
+            else tuple(
                 change.square
                 for change in signature.changes
                 if change.square
                 not in (signature.source, signature.destination)
             ),
+        )
+        self._last_projected_lichess_uci = (
+            signature.uci if projected else None
         )
 
     def _record_runtime_diagnostic(
@@ -6947,12 +7033,19 @@ class CameraWindow(QMainWindow):
             )
         except (CalibrationError, ValueError):
             return
-        if (
+        complete_orientation_retained = (
             self._board_quarter_turns % 2
-            != detected_turns % 2
-        ):
+            == detected_turns % 2
+        )
+        if not complete_orientation_retained:
             self._board_quarter_turns = detected_turns
         self._board_orientation_needs_detection = False
+        if (
+            complete_orientation_retained
+            and self._piece_side_orientation_needs_detection
+        ):
+            self._piece_side_orientation_needs_detection = False
+            self._refresh_pending_lichess_guidance()
 
     def _restore_remembered_square(self) -> None:
         if (

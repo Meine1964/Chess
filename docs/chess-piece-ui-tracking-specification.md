@@ -295,6 +295,18 @@ This preserves the known White-side direction during midgame restart, when the
 starting-rank piece evidence needed to resolve the 180-degree ambiguity is no
 longer available.
 
+The projection restriction applies to every physical projection entry point,
+including Offline accepted-move marking and pending Lichess guidance. Logical
+guidance may remain visible in the application while physical projection is
+withheld. A move withheld for unresolved orientation shall remain eligible for
+projection after orientation resolves; it shall not be recorded as already
+projected.
+
+Changing the complete quarter-turn orientation or the active projector mapping
+shall invalidate any cached pending-move projection. If a Lichess move remains
+pending, the application shall render it again using the new logical-to-
+physical mapping. A cached UCI move shall not prevent this refresh.
+
 ## 7. Move Tracking
 
 Post-initialization move inference is defined exclusively by

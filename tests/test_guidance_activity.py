@@ -269,6 +269,8 @@ def test_correction_detector_rejects_board_confined_light_change() -> None:
 
 def test_pending_lichess_guidance_has_no_fixed_timeout() -> None:
     window = SimpleNamespace(
+        _board_orientation_needs_detection=False,
+        _piece_side_orientation_needs_detection=False,
         _camera_only_calibration=False,
         _calibration_result=object(),
         _open_projector=lambda: True,
@@ -305,6 +307,74 @@ def test_pending_lichess_guidance_has_no_fixed_timeout() -> None:
     )
 
 
+def test_pending_lichess_guidance_waits_for_complete_orientation() -> None:
+    window = SimpleNamespace(
+        _board_orientation_needs_detection=False,
+        _piece_side_orientation_needs_detection=True,
+        _camera_only_calibration=False,
+        _calibration_result=object(),
+        _open_projector=MagicMock(return_value=True),
+        _projector_window=MagicMock(),
+        _board_widget=MagicMock(),
+        _alignment_monitor=MagicMock(),
+        _cancel_lichess_guidance_activity=MagicMock(),
+        _projector_status=MagicMock(),
+    )
+
+    projected = CameraWindow._project_lichess_move_guidance(
+        window,
+        ((0, 5), (0, 3)),
+    )
+
+    assert projected is False
+    window._board_widget.set_guidance_move.assert_called_once_with(
+        ((0, 5), (0, 3))
+    )
+    window._open_projector.assert_not_called()
+    window._cancel_lichess_guidance_activity.assert_called_once_with()
+    window._projector_window.show_black.assert_called_once_with()
+    window._alignment_monitor.set_black.assert_called_once_with()
+    assert (
+        "White-side orientation"
+        in window._projector_status.setText.call_args.args[0]
+    )
+
+
+def test_pending_lichess_guidance_uses_complete_two_turn_orientation() -> None:
+    window = SimpleNamespace(
+        _board_orientation_needs_detection=False,
+        _piece_side_orientation_needs_detection=False,
+        _board_quarter_turns=2,
+        _camera_only_calibration=False,
+        _calibration_result=object(),
+        _open_projector=lambda: True,
+        _projector_window=MagicMock(),
+        _board_widget=MagicMock(),
+        _alignment_monitor=MagicMock(),
+        _guidance_activity_detector=MagicMock(),
+        _projector_status=MagicMock(),
+        _lichess_guidance_generation=0,
+        _lichess_guidance_projection_active=False,
+        _lichess_guidance_blackout_pending=False,
+    )
+    window._physical_board_square = lambda row, column: (
+        CameraWindow._physical_board_square(window, row, column)
+    )
+
+    projected = CameraWindow._project_lichess_move_guidance(
+        window,
+        ((0, 5), (0, 3)),
+    )
+
+    assert projected is True
+    window._projector_window.show_move.assert_called_once_with(
+        (7, 2),
+        (7, 4),
+        source_is_light=False,
+        destination_is_light=False,
+    )
+
+
 def test_castling_guidance_projects_only_king_move() -> None:
     signature = LegalGame(
         "r3k2r/8/8/8/8/8/8/4K3 b kq - 0 1"
@@ -326,8 +396,27 @@ def test_castling_guidance_projects_only_king_move() -> None:
     )
 
 
+def test_failed_guidance_projection_remains_eligible_for_refresh() -> None:
+    signature = LegalGame().legal_move_signature("e2e4")
+    window = SimpleNamespace(
+        _lichess_game_controller=SimpleNamespace(
+            expected_signature=signature
+        ),
+        _last_projected_lichess_uci="stale",
+        _board_widget=MagicMock(),
+        _cancel_lichess_guidance_activity=MagicMock(),
+        _project_lichess_move_guidance=MagicMock(return_value=False),
+    )
+
+    CameraWindow._update_lichess_synchronization_projection(window)
+
+    assert window._last_projected_lichess_uci is None
+
+
 def test_en_passant_guidance_projects_all_three_squares() -> None:
     window = SimpleNamespace(
+        _board_orientation_needs_detection=False,
+        _piece_side_orientation_needs_detection=False,
         _camera_only_calibration=False,
         _calibration_result=object(),
         _open_projector=lambda: True,
@@ -449,6 +538,8 @@ def test_active_manipulation_keeps_opponent_guidance_projected() -> None:
 def test_offline_move_marking_uses_fixed_one_second_intervals() -> None:
     move = ((6, 4), (4, 4))
     window = SimpleNamespace(
+        _board_orientation_needs_detection=False,
+        _piece_side_orientation_needs_detection=False,
         _camera_only_calibration=False,
         _calibration_result=object(),
         _open_projector=MagicMock(return_value=True),

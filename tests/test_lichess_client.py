@@ -345,21 +345,24 @@ def test_game_stream_reconstructs_position_and_clocks() -> None:
 
 
 def test_polling_fallback_discovers_and_reconstructs_ai_game() -> None:
-    game_full = {
-        "type": "gameFull",
+    game_export = {
         "id": "oozTO3xk",
-        "variant": {"key": "standard"},
-        "initialFen": "startpos",
-        "white": {"name": "Meine", "rating": 1500},
-        "black": {"name": "Stockfish level 1"},
-        "state": _state("e2e4 e7e6 g1f3 d7d5 b1c3 c7c6"),
+        "variant": "standard",
+        "status": "started",
+        "players": {
+            "white": {
+                "user": {"name": "Meine"},
+                "rating": 1500,
+            },
+            "black": {"aiLevel": 1},
+        },
+        "moves": "e4 e6 Nf3 d5 Nc3 c6",
+        "clocks": [60000, 60000, 59900, 59800, 59700, 59600],
+        "clock": {"initial": 600, "increment": 5},
+        "lastMoveAt": 9999999999999,
     }
     transport = FakeTransport(
-        {
-            "/api/board/game/stream/oozTO3xk": (
-                _line(game_full),
-            )
-        },
+        {},
         {
             "/api/account/playing?nb=10": {
                 "nowPlaying": [
@@ -377,6 +380,10 @@ def test_polling_fallback_discovers_and_reconstructs_ai_game() -> None:
                 ],
                 "nbMyTurn": 1,
             },
+            (
+                "/game/export/oozTO3xk"
+                "?clocks=true&evals=false&opening=false&literate=false"
+            ): game_export,
         },
     )
     client = LichessReadOnlyClient("secret-token", transport=transport)
@@ -397,8 +404,11 @@ def test_polling_fallback_discovers_and_reconstructs_ai_game() -> None:
     )
     assert snapshot.game.state.turn == "white"
     assert snapshot.clocks_available
+    assert snapshot.game.state.white_time_ms == 597000
+    assert snapshot.game.state.black_time_ms == 596000
     assert transport.requests[-1][0] == (
-        "/api/board/game/stream/oozTO3xk"
+        "/game/export/oozTO3xk"
+        "?clocks=true&evals=false&opening=false&literate=false"
     )
 
 

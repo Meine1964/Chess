@@ -538,7 +538,9 @@ def test_parity_detection_preserves_matching_complete_orientation() -> None:
             )
         ),
         _board_quarter_turns=2,
+        _piece_side_orientation_needs_detection=True,
         _settings=MagicMock(),
+        _refresh_pending_lichess_guidance=MagicMock(),
     )
 
     with patch(
@@ -549,8 +551,10 @@ def test_parity_detection_preserves_matching_complete_orientation() -> None:
 
     assert window._board_quarter_turns == 2
     assert window._board_orientation_needs_detection is False
+    assert window._piece_side_orientation_needs_detection is False
     window._settings.setValue.assert_not_called()
     window._settings.sync.assert_not_called()
+    window._refresh_pending_lichess_guidance.assert_called_once_with()
 
 
 def test_square_projection_waits_for_white_side_orientation() -> None:
