@@ -5,6 +5,7 @@ import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
+from time import monotonic
 from typing import Literal, cast
 
 import cv2
@@ -285,6 +286,30 @@ def _format_lichess_clock(milliseconds: int) -> str:
     total_seconds = max(0, milliseconds) // 1000
     minutes, seconds = divmod(total_seconds, 60)
     return f"{minutes}:{seconds:02d}"
+
+
+def _displayed_lichess_clock_state(
+    state: LichessGameState,
+    *,
+    elapsed_ms: int,
+    clocks_available: bool,
+) -> LichessGameState:
+    if (
+        not clocks_available
+        or state.result != "*"
+        or state.status not in ("created", "started")
+    ):
+        return state
+    elapsed_ms = max(0, elapsed_ms)
+    if state.turn == "white":
+        return replace(
+            state,
+            white_time_ms=max(0, state.white_time_ms - elapsed_ms),
+        )
+    return replace(
+        state,
+        black_time_ms=max(0, state.black_time_ms - elapsed_ms),
+    )
 
 
 def _lichess_terminal_status(state: LichessGameState) -> str:
@@ -1113,6 +1138,7 @@ class CameraWindow(QMainWindow):
         self._latest_lichess_state: LichessGameState | None = None
         self._latest_lichess_game: LichessGameFull | None = None
         self._lichess_clocks_available = False
+        self._lichess_clock_snapshot_monotonic: float | None = None
         self._last_runtime_tracker_state: str | None = None
         self._runtime_diagnostics_error: str | None = None
         self._latest_stable_occupied_ui: (
@@ -1661,6 +1687,12 @@ class CameraWindow(QMainWindow):
         self._occupancy_timer.setInterval(100)
         self._occupancy_timer.timeout.connect(self._update_occupancy)
         self._occupancy_timer.start()
+        self._lichess_clock_timer = QTimer(self)
+        self._lichess_clock_timer.setInterval(250)
+        self._lichess_clock_timer.timeout.connect(
+            self._refresh_lichess_clock_display
+        )
+        self._lichess_clock_timer.start()
         QTimer.singleShot(0, self._black_projector)
         if selected_index is None:
             self._wait_for_external_camera()
@@ -2852,7 +2884,7 @@ class CameraWindow(QMainWindow):
         self.statusBar().showMessage("Lichess board image copied.", 3000)
 
     def _show_current_lichess_game(self) -> None:
-        game = self._latest_lichess_game
+        game = self._displayed_lichess_game()
         if game is None:
             return
         message_box = QMessageBox(self)
@@ -6449,6 +6481,12 @@ class CameraWindow(QMainWindow):
         status: str = "No active Lichess game information.",
     ) -> None:
         self._lichess_clocks_available = False
+        self._lichess_clock_snapshot_monotonic = None
+        self._projector_window.set_edge_clocks(
+            None,
+            None,
+            board_quarter_turns=self._board_quarter_turns,
+        )
         self._lichess_black_player.setText("Black: --")
         self._lichess_black_clock.setText("Black clock: --:--")
         self._lichess_white_player.setText("White: --")
@@ -6465,6 +6503,12 @@ class CameraWindow(QMainWindow):
         clocks_available: bool,
     ) -> None:
         self._lichess_clocks_available = clocks_available
+        self._lichess_clock_snapshot_monotonic = (
+            monotonic()
+            if clocks_available
+            and not _can_start_new_lichess_game(game.state)
+            else None
+        )
         (
             black_player,
             black_clock,
@@ -6480,9 +6524,64 @@ class CameraWindow(QMainWindow):
         self._lichess_white_player.setText(white_player)
         self._lichess_white_clock.setText(white_clock)
         self._lichess_game_information_status.setText(status)
+        self._update_projected_lichess_clocks(
+            self._displayed_lichess_game()
+        )
         action = getattr(self, "_current_lichess_game_action", None)
         if isinstance(action, QAction):
             action.setEnabled(True)
+
+    def _displayed_lichess_game(self) -> LichessGameFull | None:
+        game = self._latest_lichess_game
+        baseline = self._lichess_clock_snapshot_monotonic
+        if game is None or baseline is None:
+            return game
+        elapsed_ms = int(max(0.0, monotonic() - baseline) * 1000)
+        return replace(
+            game,
+            state=_displayed_lichess_clock_state(
+                game.state,
+                elapsed_ms=elapsed_ms,
+                clocks_available=self._lichess_clocks_available,
+            ),
+        )
+
+    def _refresh_lichess_clock_display(self) -> None:
+        game = self._displayed_lichess_game()
+        if game is None or self._lichess_clock_snapshot_monotonic is None:
+            return
+        information = _lichess_game_information(
+            game,
+            clocks_available=self._lichess_clocks_available,
+        )
+        self._lichess_black_clock.setText(information[1])
+        self._lichess_white_clock.setText(information[3])
+        self._update_projected_lichess_clocks(game)
+
+    def _update_projected_lichess_clocks(
+        self,
+        game: LichessGameFull | None,
+    ) -> None:
+        clocks_visible = (
+            game is not None
+            and self._lichess_clocks_available
+            and self._lichess_clock_snapshot_monotonic is not None
+            and self._calibration_result is not None
+            and not self._board_orientation_needs_detection
+            and not self._piece_side_orientation_needs_detection
+        )
+        if not clocks_visible or game is None:
+            self._projector_window.set_edge_clocks(
+                None,
+                None,
+                board_quarter_turns=self._board_quarter_turns,
+            )
+            return
+        self._projector_window.set_edge_clocks(
+            _format_lichess_clock(game.state.white_time_ms),
+            _format_lichess_clock(game.state.black_time_ms),
+            board_quarter_turns=self._board_quarter_turns,
+        )
 
     def _update_lichess_synchronization(
         self,

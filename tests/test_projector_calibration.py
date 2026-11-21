@@ -1204,6 +1204,55 @@ def test_lichess_attachment_mismatch_starts_live_reconciliation() -> None:
     start_reconciliation.assert_called_once_with()
 
 
+def test_new_lichess_game_preserves_complete_orientation() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+    from src.chess_camera.lichess_client import AccountGameEvent
+
+    event = AccountGameEvent(
+        "gameStart",
+        "new-game",
+        "new-game-full",
+        "white",
+        "startpos",
+        "Opponent",
+        True,
+    )
+    window = SimpleNamespace(
+        _pending_created_lichess_game_id=None,
+        _lichess_game_id="old-game",
+        _lichess_game_controller=object(),
+        _latest_lichess_game=object(),
+        _last_projected_lichess_uci="e2e4",
+        _draw_offer_game_id="old-game",
+        _responded_draw_offer_game_id="old-game",
+        _lichess_draw_offer_state_available=True,
+        _abort_requested_game_id="old-game",
+        _resign_requested_game_id="old-game",
+        _board_orientation_needs_detection=False,
+        _piece_side_orientation_needs_detection=False,
+        _reconciliation_requested=True,
+        _black_projector=MagicMock(),
+        _clear_lichess_game_information=MagicMock(),
+        _start_new_lichess_game_button=MagicMock(),
+        _update_lichess_game_control_buttons=MagicMock(),
+        _lichess_status=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
+    )
+
+    CameraWindow._lichess_account_event_received(window, event)
+
+    assert window._board_orientation_needs_detection is False
+    assert window._piece_side_orientation_needs_detection is False
+    assert window._reconciliation_requested is True
+    window._black_projector.assert_not_called()
+    window._clear_lichess_game_information.assert_called_once_with(
+        "Loading Lichess game information."
+    )
+
+
 def test_lichess_attachment_accepts_matching_current_server_position() -> None:
     from types import SimpleNamespace
     from unittest.mock import MagicMock

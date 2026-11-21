@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 from src.chess_camera.camera_app import (
@@ -6,6 +8,7 @@ from src.chess_camera.camera_app import (
     _can_abort_lichess_game,
     _can_start_new_lichess_game,
     _current_lichess_game_text,
+    _displayed_lichess_clock_state,
     _format_lichess_clock,
     _illegal_correction_message,
     _lichess_board_state,
@@ -1156,6 +1159,130 @@ def test_lichess_game_state_message_reports_clocks_and_result() -> None:
         "#000000",
         "Black to move (Lichess)",
     )
+
+
+def test_displayed_lichess_clock_counts_down_only_active_player() -> None:
+    white_to_move = LichessGameState(
+        (),
+        "unused",
+        "white",
+        65000,
+        9000,
+        0,
+        0,
+        "started",
+        None,
+        "*",
+    )
+    black_to_move = LichessGameState(
+        (),
+        "unused",
+        "black",
+        65000,
+        9000,
+        0,
+        0,
+        "started",
+        None,
+        "*",
+    )
+
+    assert _displayed_lichess_clock_state(
+        white_to_move,
+        elapsed_ms=2500,
+        clocks_available=True,
+    ) == replace(white_to_move, white_time_ms=62500)
+    assert _displayed_lichess_clock_state(
+        black_to_move,
+        elapsed_ms=12000,
+        clocks_available=True,
+    ) == replace(black_to_move, black_time_ms=0)
+
+
+def test_displayed_lichess_clock_preserves_non_counting_states() -> None:
+    active = LichessGameState(
+        (),
+        "unused",
+        "white",
+        65000,
+        9000,
+        0,
+        0,
+        "started",
+        None,
+        "*",
+    )
+    terminal = replace(
+        active,
+        white_time_ms=0,
+        status="outoftime",
+        winner="black",
+        result="0-1",
+    )
+
+    assert _displayed_lichess_clock_state(
+        active,
+        elapsed_ms=5000,
+        clocks_available=False,
+    ) is active
+    assert _displayed_lichess_clock_state(
+        terminal,
+        elapsed_ms=5000,
+        clocks_available=True,
+    ) is terminal
+
+
+def test_lichess_clock_refresh_updates_labels_from_monotonic_elapsed_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    state = LichessGameState(
+        (),
+        "unused",
+        "white",
+        65000,
+        9000,
+        0,
+        0,
+        "started",
+        None,
+        "*",
+    )
+    game = LichessGameFull(
+        "game1234",
+        "unused",
+        LichessPlayer("white", "Local", 1510),
+        LichessPlayer("black", "Remote", 1490),
+        state,
+    )
+    window = SimpleNamespace(
+        _latest_lichess_game=game,
+        _lichess_clock_snapshot_monotonic=10.0,
+        _lichess_clocks_available=True,
+        _lichess_black_clock=MagicMock(),
+        _lichess_white_clock=MagicMock(),
+        _update_projected_lichess_clocks=MagicMock(),
+        _displayed_lichess_game=(
+            lambda: CameraWindow._displayed_lichess_game(window)
+        ),
+    )
+    monkeypatch.setattr(
+        "src.chess_camera.camera_app.monotonic",
+        lambda: 12.5,
+    )
+
+    CameraWindow._refresh_lichess_clock_display(window)
+
+    window._lichess_black_clock.setText.assert_called_once_with(
+        "Black clock: 0:09"
+    )
+    window._lichess_white_clock.setText.assert_called_once_with(
+        "White clock: 1:02"
+    )
+    window._update_projected_lichess_clocks.assert_called_once()
+    assert window._latest_lichess_game.state is state
 
 
 def test_lichess_turn_indicator_reports_completed_game() -> None:

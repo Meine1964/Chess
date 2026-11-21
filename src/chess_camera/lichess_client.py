@@ -108,12 +108,16 @@ class OngoingGame:
     opponent_name: str
     is_my_turn: bool
     last_move: str | None = None
+    seconds_left_ms: int | None = None
 
 
 @dataclass(frozen=True)
 class LichessPollingSnapshot:
     game: LichessGameFull
     clocks_available: bool
+    clock_sample_at_ms: int | None = None
+    raw_white_time_ms: int | None = None
+    raw_black_time_ms: int | None = None
 
 
 class NdjsonTransport(Protocol):
@@ -632,6 +636,15 @@ def _parse_ongoing_game(payload: object) -> OngoingGame:
     game = cast(Mapping[str, object], payload)
     opponent = _required_mapping(game, "opponent")
     last_move = _required_string(game, "lastMove")
+    seconds_left = game.get("secondsLeft")
+    if seconds_left is not None and (
+        not isinstance(seconds_left, int)
+        or isinstance(seconds_left, bool)
+        or seconds_left < 0
+    ):
+        raise LichessProtocolError(
+            "The ongoing-game clock must be a non-negative integer."
+        )
     return OngoingGame(
         _required_string(game, "gameId"),
         _required_string(game, "fullId"),
@@ -640,6 +653,7 @@ def _parse_ongoing_game(payload: object) -> OngoingGame:
         _required_string(opponent, "username"),
         _required_bool(game, "isMyTurn"),
         last_move or None,
+        None if seconds_left is None else seconds_left * 1000,
     )
 
 
@@ -700,6 +714,9 @@ def _parse_game_export_snapshot(
     black_time_ms = 0
     increment_ms = 0
     clocks_available = False
+    clock_sample_at_ms: int | None = None
+    raw_white_time_ms: int | None = None
+    raw_black_time_ms: int | None = None
     clock = payload.get("clock")
     clocks = payload.get("clocks")
     if clock is not None or clocks is not None:
@@ -711,7 +728,10 @@ def _parse_game_export_snapshot(
         increment_ms = _required_int(clock, "increment") * 1000
         white_time_ms = initial_ms
         black_time_ms = initial_ms
-        if len(clocks) != len(moves):
+        expected_clock_count = len(moves)
+        if status == "outoftime":
+            expected_clock_count += 1
+        if len(clocks) not in (len(moves), expected_clock_count):
             raise LichessProtocolError(
                 "The game export clocks do not match its move history."
             )
@@ -724,8 +744,11 @@ def _parse_game_export_snapshot(
                 white_time_ms = value * 10
             else:
                 black_time_ms = value * 10
+        raw_white_time_ms = white_time_ms
+        raw_black_time_ms = black_time_ms
         if status in ("created", "started"):
             last_move_at = _required_int(payload, "lastMoveAt")
+            clock_sample_at_ms = last_move_at
             elapsed_ms = max(
                 0,
                 int(time.time() * 1000) - last_move_at,
@@ -756,6 +779,9 @@ def _parse_game_export_snapshot(
             ),
         ),
         clocks_available,
+        clock_sample_at_ms,
+        raw_white_time_ms,
+        raw_black_time_ms,
     )
 
 

@@ -105,6 +105,133 @@ def test_turn_indicator_uses_diagonal_corner_and_half_square_offset() -> None:
     assert radius == pytest.approx(2.45)
 
 
+def test_edge_clock_polygons_follow_logical_a_file_orientation() -> None:
+    x_values = np.linspace(80, 280, 9, dtype=np.float32)
+    y_values = np.linspace(10, 170, 9, dtype=np.float32)
+    x_grid, y_grid = np.meshgrid(x_values, y_values)
+    grid = np.stack((x_grid, y_grid), axis=2).astype(np.float32)
+
+    white = ProjectorWindow._edge_clock_polygon(
+        grid,
+        6,
+        8,
+        board_quarter_turns=2,
+    )
+    black = ProjectorWindow._edge_clock_polygon(
+        grid,
+        0,
+        2,
+        board_quarter_turns=2,
+    )
+
+    np.testing.assert_allclose(
+        white,
+        ((280, 50), (280, 10), (305, 10), (305, 50)),
+    )
+    np.testing.assert_allclose(
+        black,
+        ((280, 170), (280, 130), (305, 130), (305, 170)),
+    )
+
+
+@pytest.mark.parametrize("board_quarter_turns", range(4))
+@pytest.mark.parametrize("rows", ((0, 2), (6, 8)))
+def test_edge_clock_transform_never_reflects_glyphs(
+    board_quarter_turns: int,
+    rows: tuple[int, int],
+) -> None:
+    x_values = np.linspace(80, 280, 9, dtype=np.float32)
+    y_values = np.linspace(10, 170, 9, dtype=np.float32)
+    x_grid, y_grid = np.meshgrid(x_values, y_values)
+    grid = np.stack((x_grid, y_grid), axis=2).astype(np.float32)
+
+    polygon = ProjectorWindow._edge_clock_polygon(
+        grid,
+        *rows,
+        board_quarter_turns=board_quarter_turns,
+    )
+    along_edge = polygon[1] - polygon[0]
+    outward = polygon[3] - polygon[0]
+    signed_area = (
+        along_edge[0] * outward[1]
+        - along_edge[1] * outward[0]
+    )
+
+    assert signed_area > 0
+
+
+def test_edge_clock_content_rotates_and_shrinks_around_fixed_center() -> None:
+    transform = ProjectorWindow._edge_clock_content_transform(256.0, 128.0)
+
+    center = transform.map(QPointF(128.0, 64.0))
+    original_top = transform.map(QPointF(128.0, 0.0))
+    original_bottom = transform.map(QPointF(128.0, 128.0))
+
+    assert center.x() == pytest.approx(128.0)
+    assert center.y() == pytest.approx(64.0)
+    assert original_top.y() == pytest.approx(108.8)
+    assert original_bottom.y() == pytest.approx(19.2)
+    assert original_top.y() - original_bottom.y() == pytest.approx(
+        128.0 * 0.7
+    )
+
+
+def test_edge_clock_content_transform_precedes_perspective_warp() -> None:
+    polygon = np.asarray(
+        ((80, 130), (80, 170), (55, 170), (55, 130)),
+        dtype=np.float32,
+    )
+
+    transform = ProjectorWindow._edge_clock_paint_transform(
+        polygon,
+        256.0,
+        128.0,
+    )
+    center = transform.map(QPointF(128.0, 64.0))
+    original_top = transform.map(QPointF(128.0, 0.0))
+
+    assert center.x() == pytest.approx(67.5)
+    assert center.y() == pytest.approx(150.0)
+    assert original_top.x() == pytest.approx(58.75)
+    assert original_top.y() == pytest.approx(150.0)
+
+
+def test_projector_renders_seven_segment_clocks_outside_board(
+    application: QApplication,
+) -> None:
+    window = ProjectorWindow()
+    window.resize(360, 180)
+    x_values = np.linspace(80, 280, 9, dtype=np.float32)
+    y_values = np.linspace(10, 170, 9, dtype=np.float32)
+    x_grid, y_grid = np.meshgrid(x_values, y_values)
+    grid = np.stack((x_grid, y_grid), axis=2).astype(np.float32)
+    window.set_projector_grid(grid)
+    window.set_edge_clocks(
+        "1:05",
+        "9:42",
+        board_quarter_turns=0,
+    )
+    window.show_black()
+    window.show()
+    application.processEvents()
+
+    image = window.grab().toImage()
+    black_clock_pixels = sum(
+        image.pixelColor(x, y).red() > 150
+        for x in range(55, 81)
+        for y in range(10, 51)
+    )
+    white_clock_pixels = sum(
+        image.pixelColor(x, y).red() > 150
+        for x in range(55, 81)
+        for y in range(130, 171)
+    )
+
+    assert black_clock_pixels > 30
+    assert white_clock_pixels > 30
+    assert image.pixelColor(100, 90).red() == 0
+
+
 def test_projector_renders_patterns_and_calibrated_squares(
     application: QApplication,
 ) -> None:

@@ -243,6 +243,7 @@ class SubmissionClient:
         *,
         submit_error: Exception | None = None,
         server_moves: tuple[str, ...] = (),
+        ongoing_moves: tuple[str, ...] | None = None,
         refresh_error: Exception | None = None,
         status: str = "started",
         winner: PlayerColor | None = None,
@@ -250,6 +251,9 @@ class SubmissionClient:
     ) -> None:
         self._submit_error = submit_error
         self._server_moves = server_moves
+        self._ongoing_moves = (
+            server_moves if ongoing_moves is None else ongoing_moves
+        )
         self._refresh_error = refresh_error
         self._status = status
         self._winner = winner
@@ -288,6 +292,26 @@ class SubmissionClient:
                 state,
             ),
             False,
+        )
+
+    def get_ongoing_games(self) -> tuple[OngoingGame, ...]:
+        if self._refresh_error is not None:
+            raise self._refresh_error
+        if self._status != "started":
+            return ()
+        board = chess.Board()
+        for uci in self._ongoing_moves:
+            board.push_uci(uci)
+        return (
+            OngoingGame(
+                "game1234",
+                "game1234abcd",
+                "white",
+                board.fen(),
+                "Stockfish level 1",
+                board.turn == chess.WHITE,
+                self._ongoing_moves[-1] if self._ongoing_moves else None,
+            ),
         )
 
 
@@ -392,7 +416,10 @@ def test_game_action_worker_submits_draw_and_resignation() -> None:
 
 
 def test_move_submission_worker_emits_acceptance() -> None:
-    client = SubmissionClient(server_moves=("e2e4",))
+    client = SubmissionClient(
+        server_moves=(),
+        ongoing_moves=("e2e4",),
+    )
     worker = LichessMoveSubmissionWorker(
         cast(LichessReadOnlyClient, client),
         "game1234",
@@ -484,7 +511,8 @@ def test_move_submission_worker_resolves_lost_response_from_history() -> None:
     assert accepted == [("game1234", "e2e4")]
 
 
-def test_move_submission_worker_resolves_rejection_from_history() -> None:
+def test_move_submission_worker_keeps_unchanged_active_position_uncertain(
+) -> None:
     client = SubmissionClient(
         submit_error=LichessConnectionError("Response was lost."),
     )
@@ -494,22 +522,17 @@ def test_move_submission_worker_resolves_rejection_from_history() -> None:
         "e2e4",
         (),
     )
-    rejected: list[tuple[str, str, str]] = []
-    worker.rejected.connect(
-        lambda game_id, uci, message: rejected.append(
+    uncertain: list[tuple[str, str, str]] = []
+    worker.uncertain.connect(
+        lambda game_id, uci, message: uncertain.append(
             (game_id, uci, message)
         )
     )
 
     worker.run()
 
-    assert rejected == [
-        (
-            "game1234",
-            "e2e4",
-            "Lichess history confirms that the move was not accepted.",
-        )
-    ]
+    assert len(uncertain) == 1
+    assert "does not contain the move yet" in uncertain[0][2]
 
 
 def test_move_submission_worker_reports_unresolved_outcome() -> None:
@@ -671,6 +694,186 @@ def test_worker_falls_back_to_read_only_polling() -> None:
     assert snapshot.game.state.black_time_ms == 604000
 
 
+def test_active_polling_accepts_ongoing_position_one_move_ahead_of_export(
+) -> None:
+    before = chess.Board()
+    for uci in ("e2e4", "e7e5", "g1f3", "f8d6", "f1c4"):
+        before.push_uci(uci)
+    after = before.copy()
+    after.push_uci("b8c6")
+    worker = LichessConnectionWorker(
+        cast(LichessReadOnlyClient, PollingFallbackClient())
+    )
+    before_game = OngoingGame(
+        "v0qtcftC",
+        "v0qtcftCabcd",
+        "white",
+        before.fen(),
+        "Stockfish level 1",
+        False,
+        "f1c4",
+        343000,
+    )
+    after_game = OngoingGame(
+        "v0qtcftC",
+        "v0qtcftCabcd",
+        "white",
+        after.fen(),
+        "Stockfish level 1",
+        True,
+        "b8c6",
+        343000,
+    )
+    stale_export = LichessPollingSnapshot(
+        LichessGameFull(
+            "v0qtcftC",
+            chess.STARTING_FEN,
+            LichessPlayer("white", "Meine", 1661),
+            LichessPlayer("black", "Stockfish level 1", None),
+            LichessGameState(
+                ("e2e4", "e7e5", "g1f3", "f8d6", "f1c4"),
+                before.fen(),
+                "black",
+                343360,
+                603390,
+                5000,
+                5000,
+                "started",
+                None,
+                "*",
+            ),
+        ),
+        True,
+        1795272166192,
+    )
+    worker._polling_snapshot(before_game)
+
+    snapshot = worker._active_polling_snapshot(after_game, stale_export)
+
+    assert snapshot.game.state.moves == ("b8c6",)
+    assert snapshot.game.state.fen == after.fen()
+    assert snapshot.game.state.turn == "white"
+    assert snapshot.game.state.white_time_ms == 343000
+    assert snapshot.game.state.black_time_ms == 603390
+    assert snapshot.clocks_available
+
+
+def test_active_polling_accepts_position_three_moves_ahead_of_export() -> None:
+    export_board = chess.Board()
+    for uci in ("e2e4", "e7e5", "c2c4", "b8c6", "d2d3"):
+        export_board.push_uci(uci)
+    previous_board = export_board.copy()
+    for uci in ("f8b4", "c1d2"):
+        previous_board.push_uci(uci)
+    current_board = previous_board.copy()
+    current_board.push_uci("d8e7")
+    worker = LichessConnectionWorker(
+        cast(LichessReadOnlyClient, PollingFallbackClient())
+    )
+    previous_game = OngoingGame(
+        "9YQEOn3r",
+        "9YQEOn3rabcd",
+        "white",
+        previous_board.fen(),
+        "Stockfish level 1",
+        False,
+        "c1d2",
+        541000,
+    )
+    current_game = OngoingGame(
+        "9YQEOn3r",
+        "9YQEOn3rabcd",
+        "white",
+        current_board.fen(),
+        "Stockfish level 1",
+        True,
+        "d8e7",
+        541000,
+    )
+    stale_export = LichessPollingSnapshot(
+        LichessGameFull(
+            "9YQEOn3r",
+            chess.STARTING_FEN,
+            LichessPlayer("white", "Meine", 1661),
+            LichessPlayer("black", "Stockfish level 1", None),
+            LichessGameState(
+                ("e2e4", "e7e5", "c2c4", "b8c6", "d2d3"),
+                export_board.fen(),
+                "black",
+                541000,
+                602000,
+                5000,
+                5000,
+                "started",
+                None,
+                "*",
+            ),
+        ),
+        True,
+    )
+    worker._polling_snapshot(previous_game)
+
+    snapshot = worker._active_polling_snapshot(current_game, stale_export)
+
+    assert snapshot.game.state.moves == ("d8e7",)
+    assert snapshot.game.state.fen == current_board.fen()
+    assert snapshot.game.state.turn == "white"
+    assert snapshot.game.state.white_time_ms == 541000
+    assert not snapshot.clocks_available
+
+
+def test_reconnect_accepts_current_position_when_export_is_one_move_behind(
+) -> None:
+    before = chess.Board()
+    for uci in ("e2e4", "e7e5", "g1f3", "f8d6", "f1c4"):
+        before.push_uci(uci)
+    after = before.copy()
+    after.push_uci("b8c6")
+    worker = LichessConnectionWorker(
+        cast(LichessReadOnlyClient, PollingFallbackClient())
+    )
+    game = OngoingGame(
+        "v0qtcftC",
+        "v0qtcftCabcd",
+        "white",
+        after.fen(),
+        "Stockfish level 1",
+        True,
+        "b8c6",
+        343000,
+    )
+    stale_export = LichessPollingSnapshot(
+        LichessGameFull(
+            "v0qtcftC",
+            chess.STARTING_FEN,
+            LichessPlayer("white", "Meine", 1661),
+            LichessPlayer("black", "Stockfish level 1", None),
+            LichessGameState(
+                ("e2e4", "e7e5", "g1f3", "f8d6", "f1c4"),
+                before.fen(),
+                "black",
+                343360,
+                603390,
+                5000,
+                5000,
+                "started",
+                None,
+                "*",
+            ),
+        ),
+        True,
+        1795272166192,
+    )
+
+    snapshot = worker._active_polling_snapshot(game, stale_export)
+
+    assert snapshot.game.initial_fen == after.fen()
+    assert snapshot.game.state.moves == ()
+    assert snapshot.game.state.fen == after.fen()
+    assert snapshot.game.state.white_time_ms == 343000
+    assert snapshot.clocks_available
+
+
 def test_polling_fetches_terminal_move_when_game_disappears() -> None:
     moves = (
         "e2e4",
@@ -785,6 +988,71 @@ def test_polling_fetches_terminal_move_when_game_disappears() -> None:
     assert final_snapshot.game.state.status == "mate"
     assert final_snapshot.game.state.result == "0-1"
     assert worker._polling_game_id is None
+
+
+def test_polling_retains_cursor_while_terminal_export_is_still_active(
+) -> None:
+    class LaggingTerminalClient:
+        def __init__(self) -> None:
+            self.ongoing_calls = 0
+
+        def get_ongoing_games(self) -> tuple[OngoingGame, ...]:
+            self.ongoing_calls += 1
+            if self.ongoing_calls > 1:
+                return ()
+            return (
+                OngoingGame(
+                    "lagging1",
+                    "lagging1abcd",
+                    "white",
+                    chess.STARTING_FEN,
+                    "Stockfish level 1",
+                    True,
+                ),
+            )
+
+        def get_game_snapshot(
+            self,
+            game_id: str,
+        ) -> LichessPollingSnapshot:
+            return LichessPollingSnapshot(
+                LichessGameFull(
+                    game_id,
+                    chess.STARTING_FEN,
+                    LichessPlayer("white", "Meine", None),
+                    LichessPlayer("black", "Stockfish level 1", None),
+                    LichessGameState(
+                        (),
+                        chess.STARTING_FEN,
+                        "white",
+                        600000,
+                        600000,
+                        5000,
+                        5000,
+                        "started",
+                        None,
+                        "*",
+                    ),
+                ),
+                True,
+            )
+
+    worker = LichessConnectionWorker(
+        cast(LichessReadOnlyClient, LaggingTerminalClient())
+    )
+    statuses: list[str] = []
+    ongoing_events: list[tuple[OngoingGame, ...]] = []
+    worker.status_changed.connect(statuses.append)
+    worker.ongoing_games_received.connect(ongoing_events.append)
+
+    assert worker._poll_ongoing_game(None) == "lagging1"
+    assert worker._poll_ongoing_game("lagging1") == "lagging1"
+    assert worker._polling_game_id == "lagging1"
+    assert len(ongoing_events) == 1
+    assert ongoing_events[0][0].game_id == "lagging1"
+    assert statuses == [
+        "Lichess game ended; waiting for its final authoritative snapshot."
+    ]
 
 
 def test_terminal_timeout_rolls_back_uncommitted_local_move() -> None:

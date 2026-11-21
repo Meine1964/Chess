@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -53,6 +53,18 @@ PROMOTION_GLYPHS: dict[PromotionPiece, str] = {
     "b": "♝",
     "r": "♜",
     "q": "♛",
+}
+_SEVEN_SEGMENT_DIGITS: dict[str, frozenset[str]] = {
+    "0": frozenset("abcdef"),
+    "1": frozenset("bc"),
+    "2": frozenset("abdeg"),
+    "3": frozenset("abcdg"),
+    "4": frozenset("bcfg"),
+    "5": frozenset("acdfg"),
+    "6": frozenset("acdefg"),
+    "7": frozenset("abc"),
+    "8": frozenset("abcdefg"),
+    "9": frozenset("abcdfg"),
 }
 
 
@@ -113,6 +125,9 @@ class ProjectorWindow(QWidget):
         self._promotion_piece: PromotionPiece | None = None
         self._promotion_destination: tuple[int, int] | None = None
         self._turn_indicator_corner: TurnIndicatorCorner | None = None
+        self._white_clock_text: str | None = None
+        self._black_clock_text: str | None = None
+        self._clock_board_quarter_turns = 0
         self.setWindowTitle("Chess Projector Output")
         self.setCursor(Qt.CursorShape.BlankCursor)
 
@@ -148,6 +163,26 @@ class ProjectorWindow(QWidget):
         corner: TurnIndicatorCorner | None,
     ) -> None:
         self._turn_indicator_corner = corner
+        self.update()
+
+    def set_edge_clocks(
+        self,
+        white_clock: str | None,
+        black_clock: str | None,
+        *,
+        board_quarter_turns: int,
+    ) -> None:
+        if (white_clock is None) != (black_clock is None):
+            raise ValueError("Both projected clocks must be set or cleared.")
+        for clock in (white_clock, black_clock):
+            if clock is not None and (
+                clock.count(":") != 1
+                or any(character not in "0123456789:" for character in clock)
+            ):
+                raise ValueError("Projected clocks must use digits and a colon.")
+        self._white_clock_text = white_clock
+        self._black_clock_text = black_clock
+        self._clock_board_quarter_turns = board_quarter_turns % 4
         self.update()
 
     def show_pattern(self, pattern: NDArray[np.uint8]) -> None:
@@ -485,6 +520,33 @@ class ProjectorWindow(QWidget):
                     self._promotion_viewer_edge,
                 )
         if (
+            self._display_mode
+            in ("black", "move", "illegal", "correction", "reconciliation")
+            and self._projector_grid is not None
+            and self._white_clock_text is not None
+            and self._black_clock_text is not None
+        ):
+            self._draw_edge_clock(
+                painter,
+                self._edge_clock_polygon(
+                    self._projector_grid,
+                    6,
+                    8,
+                    board_quarter_turns=self._clock_board_quarter_turns,
+                ),
+                self._white_clock_text,
+            )
+            self._draw_edge_clock(
+                painter,
+                self._edge_clock_polygon(
+                    self._projector_grid,
+                    0,
+                    2,
+                    board_quarter_turns=self._clock_board_quarter_turns,
+                ),
+                self._black_clock_text,
+            )
+        if (
             (
                 self._display_mode == "black"
                 or (
@@ -550,6 +612,185 @@ class ProjectorWindow(QWidget):
             * 0.14,
         )
         return QPointF(float(center[0]), float(center[1])), radius
+
+    @staticmethod
+    def _edge_clock_polygon(
+        grid: NDArray[np.float32],
+        start_row: int,
+        end_row: int,
+        *,
+        board_quarter_turns: int,
+    ) -> NDArray[np.float32]:
+        if grid.shape != (9, 9, 2):
+            raise ValueError("The projector grid must have shape (9, 9, 2).")
+        if not 0 <= start_row < end_row <= 8:
+            raise ValueError("Clock rows must define a non-empty board edge.")
+
+        def grid_point(row: int, column: int) -> NDArray[np.float32]:
+            for _ in range(board_quarter_turns % 4):
+                row, column = column, 8 - row
+            return grid[row, column]
+
+        start_boundary = grid_point(start_row, 0)
+        end_boundary = grid_point(end_row, 0)
+        start_inward = grid_point(start_row, 1)
+        end_inward = grid_point(end_row, 1)
+        end_outward = end_boundary + end_boundary - end_inward
+        start_outward = start_boundary + start_boundary - start_inward
+        return np.asarray(
+            (
+                start_boundary,
+                end_boundary,
+                end_outward,
+                start_outward,
+            ),
+            dtype=np.float32,
+        )
+
+    @staticmethod
+    def _draw_edge_clock(
+        painter: QPainter,
+        polygon: NDArray[np.float32],
+        text: str,
+    ) -> None:
+        canonical_width = 256.0
+        canonical_height = 128.0
+        transform = ProjectorWindow._edge_clock_paint_transform(
+            polygon,
+            canonical_width,
+            canonical_height,
+        )
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(PROJECTED_LEGAL_MOVE)
+        painter.setWorldTransform(transform, combine=True)
+        margin = 8.0
+        cell_width = (canonical_width - margin * 2) / len(text)
+        for index, character in enumerate(text):
+            left = margin + index * cell_width
+            if character == ":":
+                radius = min(cell_width, canonical_height) * 0.1
+                center_x = left + cell_width / 2
+                for center_y in (canonical_height * 0.38, canonical_height * 0.68):
+                    painter.drawEllipse(
+                        QPointF(center_x, center_y),
+                        radius,
+                        radius,
+                    )
+                continue
+            ProjectorWindow._draw_seven_segment_digit(
+                painter,
+                QRectF(
+                    left + cell_width * 0.08,
+                    canonical_height * 0.08,
+                    cell_width * 0.84,
+                    canonical_height * 0.84,
+                ),
+                character,
+            )
+        painter.restore()
+
+    @staticmethod
+    def _edge_clock_paint_transform(
+        polygon: NDArray[np.float32],
+        width: float,
+        height: float,
+    ) -> QTransform:
+        source = QPolygonF(
+            [
+                QPointF(0.0, 0.0),
+                QPointF(width, 0.0),
+                QPointF(width, height),
+                QPointF(0.0, height),
+            ]
+        )
+        perspective = cast(
+            QTransform,
+            QTransform.quadToQuad(
+                source,
+                ProjectorWindow._polygon(polygon),
+            ),
+        )
+        return (
+            ProjectorWindow._edge_clock_content_transform(width, height)
+            * perspective
+        )
+
+    @staticmethod
+    def _edge_clock_content_transform(
+        width: float,
+        height: float,
+    ) -> QTransform:
+        transform = QTransform()
+        transform.translate(width / 2, height / 2)
+        transform.rotate(180.0)
+        transform.scale(1.0, 0.7)
+        transform.translate(-width / 2, -height / 2)
+        return transform
+
+    @staticmethod
+    def _draw_seven_segment_digit(
+        painter: QPainter,
+        bounds: QRectF,
+        digit: str,
+    ) -> None:
+        segments = _SEVEN_SEGMENT_DIGITS[digit]
+        width = bounds.width()
+        height = bounds.height()
+        thickness = min(width * 0.22, height * 0.09)
+        horizontal_width = width - thickness * 2
+        vertical_height = height / 2 - thickness * 1.5
+        rectangles = {
+            "a": QRectF(
+                bounds.left() + thickness,
+                bounds.top(),
+                horizontal_width,
+                thickness,
+            ),
+            "b": QRectF(
+                bounds.right() - thickness,
+                bounds.top() + thickness,
+                thickness,
+                vertical_height,
+            ),
+            "c": QRectF(
+                bounds.right() - thickness,
+                bounds.center().y() + thickness / 2,
+                thickness,
+                vertical_height,
+            ),
+            "d": QRectF(
+                bounds.left() + thickness,
+                bounds.bottom() - thickness,
+                horizontal_width,
+                thickness,
+            ),
+            "e": QRectF(
+                bounds.left(),
+                bounds.center().y() + thickness / 2,
+                thickness,
+                vertical_height,
+            ),
+            "f": QRectF(
+                bounds.left(),
+                bounds.top() + thickness,
+                thickness,
+                vertical_height,
+            ),
+            "g": QRectF(
+                bounds.left() + thickness,
+                bounds.center().y() - thickness / 2,
+                horizontal_width,
+                thickness,
+            ),
+        }
+        for segment in segments:
+            painter.drawRoundedRect(
+                rectangles[segment],
+                thickness * 0.35,
+                thickness * 0.35,
+            )
 
     @staticmethod
     def _promotion_rotation(viewer_edge: PromotionEdge) -> float:

@@ -376,6 +376,7 @@ def test_polling_fallback_discovers_and_reconstructs_ai_game() -> None:
                             "username": "Stockfish level 1",
                         },
                         "isMyTurn": True,
+                        "secondsLeft": 597,
                     }
                 ],
                 "nbMyTurn": 1,
@@ -392,6 +393,7 @@ def test_polling_fallback_discovers_and_reconstructs_ai_game() -> None:
     snapshot = client.get_game_snapshot(games[0].game_id)
 
     assert games[0].opponent_name == "Stockfish level 1"
+    assert games[0].seconds_left_ms == 597000
     assert isinstance(snapshot, LichessPollingSnapshot)
     assert snapshot.game.black.name == "Stockfish level 1"
     assert snapshot.game.state.moves == (
@@ -406,10 +408,53 @@ def test_polling_fallback_discovers_and_reconstructs_ai_game() -> None:
     assert snapshot.clocks_available
     assert snapshot.game.state.white_time_ms == 597000
     assert snapshot.game.state.black_time_ms == 596000
+    assert snapshot.clock_sample_at_ms == 9999999999999
     assert transport.requests[-1][0] == (
         "/game/export/oozTO3xk"
         "?clocks=true&evals=false&opening=false&literate=false"
     )
+
+
+def test_time_forfeit_export_accepts_extra_clock_sample() -> None:
+    transport = FakeTransport(
+        {},
+        {
+            (
+                "/game/export/v0qtcftC"
+                "?clocks=true&evals=false&opening=false&literate=false"
+            ): {
+                "id": "v0qtcftC",
+                "variant": "standard",
+                "status": "outoftime",
+                "winner": "black",
+                "players": {
+                    "white": {"user": {"name": "Meine"}, "rating": 1661},
+                    "black": {"aiLevel": 1},
+                },
+                "moves": "e4 e5 Nf3 Bd6 Bc4 Nc6",
+                "clocks": [
+                    60003,
+                    60003,
+                    35683,
+                    60339,
+                    34336,
+                    60558,
+                    0,
+                ],
+                "clock": {"initial": 600, "increment": 5},
+                "lastMoveAt": 1795272166192,
+            },
+        },
+    )
+    client = LichessReadOnlyClient("secret-token", transport=transport)
+
+    snapshot = client.get_game_snapshot("v0qtcftC")
+
+    assert snapshot.game.state.moves[-1] == "b8c6"
+    assert snapshot.game.state.white_time_ms == 0
+    assert snapshot.game.state.black_time_ms == 605580
+    assert snapshot.game.state.status == "outoftime"
+    assert snapshot.game.state.result == "0-1"
 
 
 def test_invalid_game_move_list_is_rejected() -> None:

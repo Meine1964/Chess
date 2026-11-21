@@ -89,17 +89,67 @@ result. Full snapshots establish player identity and state; incremental state
 events update clocks, turn, status, and result without discarding player
 identity.
 
-Polling shall retrieve an authoritative non-streaming JSON game export for the
-selected game on every polling interval and use its move history, White and
-Black clock values, increments, status, and result. Both clocks shall therefore
-remain visible during timed games even when the long-lived Board event stream
-is unavailable. The export clock samples shall be advanced by elapsed server
-time for the side to move. When no authoritative export can be retrieved,
-polling shall fail explicitly rather than continue a timed game with hidden
-clocks. Zero is a valid displayed clock only when the authoritative export
-reports zero. Before an active game is loaded, the panel shall explicitly
-report that no game information is available rather than displaying stale
-values from another selected game.
+During an active game, polling shall treat the authenticated ongoing-game FEN
+and last move as authoritative for the current position. It shall retrieve a
+non-streaming JSON game export on every polling interval to enrich that
+position with player identity, clock samples, increments, status, and result.
+Both clocks shall therefore remain visible during timed games even when the
+long-lived Board event stream is unavailable.
+
+The export may temporarily lag behind the authenticated ongoing-game position.
+When its FEN is exactly one reported legal move behind, polling shall accept and
+emit the newer ongoing position, use the ongoing `secondsLeft` value for the
+local player's clock, estimate the missing mover's clock from the preceding
+sample and increment, and continue polling until the export catches up. A
+lag of multiple plies shall likewise emit the newer ongoing position but mark
+the delayed export clocks unavailable until the export catches up, because
+their ownership cannot be reconstructed safely. A lagging export shall never
+reject an official move, reset a valid polling cursor, or terminate the polling
+worker. A malformed ongoing position or wrong-game export shall still fail
+explicitly rather than be merged speculatively.
+
+Export clock samples shall retain their server sample timestamp. Elapsed time
+shall be applied only after the worker has established which position the
+sample describes; a stale export shall not charge all time since its last move
+to a player who has already moved. Zero is a valid displayed clock only when an
+authoritative source or the local monotonic countdown reaches zero. Before an
+active game is loaded, the panel shall explicitly report that no game
+information is available rather than displaying stale values from another
+selected game.
+
+Between authoritative stream events or polling snapshots, the displayed clock
+for the side to move shall count down using locally elapsed monotonic time. The
+inactive clock shall remain unchanged. Every new authoritative state shall
+replace both clock values and restart the local elapsed-time baseline. The
+display shall stop at zero, but reaching zero locally shall not declare a
+timeout or otherwise make the game terminal; only an authoritative Lichess
+status may end the game. Local countdown shall stop when clocks are unavailable
+or the authoritative game state is no longer active.
+
+During an active timed Lichess game, the projector shall also display both
+clocks immediately outside the board's logical a-file: White beside a1-a2 and
+Black beside a7-a8. Clock placement shall read the already-established logical
+board orientation solely to map that edge into calibrated projector geometry.
+It shall neither request board-orientation detection nor modify the orientation
+used to map move squares. Both clocks shall be readable from the board center.
+Their projective quadrilaterals shall preserve winding and shall never reflect
+the seven-segment glyphs.
+Within those non-reflecting quadrilaterals, both complete clock faces shall be
+rotated 180 degrees. Their digit and colon content shall be scaled to 70% of
+its prior height around the clock region's unchanged center. Rotation and
+scaling shall be composed in canonical clock space before the perspective warp
+so they cannot rotate or translate the complete region around the projector
+origin. Clock digits shall use a geometric seven-segment design with a colon
+rather than depend on an operating-system font. The clocks shall be bright
+white on the otherwise black edge, shall not replace or suppress projected
+move and correction markings, and shall inherit the same locally advancing
+display values as the on-screen clocks.
+
+Projected clocks shall remain hidden until a complete White-side orientation
+and a calibrated projector grid are available. They shall also remain hidden
+when clocks are unavailable, the Lichess game is terminal, or calibration and
+diagnostic patterns own the projector output. Locally displayed zero shall not
+project or imply an authoritative timeout result.
 
 ## 3. Scope
 
@@ -207,15 +257,25 @@ selects one.
 The selector shall identify each game by opponent, player color, turn state,
 and game ID. Changing the selection shall discard the prior game's
 synchronization controller before the selected game's snapshot is applied.
+Changing games shall not invalidate, redetect, or modify the established
+physical-board orientation. A physical position retained from another game may
+be compared with the selected game's current position and may enter the
+existing reconciliation flow, but clock lifecycle events shall not alter the
+coordinate mapping used by move guidance.
+
 If the selected game is no longer present in the ongoing-games response,
 polling shall retrieve one final authoritative snapshot by the remembered game
 ID before clearing its polling cursor. Any final opponent move, including a
 move that ends the game, shall enter the normal pending physical-move queue and
 remain available for projection and confirmation. Only after that snapshot is
 emitted may polling return to the selection-required state. If final-snapshot
-retrieval fails, the cursor shall remain intact and polling shall report the
-failure through its normal retry path rather than silently dropping the final
-move.
+retrieval fails or still reports an active game, the cursor shall remain intact
+and polling shall retry rather than silently dropping the final move.
+
+A terminal time-forfeit export may contain one more clock sample than chess
+moves because the final sample records the flag fall without another move.
+That sample shall update the clock of the side that was due to move and shall
+not create a fictitious move or make the payload invalid.
 
 The final authoritative snapshot shall also supersede an optimistic local move
 that was submitted concurrently with game termination but is absent from the
@@ -780,11 +840,12 @@ The application shall use a two-phase commit:
    reference, physical position, server position, UI position, or turn.
 2. Submit the UCI move once with
    `POST /api/board/game/{gameId}/move/{move}`.
-3. After a successful response, fetch an authoritative game snapshot. Advance
-   the controller's server and physical positions, commit the preserved image
-   as the accepted reference, update the UI, persist synchronized state, and
-   display the accepted move only when authoritative history contains the
-   previously confirmed moves followed by the submitted move.
+3. After a successful response, fetch the authenticated ongoing-game position.
+   Advance the controller's server and physical positions, commit the preserved
+   image as the accepted reference, update the UI, persist synchronized state,
+   and display the accepted move only when its FEN equals the expected
+   post-move FEN. If the game is no longer ongoing, use the terminal export for
+   confirmation instead.
 4. After an explicit HTTP rejection, preserve the previous authoritative state
    and reference and require the physical move to be restored.
 
@@ -792,15 +853,17 @@ The application shall pause further camera move inference while submission is
 pending. It shall never retry a move automatically.
 
 After every POST response, including an apparently successful response, the
-submission worker shall fetch the authoritative game snapshot:
+submission worker shall fetch the authenticated ongoing-game position:
 
-- If history equals the previously confirmed history plus the submitted move,
-  treat the move as accepted and commit it once.
-- If history still equals the previously confirmed history, treat the move as
-  rejected and require restoration when the game is terminal; if the game is
-  still active, report an uncertain result without committing either state.
-- If the refresh fails or history has another shape, enter reconciliation and
-  preserve both the previous reference and the pending physical discrepancy.
+- If its FEN equals the expected post-move FEN, treat the move as accepted and
+  commit it once.
+- If its FEN still equals the previously confirmed FEN, report an uncertain
+  active result without committing either state.
+- If the game is absent, fetch the terminal export and use its official FEN,
+  history, status, and result to confirm or reject the move.
+- If either refresh fails or the position has another shape, enter
+  reconciliation and preserve both the previous reference and the pending
+  physical discrepancy.
 
 Polling fallback remains capable of submitting moves. Polling affects only how
 authoritative game updates are received; it does not make a valid Board API
