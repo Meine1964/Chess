@@ -117,6 +117,7 @@ class ProjectorWindow(QWidget):
             | Qt.WindowType.WindowStaysOnTopHint,
         )
         self._display_mode: DisplayMode = "black"
+        self._calibration_overlays_suppressed = False
         self._pattern: QImage | None = None
         self._projector_grid: NDArray[np.float32] | None = None
         self._selected_square: tuple[int, int] | None = None
@@ -173,6 +174,12 @@ class ProjectorWindow(QWidget):
         if self._edge_activity_indicator_active == active:
             return
         self._edge_activity_indicator_active = active
+        self.update()
+
+    def set_calibration_overlays_suppressed(self, suppressed: bool) -> None:
+        if self._calibration_overlays_suppressed == suppressed:
+            return
+        self._calibration_overlays_suppressed = suppressed
         self.update()
 
     def set_turn_indicator(
@@ -537,7 +544,8 @@ class ProjectorWindow(QWidget):
                     self._promotion_viewer_edge,
                 )
         if (
-            self._display_mode
+            not self._calibration_overlays_suppressed
+            and self._display_mode
             in (
                 "black",
                 "move",
@@ -640,7 +648,8 @@ class ProjectorWindow(QWidget):
             painter.setBrush(PROJECTED_LEGAL_MOVE)
             painter.drawPolygon(self._polygon(polygon))
         if (
-            self._edge_activity_indicator_active
+            not self._calibration_overlays_suppressed
+            and self._edge_activity_indicator_active
             and self._projector_grid is not None
         ):
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)

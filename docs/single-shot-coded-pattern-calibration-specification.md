@@ -1,6 +1,6 @@
 # Single-Shot Coded-Pattern Chessboard Calibration Specification
 
-**Version:** 0.3
+**Version:** 0.4
 **Status:** Experimental implementation; existing Gray-code calibration preserved
 **Platform:** Python on Windows
 **Camera:** Logitech Webcam C930e at 1920x1080
@@ -541,8 +541,8 @@ coded-pattern measurement or the legacy full calibration.
 
 While experimental, the UI should provide:
 
-- **Full calibration - coded pattern**
-- **Full calibration - legacy Gray code**
+- **Populated calibration - experimental**
+- **Full calibration - empty board**
 - **Validate calibration**
 - **Quick realign / assess**
 - **Cancel calibration**
@@ -647,17 +647,17 @@ grid alignment at least `0.8`, and reprojection error no greater than `1.1`
 camera pixels, the internal-corner grid is sufficiently verified to serve as
 the populated-board lattice. Independent projected-target validation remains
 mandatory.
-into projector coordinates. Hidden outer ranks are extrapolated from that
-fit. Rough outer-boundary observations may weakly anchor the extrapolation
+Hidden outer ranks are extrapolated from that fit. Rough outer-boundary
+observations may weakly anchor the extrapolation
 only when they remain within 20% of a square and the rough interior has no
 significant systematic translation relative to the measured intersections.
 This improves outer-corner stability without accepting a decorative
 one-square border as part of the playing surface.
 
-This path is exposed as **Full calibration - coded pattern**. It reuses the
-independent validation sequence and leaves the previous verified calibration
-active if capture, fitting, or validation fails. **Full projector calibration**
-continues to invoke the legacy Gray-code path.
+This path is exposed as **Populated calibration - experimental**. It reuses
+the independent validation sequence and leaves the previous verified
+calibration active if capture, fitting, or validation fails. **Full
+calibration - empty board** continues to invoke the preserved Gray-code path.
 
 ### Milestone 1: Pattern experiment
 

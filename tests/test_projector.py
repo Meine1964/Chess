@@ -375,6 +375,54 @@ def test_projector_renders_seven_segment_clocks_outside_board(
     assert image.pixelColor(100, 90).red() == 0
 
 
+def test_calibration_suppresses_clocks_and_activity_indicator(
+    application: QApplication,
+) -> None:
+    from unittest.mock import patch
+
+    window = ProjectorWindow()
+    window.resize(360, 180)
+    x_values = np.linspace(80, 280, 9, dtype=np.float32)
+    y_values = np.linspace(10, 170, 9, dtype=np.float32)
+    x_grid, y_grid = np.meshgrid(x_values, y_values)
+    grid = np.stack((x_grid, y_grid), axis=2).astype(np.float32)
+    window.set_projector_grid(grid)
+    window.set_edge_clocks("1:05", "9:42", board_quarter_turns=0)
+    window.set_edge_activity_indicator(True)
+    window.show_black()
+    window.show()
+
+    with patch.object(
+        ProjectorWindow,
+        "_draw_edge_clock",
+    ) as draw_edge_clock:
+        window.set_calibration_overlays_suppressed(True)
+        application.processEvents()
+        suppressed = window.grab().toImage()
+
+    indicator_center = np.rint(
+        np.mean(
+            ProjectorWindow._edge_activity_indicator_polygon(grid),
+            axis=0,
+        )
+    ).astype(int)
+    assert draw_edge_clock.call_count == 0
+    assert suppressed.pixelColor(
+        int(indicator_center[0]),
+        int(indicator_center[1]),
+    ).red() == 0
+
+    with patch.object(
+        ProjectorWindow,
+        "_draw_edge_clock",
+    ) as draw_edge_clock:
+        window.set_calibration_overlays_suppressed(False)
+        application.processEvents()
+
+    assert draw_edge_clock.call_count == 2
+    window.close()
+
+
 def test_projector_places_timeout_result_between_clocks(
     application: QApplication,
 ) -> None:

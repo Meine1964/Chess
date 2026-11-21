@@ -1342,6 +1342,7 @@ class CameraWindow(QMainWindow):
         self._offline_move_marking_active = False
         self._offline_move_marking_blackout_pending = False
         self._offline_move_marking_generation = 0
+        self._calibration_grid_preview_generation = 0
         self._illegal_correction_projection_active = False
         self._illegal_correction_blackout_pending = False
         self._illegal_correction_generation = 0
@@ -2020,9 +2021,8 @@ class CameraWindow(QMainWindow):
         projector_menu.addAction(self._black_projector_button)
         projector_menu.addAction(self._close_projector_button)
         projector_menu.addSeparator()
-        patterns_menu = projector_menu.addMenu("Test patterns")
-        patterns_menu.addAction(self._show_grid_button)
-        patterns_menu.addAction(self._show_squares_button)
+        projector_menu.addAction(self._show_grid_button)
+        projector_menu.addAction(self._show_squares_button)
 
         calibration_menu = self.menuBar().addMenu("&Calibration")
         calibration_menu.addAction(self._start_calibration_button)
@@ -2988,6 +2988,8 @@ class CameraWindow(QMainWindow):
     def _show_calibrated_grid(self) -> None:
         if not self._open_projector():
             return
+        self._calibration_grid_preview_generation += 1
+        self._projector_window.set_calibration_overlays_suppressed(False)
         try:
             self._projector_window.show_grid()
         except RuntimeError as error:
@@ -3025,6 +3027,7 @@ class CameraWindow(QMainWindow):
         self._calibration_progress.setValue(value)
 
     def _projector_calibration_active(self, active: bool) -> None:
+        self._projector_window.set_calibration_overlays_suppressed(active)
         self._calibration_progress.setVisible(active)
         self._start_calibration_button.setEnabled(not active)
         self._coded_calibration_button.setEnabled(not active)
@@ -3050,6 +3053,7 @@ class CameraWindow(QMainWindow):
 
     def _cancel_projector_calibration(self) -> None:
         self._calibrator.cancel()
+        self._projector_window.set_calibration_overlays_suppressed(False)
         self._restore_remembered_square()
         self._record_runtime_diagnostic(
             "calibration-cancelled",
@@ -3061,6 +3065,15 @@ class CameraWindow(QMainWindow):
         result: CalibrationResult,
     ) -> None:
         self._activate_calibration_result(result)
+        self._projector_window.set_calibration_overlays_suppressed(True)
+        self._calibration_grid_preview_generation += 1
+        preview_generation = self._calibration_grid_preview_generation
+        QTimer.singleShot(
+            5000,
+            lambda: self._finish_calibration_grid_preview(
+                preview_generation
+            ),
+        )
         self._alignment_monitor.set_paused(
             "calibration grid preview; select Black or a square to resume"
         )
@@ -3122,9 +3135,22 @@ class CameraWindow(QMainWindow):
             },
             include_images=True,
         )
+
+    def _finish_calibration_grid_preview(self, generation: int) -> None:
+        if generation != self._calibration_grid_preview_generation:
+            return
+        self._projector_window.set_calibration_overlays_suppressed(False)
+        if self._projector_window.output_mode != "grid":
+            return
+        self._projector_window.show_black()
+        self._alignment_monitor.set_black()
+        self._projector_status.setText(
+            "Calibration grid preview finished; projector returned to black."
+        )
         self._restore_remembered_square()
 
     def _projector_calibration_failed(self, message: str) -> None:
+        self._projector_window.set_calibration_overlays_suppressed(False)
         self._projector_window.show_black()
         if self._calibrator.quick_verification:
             operation = "Quick realignment"

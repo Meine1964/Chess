@@ -480,6 +480,90 @@ def test_new_calibration_requires_orientation_redetection() -> None:
     assert window._piece_side_orientation_needs_detection is True
 
 
+def test_calibration_grid_preview_returns_to_black() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    projector = SimpleNamespace(
+        output_mode="grid",
+        show_black=MagicMock(),
+        set_calibration_overlays_suppressed=MagicMock(),
+    )
+    window = SimpleNamespace(
+        _calibration_grid_preview_generation=3,
+        _projector_window=projector,
+        _alignment_monitor=MagicMock(),
+        _projector_status=MagicMock(),
+        _restore_remembered_square=MagicMock(),
+    )
+
+    CameraWindow._finish_calibration_grid_preview(window, 3)
+
+    projector.show_black.assert_called_once_with()
+    projector.set_calibration_overlays_suppressed.assert_called_once_with(
+        False
+    )
+    window._alignment_monitor.set_black.assert_called_once_with()
+    window._projector_status.setText.assert_called_once_with(
+        "Calibration grid preview finished; projector returned to black."
+    )
+    window._restore_remembered_square.assert_called_once_with()
+
+
+def test_completed_calibration_schedules_five_second_grid_preview() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    window = SimpleNamespace(
+        _activate_calibration_result=MagicMock(),
+        _calibration_grid_preview_generation=0,
+        _alignment_monitor=MagicMock(),
+        _calibration_progress=MagicMock(),
+        _latest_frame=None,
+        _finish_calibration_grid_preview=MagicMock(),
+        _projector_window=MagicMock(),
+    )
+
+    with patch(
+        "src.chess_camera.camera_app.QTimer.singleShot"
+    ) as single_shot:
+        CameraWindow._projector_calibration_completed(window, object())
+
+    single_shot.assert_called_once()
+    delay, callback = single_shot.call_args.args
+    assert delay == 5000
+    callback()
+    window._finish_calibration_grid_preview.assert_called_once_with(1)
+
+
+def test_stale_calibration_grid_timer_keeps_manual_grid() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    projector = SimpleNamespace(
+        output_mode="grid",
+        show_black=MagicMock(),
+        set_calibration_overlays_suppressed=MagicMock(),
+    )
+    window = SimpleNamespace(
+        _calibration_grid_preview_generation=4,
+        _projector_window=projector,
+        _alignment_monitor=MagicMock(),
+        _projector_status=MagicMock(),
+    )
+
+    CameraWindow._finish_calibration_grid_preview(window, 3)
+
+    projector.show_black.assert_not_called()
+    window._alignment_monitor.set_black.assert_not_called()
+
+
 def test_loaded_camera_geometry_requires_orientation_redetection() -> None:
     from types import SimpleNamespace
     from unittest.mock import MagicMock
@@ -1935,7 +2019,7 @@ def test_quick_realign_uses_independent_validation_phase() -> None:
     assert projector.grid is not None
 
 
-def test_adaptive_calibration_uses_brief_single_frame_projection() -> None:
+def test_adaptive_calibration_uses_bounded_averaged_discovery() -> None:
     from unittest.mock import MagicMock, patch
 
     class FakeProjector:
@@ -1968,12 +2052,14 @@ def test_adaptive_calibration_uses_brief_single_frame_projection() -> None:
     assert delays == [1000]
     controller._step_index = 1
     controller._display_current_step()
-    assert delays[-1] == 100
+    assert delays[-1] == 250
 
     controller._collecting = True
     controller._frame_accumulator = None
     controller._frame_count = 0
     controller._captures["black"] = np.zeros((60, 80), dtype=np.uint8)
+    controller._detection = detection
+    detector.detect.reset_mock()
     mapping = MappingResult(
         camera_grid=detection.grid_points,
         projector_grid=detection.grid_points,
@@ -1991,37 +2077,57 @@ def test_adaptive_calibration_uses_brief_single_frame_projection() -> None:
             (detection, mapping),
         ],
     ):
+        for _index in range(2):
+            controller.accept_frame(
+                np.full((60, 80, 3), 100, dtype=np.uint8)
+            )
+            assert controller._collecting
         controller.accept_frame(
-            np.zeros((60, 80, 3), dtype=np.uint8)
+            np.full((60, 80, 3), 100, dtype=np.uint8)
         )
-        assert controller._collecting
-        assert projector.blackouts == 0
-        controller.accept_frame(
-            np.zeros((60, 80, 3), dtype=np.uint8)
-        )
+        assert not controller._collecting
+        assert projector.blackouts == 1
+        assert delays[-1] == 25
+        assert detector.detect.call_count == 0
+        controller._fit_adaptive_discovery_candidate()
+        assert delays[-1] == 250
+
+        controller._collecting = True
+        controller._frame_accumulator = None
+        controller._frame_count = 0
+        for _index in range(3):
+            controller.accept_frame(
+                np.full((60, 80, 3), 100, dtype=np.uint8)
+            )
+        assert projector.blackouts == 2
+        controller._fit_adaptive_discovery_candidate()
 
     assert not controller._collecting
-    assert controller._frame_count == 1
-    assert projector.blackouts == 1
+    assert controller._adaptive_rough_mapping is mapping
+    assert np.all(controller._captures["coded"] == 100)
 
     controller._adaptive_phase = "gray-code"
+    projector_mask = np.ones((180, 320), dtype=bool)
+    controller._adaptive_projector_mask = projector_mask
+    controller._adaptive_previous_gray = np.zeros(
+        (60, 80), dtype=np.uint8
+    )
     controller._steps = controller._build_cropped_gray_code_steps(
-        np.ones((180, 320), dtype=bool)
+        projector_mask
     )
     controller._step_index = 0
     controller._display_current_step()
-    assert delays[-1] == 250
+    assert delays[-1] == 0
     controller._collecting = True
     controller._frame_accumulator = None
     controller._frame_count = 0
-    for _index in range(2):
-        controller.accept_frame(
-            np.zeros((60, 80, 3), dtype=np.uint8)
-        )
-        assert controller._collecting
     controller.accept_frame(np.zeros((60, 80, 3), dtype=np.uint8))
+    assert controller._collecting
+    controller.accept_frame(np.full((60, 80, 3), 100, dtype=np.uint8))
+    assert controller._collecting
+    controller.accept_frame(np.full((60, 80, 3), 102, dtype=np.uint8))
     assert not controller._collecting
-    assert controller._frame_count == 3
+    assert np.all(controller._captures["x_0_normal"] == 101)
 
 
 def test_adaptive_gray_code_patterns_are_black_outside_board_mask() -> None:
@@ -2036,6 +2142,37 @@ def test_adaptive_gray_code_patterns_are_black_outside_board_mask() -> None:
     for step in steps:
         assert np.count_nonzero(step.pattern[~mask]) == 0
     assert any(np.count_nonzero(step.pattern[mask]) > 0 for step in steps)
+
+
+def test_adaptive_gray_code_falls_back_to_three_frame_average() -> None:
+    controller = ProjectorCalibrationController(
+        object(),
+        object(),
+        frames_per_state=3,
+    )
+    controller._schedule = lambda _delay, _callback: None
+    controller._active = True
+    controller._collecting = True
+    controller._adaptive_cropped_mode = True
+    controller._adaptive_phase = "gray-code"
+    controller._projector_size = (32, 24)
+    controller._steps = controller._build_cropped_gray_code_steps(
+        np.ones((24, 32), dtype=bool)
+    )
+    controller._step_index = 0
+
+    controller._enable_adaptive_gray_fallback(0, 0)
+
+    assert controller._adaptive_gray_fallback
+    for value in (10, 20):
+        controller.accept_frame(
+            np.full((12, 16, 3), value, dtype=np.uint8)
+        )
+        assert controller._collecting
+    controller.accept_frame(np.full((12, 16, 3), 30, dtype=np.uint8))
+
+    assert not controller._collecting
+    assert np.all(controller._captures["x_0_normal"] == 20)
 
 
 def test_adaptive_final_mapping_uses_dense_gray_code() -> None:

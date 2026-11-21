@@ -1,7 +1,8 @@
 # Chess-Square Occupancy and UI Marking Specification
 
-**Version:** 0.2  
-**Status:** Experimental implementation; hardware tuning pending  
+**Version:** 0.3
+**Status:** Experimental implementation integrated with setup, reset,
+reconciliation, and restoration workflows; further hardware tuning pending
 **Platform:** Python on Windows  
 
 **Related specifications:**
@@ -541,8 +542,14 @@ Direct reuse of the board tracker's state remains pending.
 
 ### Milestone 6: Move-detection foundation
 
-- Emit stable pre-move and post-move occupancy states.
-- Integrate later with legal-move scoring.
+- Emit stable observations before and after physical changes. Implemented.
+- Feed stable occupancy into starting-position detection and reset,
+  saved-position restoration, physical reconciliation, Lichess position
+  adoption, and UI occupancy updates. Implemented.
+- Keep detailed legal-move scoring in the reference-image tracker, where
+  appearance evidence can distinguish transitions that binary occupancy alone
+  cannot resolve. Implemented as an intentional subsystem boundary rather than
+  pending occupancy work.
 
 ## 19. Open Decisions
 

@@ -108,8 +108,9 @@ poll; a changed ongoing-game set may prompt again.
 - **Show focus pattern**
 - **Black projector**
 - **Close projector**
-- **Test patterns** contains **Project 8x8 grid** and
-  **Project all 64 squares**.
+- separator
+- **Project 8x8 grid**
+- **Project all 64 squares**
 
 ### 2.5 Calibration
 
@@ -322,8 +323,9 @@ interaction rows.
 ## 7. Validation Status
 
 The implemented menu bar exposes File, Camera, Game, Projector, and
-Calibration menus. The complete automated suite contains 311 passing tests,
-including menu structure, transactional selector-copy behavior, existing UI
+Calibration menus. The complete automated suite contains 426 passing tests,
+including the direct placement and ordering of both projector test-pattern
+actions, transactional selector-copy behavior, existing UI
 state transitions, reconciliation controls, and the readable interaction-font
 minimum. Token-status coverage confirms configured and missing environment
 states without exposing credential values. Device-selection coverage confirms

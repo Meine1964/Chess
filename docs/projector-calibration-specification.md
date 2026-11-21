@@ -1,6 +1,6 @@
 # Projector-to-Chessboard Calibration Specification
 
-**Version:** 0.13
+**Version:** 0.14
 **Status:** Initial implementation validated on hardware  
 **Platform:** Python on Windows  
 **Camera:** Logitech Webcam C930e at 1920x1080  
@@ -18,11 +18,12 @@ This document refines the projector-calibration requirements in
 shall use Gray-code structured light for measurement and independently
 projected targets for validation.
 
-The proposed
+The implemented experimental
 [Single-Shot Coded-Pattern Chessboard Calibration](./single-shot-coded-pattern-calibration-specification.md)
 defines an alternative that fits the chess lattice directly in projector
-space. This document and the implemented Gray-code path remain the preserved
-fallback until that alternative passes hardware acceptance.
+space. It has passed an initial populated-board hardware calibration and
+remains available alongside the preserved Gray-code path while comparative
+accuracy, repeatability, and failure-rate acceptance continues.
 
 ### 1.1 Implementation status
 
@@ -44,6 +45,15 @@ The initial calibration path is implemented with:
 - A 1000 ms settling interval and three averaged camera frames per state. The
   interval accommodates measured HDMI display latency that otherwise allowed
   captures to contain the preceding projector pattern.
+- An independent **Board-cropped calibration - experimental** path that uses a
+  250 ms/three-frame full-field coded discovery capture, returns to black
+  before rough-fit processing, confines subsequent Gray-code images to an
+  expanded projector-space board mask, and derives final authority from dense
+  Gray-code decoding rather than the rough discovery mapping.
+- Transition-synchronized cropped Gray-code capture that rejects stale camera
+  frames, averages two mutually stable current-pattern frames, reuses a prior
+  capture when the next cropped pattern is identical, and falls back to the
+  proven three-frame path after 250 ms.
 - A three-second watchdog for every capture state.
 - Gray-code capture with the optically unresolvable least-significant X and Y
   bits omitted.
@@ -53,6 +63,15 @@ The initial calibration path is implemented with:
   patches for the standard starting position.
 - Up to two bounded local-mesh refinement iterations.
 - Calibrated 8x8 grid and 64 inset-square projection modes.
+- A successful calibration or validation displays its final calibrated grid
+  for five seconds, then automatically returns the projector to black. A grid
+  opened manually from the projector controls remains visible until the user
+  changes the projection. Restoration of any remembered square is deferred
+  until the automatic completion preview has finished.
+- Game clocks, results, and the board-edge occlusion/activity indicator shall
+  not be painted over any calibration capture, validation target, or the final
+  five-second grid preview. Normal overlays resume after the preview, failure,
+  or cancellation.
 - Automatic storage of the latest successful calibration in
   `calibrations/latest.json`.
 - Strict restoration of the saved calibration when camera identifier, camera
@@ -72,6 +91,14 @@ The initial calibration path is implemented with:
 - Static cyan projection on dark physical squares and related static azure
   projection on light physical squares for strong contrast without a
   distracting hue change or animation.
+- Direct **Project 8x8 grid** and **Project all 64 squares** actions under the
+  Projector menu, separated from the projector open/focus/black/close actions.
+
+The current automated baseline is 426 passing tests. Focused projector,
+calibration, and menu validation contains 120 passing tests, including
+discovery timing, transition synchronization, conservative fallback, final
+grid timeout, stale-timeout protection, calibration overlay suppression, and
+the direct Projector-menu action order.
 
 The least-significant bits were removed after hardware measurement showed that
 one-projector-pixel stripes produced a median camera difference of only 4
@@ -846,5 +873,6 @@ The projector-calibration milestone is complete when:
    and accepted only after four independent targets pass, without rerunning the
    40-state Gray-code sequence.
 
-Automatic periodic verification remains beyond the initial implemented
-milestone.
+Automatic disruptive periodic revalidation remains beyond the initial
+implemented milestone; the non-disruptive live alignment monitor is
+implemented.

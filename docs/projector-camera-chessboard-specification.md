@@ -1,6 +1,6 @@
 # Projector/Camera Chessboard Calibration Specification
 
-**Version:** 2.5
+**Version:** 2.7
 **Status:** Core camera/projector workflow implemented and hardware validated
 **Initial platform:** Python on Windows  
 **Camera connection:** USB  
@@ -25,17 +25,20 @@ without an empty-board prerequisite are specified in
 [Piece-Aware Board Localization and Calibration](./piece-aware-board-localization-specification.md).
 An alternative direct projector-space approach is specified in
 [Single-Shot Coded-Pattern Chessboard Calibration](./single-shot-coded-pattern-calibration-specification.md).
+The implemented minimally disruptive hybrid method is specified in
+[Adaptive Board-Cropped Calibration](./adaptive-board-cropped-calibration-specification.md).
 Camera-derived occupied-square marking on the digital chessboard is specified
 in
 [Chess-Square Occupancy and UI Marking](./chess-square-occupancy-ui-specification.md).
 The initial occupied-square classifier and UI dots are implemented
-experimentally. Hardware tuning, chess move recognition, and chess rules
-remain future work.
+experimentally. Further occupancy hardware tuning remains open. Legal chess
+rules and reference-image physical move recognition are implemented for
+ordinary moves, captures, castling, en passant, and promotions.
 Official SVG piece rendering and initial non-capturing move synchronization
 are specified in
 [Chess-Piece UI Rendering and Move Synchronization](./chess-piece-ui-tracking-specification.md).
-The pinned cburnett assets, standard UI position, and ordinary one-piece move
-synchronization are implemented experimentally.
+The pinned cburnett assets, standard UI position, Offline legal play, special
+moves, recovery, and Lichess physical synchronization are implemented.
 
 ## 2. Hardware
 
@@ -307,10 +310,11 @@ locally refine the resulting projector mesh.
 The implemented sequence:
 
 1. Captures an averaged projector-black reference.
-2. Measures full-board projector response at intensity 112.
-3. Displays 40 normal/inverse Gray-code states. The optically unresolvable
+2. Measures full-board projector response at intensity 255.
+3. Displays 38 normal/inverse Gray-code states at 1280x720. The optically
+   unresolvable
    least-significant X and Y bits are omitted and decoded as two-pixel bins.
-4. Waits 250 ms after every display change and averages three fresh frames.
+4. Waits 1000 ms after every display change and averages three fresh frames.
 5. Rejects any capture state that does not receive fresh frames within three
    seconds.
 6. Restricts decoding to the detected board polygon.
@@ -325,8 +329,8 @@ The implemented sequence:
 
 Calibration patterns and validation targets are:
 
-- Displayed at measured intensity 112 to avoid saturation while retaining
-  complete board response.
+- Displayed at intensity 255 because hardware evidence showed insufficient
+  response at lower intensity without problematic saturation.
 - Large enough to be detected reliably.
 - Displayed against a black background.
 - Positioned away from the projector image boundaries.
@@ -825,7 +829,8 @@ local contrast normalization, with measured confidence above 93%.
 
 ### 11.2 Milestone 2: Projector calibration
 
-This milestone is implemented for the stationary empty-board setup:
+This milestone is implemented for stationary empty-board and populated-board
+setups:
 
 1. The selected HDMI display is opened black at exact global geometry.
 2. Gray-code patterns are projected and decoded.
@@ -845,13 +850,30 @@ This milestone is implemented for the stationary empty-board setup:
 11. A non-disruptive background monitor checks the live board grid up to five
     times per second, continuously remaps board movement, and verifies any
     currently projected square.
+12. A populated complementary-coded method calibrates with the starting pieces
+    present.
+13. A board-cropped experimental method uses one bounded full-field coded
+    discovery exposure, then confines transition-synchronized Gray-code
+    patterns to an expanded board mask.
+14. The full-field discovery capture settles for 250 ms, averages three fresh
+    frames, returns the projector to black, and performs rough-fit processing
+    while black. Cropped Gray patterns normally average two synchronized
+    frames and fall back to three-frame averaging after 250 ms.
+15. The successful calibration grid remains visible for five seconds before
+    returning to black and restoring any remembered square.
+16. Game clocks, results, and the board-edge occlusion/activity indicator are
+    suppressed throughout calibration and its completion preview.
+17. Grid and all-square test patterns are direct actions in the Projector menu
+    after a separator.
 
 The first successful hardware run achieved 100% board coverage, 54.2% valid
 dense decoding, 0.821 projector-pixel mapping RMS, and 8.0% maximum validation
 error as a fraction of square width.
 
-Automatic periodic verification, automatic orientation confirmation, all-64
-automated validation, and operation with pieces remain future work.
+Automatic disruptive revalidation and all-64 automated validation remain
+future work. Empty-board, populated complementary-coded, and populated
+board-cropped calibration paths are implemented; the final bounded discovery
+timing and completion-preview lifecycle await a final physical retest.
 
 ## 12. Confirmed Constraints and Open Decisions
 
@@ -859,8 +881,8 @@ The following constraints are confirmed:
 
 - The camera and projector may move, requiring recalibration.
 - No added calibration markers are permitted.
-- The current implementation uses an empty board, but the target workflow shall
-  calibrate and operate with pieces present.
+- The application supports the original empty-board method plus two
+  piece-present experimental methods.
 - The board has alternating colors. A complicated background is acceptable
   when the complete board remains detectable.
 - The camera and projector are above the board.
@@ -868,7 +890,7 @@ The following constraints are confirmed:
   separated.
 - Board orientation is initially detected from the light corner and a known
   White-side edge, then later resolved automatically from piece colors.
-- Calibration uses intensity 112 Gray-code patterns and filled validation
+- Calibration uses intensity 255 Gray-code patterns and filled validation
   circles. Operational indicators use cyan on dark squares and azure on light
   squares.
 - The initial camera is a Logitech Webcam C930e 1080p USB camera.

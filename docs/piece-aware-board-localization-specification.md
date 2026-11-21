@@ -1,8 +1,8 @@
 # Piece-Aware Board Localization and Calibration Specification
 
-**Version:** 0.3
-**Status:** Milestone 1 implemented; Milestone 2 partially implemented;
-Milestone 4 partially implemented; Milestones 3 and 5 proposed
+**Version:** 0.4
+**Status:** Milestones 1, 2, 4, and 5 implemented; Milestone 3 partially
+implemented
 **Platform:** Python on Windows  
 **Related specifications:**
 
@@ -509,13 +509,17 @@ projector remains required.
 - Detect a complete binary empty/occupied square map. (Implemented
   experimentally)
 - Wait through hand motion. (Implemented with image-motion gating)
-- Produce pre-move and post-move stable states. (Partially implemented)
+- Produce stable observations used before and after physical changes.
+  (Implemented)
 
-### Milestone 5: Legal move inference
+### Milestone 5: Legal move inference (implemented)
 
-- Integrate chess position and legal-move generation.
-- Score normal moves and captures.
-- Add castling, en passant, promotion, and user confirmation.
+- Integrate chess position and legal-move generation. Implemented in the
+  legal-game and physical-signature layers.
+- Score normal moves and captures. Implemented with authoritative legal
+  signatures and reference-image evidence.
+- Add castling, en passant, promotion, and user confirmation. Implemented,
+  including multi-stage physical handling and selectable promotion.
 
 ## 19. Open Decisions
 

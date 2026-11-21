@@ -9,12 +9,11 @@ populated complementary-coded calibration methods unchanged.
 ## Capture Sequence
 
 1. Capture a stable projector-black populated-board reference.
-2. Detect the physical board in camera coordinates.
+2. Detect the physical board once while the projector remains black.
 3. Briefly project one full-field uniquely coded discovery pattern.
-4. After a 100 ms minimum display interval, inspect fresh camera frames until
-   one contains enough on-board coded markers for a valid rough homography,
-   then stop broad discovery projection immediately. Do not accept the first
-   frame merely because it arrived.
+4. Allow 250 ms for the camera pipeline to reach the coded pattern, then
+   average three fresh frames. Return the projector to black before performing
+   coded-marker detection and rough-fit processing.
 5. Fit a permissive rough camera-to-projector homography from at least four
    coded markers observed on the board plane. This rough fit is used only to
    localize later projection and is not accepted as the final calibration.
@@ -28,20 +27,35 @@ populated complementary-coded calibration methods unchanged.
 
 ## Exposure and Failure Handling
 
-- The full-field discovery pattern shall use a black background and remain
-  visible only until a fresh frame passes coded-marker and rough-homography
-  validation after the 100 ms minimum interval.
+- The full-field discovery pattern shall use a black background, settle for
+  250 ms, and remain visible only while three fresh frames are averaged.
+  Marker detection and rough-homography fitting shall occur while the
+  projector is black. This avoids both a long continuous exposure while the
+  roughly 0.8-second fit runs and an unreliable response-only capture that can
+  repeatedly flash partially updated candidates.
 - Projector-black reference capture may continue to average the existing
   number of frames because it does not disturb nearby players.
-- Cropped Gray-code captures shall wait 250 ms and average the existing
-  configured frame count. The short single-frame rule applies only to the
-  evidence-validated discovery image; using it for successive Gray-code bits
-  can shift camera frames between patterns and invalidate the complete code.
+- Cropped Gray-code capture shall be transition-synchronized rather than use a
+  fixed settling delay. After displaying each pattern, reject camera frames
+  that still match the previously accepted pattern. Accept the new pattern
+  only after two consecutive frames are mutually stable, then average those
+  two frames. The required change threshold shall scale down for patterns
+  whose projector-space difference inside the board mask is small.
+- If two successive cropped projector patterns are identical inside the board
+  mask, reuse the previous camera capture without projecting or waiting for a
+  redundant image.
+- If transition synchronization has not accepted a pattern after 250 ms,
+  fall back to the proven three-frame averaging path for that pattern.
 - Cancellation, timeout, camera-resolution change, insufficient markers,
   invalid rough geometry, Gray-code decode failure, or validation failure
   shall immediately return the projector to black.
 - Failure shall preserve the previous verified calibration and shall not
   automatically invoke either existing calibration method.
+- Game clocks, game results, and the board-edge occlusion/activity indicator
+  shall remain suppressed throughout discovery, Gray-code capture, validation,
+  and the final five-second calibrated-grid preview.
+- After successful validation, display the calibrated grid for five seconds
+  before returning to black and restoring any remembered square.
 
 ## Isolation
 
@@ -53,8 +67,9 @@ populated complementary-coded calibration methods unchanged.
 
 ## Acceptance Criteria
 
-1. The discovery phase accepts exactly one validated full-field coded frame
-   after the black reference.
+1. The discovery phase detects the board while black, averages three coded
+   frames after a 250 ms settling interval, and returns to black before fitting
+   the rough mapping.
 2. Every Gray-code frame is black outside the expanded projector-board mask.
 3. The final mapping comes from dense Gray-code decoding, not the rough coded
    homography.
@@ -62,14 +77,19 @@ populated complementary-coded calibration methods unchanged.
 5. The third action participates in the existing active/cancel UI lifecycle.
 6. Focused controller and pattern tests cover masking, capture timing, final
    dense fitting, and isolation of existing modes.
+7. Calibration overlays remain absent throughout capture and the completion
+   preview, and the preview remains visible for five seconds.
 
 ## Implementation Status
 
 Implemented as the independent **Board-cropped calibration - experimental**
 action. The existing empty-board and populated methods retain their original
-capture sequences.
+capture sequences. Hardware testing confirmed successful dense calibration
+and the faster transition-synchronized cropped Gray-code cycle. The final
+250 ms/three-frame discovery policy and five-second completion-preview
+lifecycle are automated-test validated and await a final physical retest.
 
 Validation:
 
-- Focused calibration and menu tests: 89 passed.
-- Full repository quality gate: 421 passed.
+- Focused projector, calibration, and menu tests: 120 passed.
+- Full repository quality gate: 426 passed.

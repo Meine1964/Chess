@@ -621,6 +621,20 @@ def test_main_commands_are_available_from_menus(
         "_reset_pieces_button",
         "_reconcile_button",
     } <= camera_actions
+    projector_menu = window.menuBar().actions()[3].menu()
+    assert projector_menu is not None
+    assert [
+        "<separator>" if action.isSeparator() else action.text()
+        for action in projector_menu.actions()
+    ] == [
+        "_open_projector_button",
+        "_focus_pattern_button",
+        "_black_projector_button",
+        "_close_projector_button",
+        "<separator>",
+        "_show_grid_button",
+        "_show_squares_button",
+    ]
     game_menu = window.menuBar().actions()[2].menu()
     assert game_menu is not None
     lichess_menu = next(

@@ -109,6 +109,6 @@ Implemented in the Offline game UI and projector integration.
 
 Validation:
 
-- Focused Offline clock and game UI suite: 80 passed.
-- Focused projector suite: 26 passed.
-- Full repository quality gate: 416 passed.
+- Offline clock, game UI, and projector behavior is covered by focused model,
+  move-acceptance, timeout, persistence, and projection tests.
+- Current full repository quality gate: 426 passed.
