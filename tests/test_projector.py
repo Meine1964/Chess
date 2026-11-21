@@ -111,6 +111,38 @@ def test_turn_indicator_prewarps_board_plane_circle() -> None:
     )
 
 
+def test_edge_activity_dot_is_projected_outside_h4_in_every_mode(
+    application: QApplication,
+) -> None:
+    window = ProjectorWindow()
+    window.resize(320, 180)
+    window.show()
+    x_values = np.linspace(40, 280, 9, dtype=np.float32)
+    y_values = np.linspace(20, 160, 9, dtype=np.float32)
+    x_grid, y_grid = np.meshgrid(x_values, y_values)
+    grid = np.stack((x_grid, y_grid), axis=2).astype(np.float32)
+    window.set_projector_grid(grid)
+
+    polygon = ProjectorWindow._edge_activity_indicator_polygon(grid)
+    np.testing.assert_allclose(
+        np.mean(polygon, axis=0),
+        (295.0, 98.75),
+        atol=0.0001,
+    )
+
+    window.show_black()
+    application.processEvents()
+    assert window.grab().toImage().pixelColor(295, 99).red() == 0
+
+    window.set_edge_activity_indicator(True)
+    application.processEvents()
+    assert window.grab().toImage().pixelColor(295, 99) == PROJECTED_LEGAL_MOVE
+
+    window.show_square(2, 3)
+    application.processEvents()
+    assert window.grab().toImage().pixelColor(295, 99) == PROJECTED_LEGAL_MOVE
+
+
 def test_edge_clock_polygons_follow_logical_a_file_orientation() -> None:
     x_values = np.linspace(80, 280, 9, dtype=np.float32)
     y_values = np.linspace(10, 170, 9, dtype=np.float32)

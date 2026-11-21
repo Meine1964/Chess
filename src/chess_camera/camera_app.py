@@ -75,6 +75,7 @@ from .chessboard_widget import ChessboardWidget, rotate_square
 from .diagnostics import DiagnosticStore, RuntimeDiagnosticLog
 from .guidance_activity import (
     BlackoutSettlingDetector,
+    BoardEdgeActivityDetector,
     GuidanceActivityDetector,
 )
 from .legal_game import (
@@ -1068,7 +1069,15 @@ class CameraWindow(QMainWindow):
             required_agreement=2,
             settling_observations=3,
         )
-        self._guidance_activity_detector = GuidanceActivityDetector()
+        self._guidance_activity_detector = GuidanceActivityDetector(
+            rolling_baseline_before_activity=True,
+            require_halo_activity=True,
+        )
+        self._board_edge_activity_detector = BoardEdgeActivityDetector()
+        self._board_edge_indicator_active = False
+        self._projector_window.projection_changed.connect(
+            self._reset_board_edge_activity_indicator
+        )
         self._lichess_blackout_settling_detector = (
             BlackoutSettlingDetector()
         )
@@ -1154,6 +1163,10 @@ class CameraWindow(QMainWindow):
         self._lichess_guidance_projection_active = False
         self._lichess_guidance_blackout_pending = False
         self._lichess_guidance_reprojection_pending = False
+        self._lichess_guidance_squares: (
+            tuple[tuple[int, int], ...]
+        ) = ()
+        self._lichess_guidance_activity_logged = False
         self._offline_move_marking_active = False
         self._offline_move_marking_blackout_pending = False
         self._offline_move_marking_generation = 0
@@ -3379,6 +3392,65 @@ class CameraWindow(QMainWindow):
                 "Piece position is not synchronized."
             )
 
+    def _reset_board_edge_activity_indicator(self) -> None:
+        self._board_edge_activity_detector.reset()
+        self._board_edge_indicator_active = False
+        self._projector_window.set_edge_activity_indicator(False)
+
+    def _update_board_edge_activity_indicator(self) -> None:
+        if self._latest_frame is None or self._calibration_result is None:
+            self._reset_board_edge_activity_indicator()
+            return
+        try:
+            active = self._board_edge_activity_detector.observe(
+                self._latest_frame,
+                self._calibration_result.mapping.camera_grid,
+            )
+        except (ValueError, RuntimeError, cv2.error) as error:
+            self._reset_board_edge_activity_indicator()
+            self._projector_status.setText(
+                f"Board-edge indicator unavailable: {error}"
+            )
+            return
+        previous_active = self._board_edge_indicator_active
+        self._board_edge_indicator_active = active
+        self._projector_window.set_edge_activity_indicator(active)
+        if active == previous_active:
+            return
+        detector = self._board_edge_activity_detector
+        bounds = detector.largest_component_bounds
+        message = (
+            "Board-edge crossing indicator activated."
+            if active
+            else "Board-edge crossing indicator cleared."
+        )
+        self._record_runtime_diagnostic(
+            (
+                "board-edge-indicator-activated"
+                if active
+                else "board-edge-indicator-cleared"
+            ),
+            message,
+            details={
+                "active": active,
+                "crossing_detected": detector.crossing_detected,
+                "component_pixels": detector.largest_component_pixels,
+                "inside_pixels": (
+                    detector.largest_component_inside_pixels
+                ),
+                "outside_pixels": (
+                    detector.largest_component_outside_pixels
+                ),
+                "outer_halo_pixels": (
+                    detector.largest_component_outer_halo_pixels
+                ),
+                "component_bounds": (
+                    None if bounds is None else list(bounds)
+                ),
+            },
+            include_images=True,
+        )
+
     def _update_occupancy(self) -> None:
         if (
             self._latest_frame is None
@@ -3394,6 +3466,7 @@ class CameraWindow(QMainWindow):
                 "Occupancy waiting for camera-grid verification."
             )
             return
+        self._update_board_edge_activity_indicator()
         if (
             self._activate_offline_after_reset
             and not self._reset_to_start_requested
@@ -3670,6 +3743,7 @@ class CameraWindow(QMainWindow):
                     if self._game_mode == "offline-game"
                     else ()
                 ),
+                required_signature=lichess_signature,
             )
         except (ValueError, cv2.error) as error:
             self._occupancy_status.setText(
@@ -4876,15 +4950,36 @@ class CameraWindow(QMainWindow):
                 f"Lichess move guidance failed: {error}"
             )
             return False
+        reprojection = self._lichess_guidance_reprojection_pending
         self._alignment_monitor.set_paused("Lichess move guidance")
         self._lichess_guidance_generation += 1
         self._lichess_guidance_projection_active = True
         self._lichess_guidance_blackout_pending = False
         self._lichess_guidance_reprojection_pending = False
+        self._lichess_guidance_squares = guidance_squares
+        self._lichess_guidance_activity_logged = False
         self._guidance_activity_detector.reset()
-        self._projector_status.setText(
+        status_message = (
             f"Projecting pending Lichess move {move_name} until the hand "
             "leaves the board."
+        )
+        self._projector_status.setText(status_message)
+        self._record_runtime_diagnostic(
+            (
+                "lichess-guidance-reprojected"
+                if reprojection
+                else "lichess-guidance-projected"
+            ),
+            status_message,
+            details={
+                "move": move_name,
+                "squares": [
+                    square_name(square)
+                    for square in guidance_squares
+                ],
+                "generation": self._lichess_guidance_generation,
+            },
+            include_images=True,
         )
         return True
 
@@ -4899,6 +4994,7 @@ class CameraWindow(QMainWindow):
             manipulation_settled = self._guidance_activity_detector.observe(
                 self._latest_frame,
                 self._calibration_result.mapping.camera_grid,
+                self._lichess_guidance_squares,
             )
         except (ValueError, RuntimeError, cv2.error) as error:
             self._projector_status.setText(
@@ -4908,10 +5004,21 @@ class CameraWindow(QMainWindow):
         if manipulation_settled:
             self._begin_lichess_guidance_observation()
         elif self._guidance_activity_detector.manipulation_active:
-            self._projector_status.setText(
+            status_message = (
                 "Opponent move in progress; guidance remains projected until "
                 "the hand leaves the board."
             )
+            self._projector_status.setText(status_message)
+            if not self._lichess_guidance_activity_logged:
+                self._lichess_guidance_activity_logged = True
+                self._record_runtime_diagnostic(
+                    "lichess-guidance-hand-entered",
+                    status_message,
+                    details={
+                        "generation": self._lichess_guidance_generation,
+                    },
+                    include_images=True,
+                )
 
     def _begin_lichess_guidance_observation(self) -> None:
         if not self._lichess_guidance_projection_active:
@@ -4925,9 +5032,16 @@ class CameraWindow(QMainWindow):
         self._alignment_monitor.set_black()
         self._lichess_blackout_settling_detector.reset()
         self._reference_move_tracker.reset_activity()
-        self._projector_status.setText(
+        status_message = (
             "Hand left the board; projector returned to black and is settling "
             "before move verification."
+        )
+        self._projector_status.setText(status_message)
+        self._record_runtime_diagnostic(
+            "lichess-guidance-blackout-started",
+            status_message,
+            details={"generation": generation},
+            include_images=True,
         )
         QTimer.singleShot(
             1000,
@@ -4981,12 +5095,22 @@ class CameraWindow(QMainWindow):
             return
         self._lichess_guidance_blackout_pending = False
         self._reference_move_tracker.reset_activity()
-        self._projector_status.setText(
+        status_message = (
             "Projector black exposure stabilized; verifying the pending "
             "physical move."
             if reason == "stable"
             else "Projector blackout reached the one-second fallback; "
             "verifying the pending physical move."
+        )
+        self._projector_status.setText(status_message)
+        self._record_runtime_diagnostic(
+            "lichess-guidance-verification-ready",
+            status_message,
+            details={
+                "generation": generation,
+                "reason": reason,
+            },
+            include_images=True,
         )
 
     def _cancel_lichess_guidance_activity(self) -> None:
@@ -4994,6 +5118,8 @@ class CameraWindow(QMainWindow):
         self._lichess_guidance_projection_active = False
         self._lichess_guidance_blackout_pending = False
         self._lichess_guidance_reprojection_pending = False
+        self._lichess_guidance_squares = ()
+        self._lichess_guidance_activity_logged = False
         self._guidance_activity_detector.reset()
         self._lichess_blackout_settling_detector.reset()
 
@@ -6863,6 +6989,75 @@ class CameraWindow(QMainWindow):
         tracker_state: dict[str, object] = {
             "initialized": self._reference_move_tracker.initialized,
             "last_state": self._last_runtime_tracker_state,
+            "board_edge_indicator": {
+                "active": self._board_edge_indicator_active,
+                "crossing_detected": (
+                    self._board_edge_activity_detector.crossing_detected
+                ),
+                "largest_component_pixels": (
+                    self._board_edge_activity_detector
+                    .largest_component_pixels
+                ),
+                "largest_component_inside_pixels": (
+                    self._board_edge_activity_detector
+                    .largest_component_inside_pixels
+                ),
+                "largest_component_outside_pixels": (
+                    self._board_edge_activity_detector
+                    .largest_component_outside_pixels
+                ),
+                "largest_component_outer_halo_pixels": (
+                    self._board_edge_activity_detector
+                    .largest_component_outer_halo_pixels
+                ),
+                "largest_component_bounds": (
+                    None
+                    if (
+                        self._board_edge_activity_detector
+                        .largest_component_bounds
+                        is None
+                    )
+                    else list(
+                        self._board_edge_activity_detector
+                        .largest_component_bounds
+                    )
+                ),
+            },
+            "lichess_guidance": {
+                "projection_active": (
+                    self._lichess_guidance_projection_active
+                ),
+                "blackout_pending": self._lichess_guidance_blackout_pending,
+                "reprojection_pending": (
+                    self._lichess_guidance_reprojection_pending
+                ),
+                "generation": self._lichess_guidance_generation,
+                "physical_squares": [
+                    [row, column]
+                    for row, column in self._lichess_guidance_squares
+                ],
+                "detector_manipulation_active": (
+                    self._guidance_activity_detector.manipulation_active
+                ),
+                "lifecycle_state": (
+                    self._guidance_activity_detector.lifecycle_state
+                ),
+                "guard_band_pixels": (
+                    self._guidance_activity_detector.guard_band_pixels
+                ),
+                "largest_component_pixels": (
+                    self._guidance_activity_detector
+                    .largest_component_pixels
+                ),
+                "largest_component_halo_pixels": (
+                    self._guidance_activity_detector
+                    .largest_component_halo_pixels
+                ),
+                "largest_component_inside_pixels": (
+                    self._guidance_activity_detector
+                    .largest_component_inside_pixels
+                ),
+            },
             "illegal_correction": {
                 "projection_active": (
                     self._illegal_correction_projection_active
@@ -6893,6 +7088,7 @@ class CameraWindow(QMainWindow):
                         ]
                     ),
                     "message": tracker_update.message,
+                    "decision_details": tracker_update.decision_details,
                 }
             )
         active_camera: dict[str, object] | None = None

@@ -8,6 +8,7 @@ from src.chess_camera.camera_app import CameraWindow
 from src.chess_camera.guidance_activity import (
     BlackoutSettlingDetector,
     BlackoutSettlingUpdate,
+    BoardEdgeActivityDetector,
     GuidanceActivityDetector,
 )
 from src.chess_camera.legal_game import LegalGame
@@ -39,6 +40,63 @@ def test_static_guidance_does_not_trigger_activity() -> None:
     assert not detector.observe(frame, _camera_grid())
 
 
+def test_board_edge_indicator_requires_activity_across_boundary() -> None:
+    frame = _frame()
+
+    def armed_detector() -> BoardEdgeActivityDetector:
+        detector = BoardEdgeActivityDetector(
+            arming_observations=2,
+            confirmation_observations=1,
+            quiet_observations=1,
+        )
+        assert not detector.observe(frame, _camera_grid())
+        assert not detector.observe(frame, _camera_grid())
+        return detector
+
+    halo_only = frame.copy()
+    cv2.rectangle(halo_only, (350, 100), (550, 160), (20, 20, 20), -1)
+    detector = armed_detector()
+    assert not detector.observe(halo_only, _camera_grid())
+    assert not detector.observe(halo_only, _camera_grid())
+
+    board_only = frame.copy()
+    cv2.rectangle(board_only, (350, 240), (550, 340), (20, 20, 20), -1)
+    detector = armed_detector()
+    assert not detector.observe(board_only, _camera_grid())
+    assert not detector.observe(board_only, _camera_grid())
+
+    crossing = frame.copy()
+    cv2.rectangle(crossing, (350, 100), (550, 260), (20, 20, 20), -1)
+    detector = armed_detector()
+    assert detector.observe(crossing, _camera_grid())
+    assert detector.active
+    assert detector.crossing_detected
+    assert detector.largest_component_pixels > 0
+    assert detector.largest_component_inside_pixels >= 600
+    assert detector.largest_component_outside_pixels >= 600
+    assert detector.largest_component_outer_halo_pixels >= 60
+    assert detector.largest_component_bounds is not None
+
+    completed_edge_change = frame.copy()
+    cv2.rectangle(
+        completed_edge_change,
+        (350, 175),
+        (550, 260),
+        (20, 20, 20),
+        -1,
+    )
+    assert not detector.observe(completed_edge_change, _camera_grid())
+    assert not detector.active
+    assert not detector.crossing_detected
+    assert detector.largest_component_inside_pixels >= 600
+    assert detector.largest_component_outside_pixels >= 600
+    assert detector.largest_component_outer_halo_pixels == 0
+    assert detector.largest_component_bounds is not None
+
+    assert not detector.observe(completed_edge_change, _camera_grid())
+    assert detector.largest_component_pixels == 0
+
+
 def test_projector_transition_during_one_second_arming_is_ignored() -> None:
     frame = _frame()
     projected = frame.copy()
@@ -60,7 +118,7 @@ def test_projector_transition_during_one_second_arming_is_ignored() -> None:
     assert not detector.observe(projected, _camera_grid())
 
 
-def test_activity_on_board_keeps_guidance_until_scene_is_quiet() -> None:
+def test_activity_keeps_guidance_until_obstruction_leaves() -> None:
     frame = _frame()
     changed = frame.copy()
     cv2.rectangle(changed, (430, 430), (500, 560), (20, 20, 20), -1)
@@ -71,7 +129,328 @@ def test_activity_on_board_keeps_guidance_until_scene_is_quiet() -> None:
     assert detector.manipulation_active
     for _ in range(4):
         assert not detector.observe(changed, _camera_grid())
-    assert detector.observe(changed, _camera_grid())
+    for _ in range(4):
+        assert not detector.observe(frame, _camera_grid())
+    assert detector.observe(frame, _camera_grid())
+
+
+def test_lichess_guidance_ignores_projection_drift_and_waits_for_hand_exit() -> None:
+    frame = _frame()
+    detector = GuidanceActivityDetector(
+        rolling_baseline_before_activity=True,
+        require_halo_activity=True,
+    )
+    for _index in range(10):
+        assert not detector.observe(frame, _camera_grid(), ((2, 2), (2, 3)))
+
+    drifted = frame.copy()
+    cv2.rectangle(drifted, (400, 400), (600, 500), (190, 190, 190), -1)
+    for _index in range(3):
+        assert not detector.observe(
+            drifted,
+            _camera_grid(),
+            ((2, 2), (2, 3)),
+        )
+    assert detector.manipulation_active is False
+
+    hand_entering = drifted.copy()
+    cv2.rectangle(
+        hand_entering,
+        (350, 100),
+        (550, 220),
+        (20, 20, 20),
+        -1,
+    )
+    hand_over_board = drifted.copy()
+    cv2.rectangle(
+        hand_over_board,
+        (450, 100),
+        (650, 220),
+        (20, 20, 20),
+        -1,
+    )
+    assert not detector.observe(
+        hand_entering,
+        _camera_grid(),
+        ((2, 2), (2, 3)),
+    )
+    assert not detector.observe(
+        hand_over_board,
+        _camera_grid(),
+        ((2, 2), (2, 3)),
+    )
+    assert detector.manipulation_active
+
+    for _index in range(5):
+        assert not detector.observe(
+            hand_over_board,
+            _camera_grid(),
+            ((2, 2), (2, 3)),
+        )
+    for _index in range(4):
+        assert not detector.observe(
+            drifted,
+            _camera_grid(),
+            ((2, 2), (2, 3)),
+        )
+    assert detector.observe(
+        drifted,
+        _camera_grid(),
+        ((2, 2), (2, 3)),
+    )
+
+
+def test_lichess_guidance_ignores_moved_piece_spill_after_hand_exit() -> None:
+    frame = _frame()
+    moved_piece = frame.copy()
+    cv2.rectangle(
+        moved_piece,
+        (290, 190),
+        (410, 310),
+        (35, 35, 35),
+        -1,
+    )
+    detector = GuidanceActivityDetector(
+        rolling_baseline_before_activity=True,
+        require_halo_activity=True,
+    )
+    ignored_squares = ((0, 1),)
+    for _index in range(10):
+        assert not detector.observe(
+            frame,
+            _camera_grid(),
+            ignored_squares,
+        )
+
+    hand = moved_piece.copy()
+    cv2.rectangle(hand, (650, 100), (850, 320), (20, 20, 20), -1)
+    assert not detector.observe(hand, _camera_grid(), ignored_squares)
+    assert not detector.observe(hand, _camera_grid(), ignored_squares)
+    assert detector.manipulation_active
+
+    for _index in range(4):
+        assert not detector.observe(
+            moved_piece,
+            _camera_grid(),
+            ignored_squares,
+        )
+    assert detector.observe(
+        moved_piece,
+        _camera_grid(),
+        ignored_squares,
+    )
+
+
+def test_lichess_guidance_clears_adjacent_edge_square_spill() -> None:
+    frame = _frame()
+    moved_piece = frame.copy()
+    cv2.rectangle(
+        moved_piece,
+        (570, 170),
+        (830, 330),
+        (35, 35, 35),
+        -1,
+    )
+    detector = GuidanceActivityDetector(
+        rolling_baseline_before_activity=True,
+        require_halo_activity=True,
+    )
+    ignored_squares = ((0, 4), (0, 5))
+    for _index in range(10):
+        assert not detector.observe(
+            frame,
+            _camera_grid(),
+            ignored_squares,
+        )
+    assert detector.lifecycle_state == "arming"
+
+    hand = moved_piece.copy()
+    cv2.rectangle(hand, (300, 100), (520, 340), (20, 20, 20), -1)
+    assert not detector.observe(hand, _camera_grid(), ignored_squares)
+    assert detector.lifecycle_state == "entering"
+    assert not detector.observe(hand, _camera_grid(), ignored_squares)
+    assert detector.lifecycle_state == "manipulating"
+
+    for _index in range(4):
+        assert not detector.observe(
+            moved_piece,
+            _camera_grid(),
+            ignored_squares,
+        )
+    assert detector.lifecycle_state == "exiting"
+    assert detector.observe(
+        moved_piece,
+        _camera_grid(),
+        ignored_squares,
+    )
+    assert detector.lifecycle_state == "departed"
+
+
+def test_lichess_guidance_clears_bounded_edge_piece_spill() -> None:
+    frame = _frame()
+    moved_piece = frame.copy()
+    cv2.rectangle(
+        moved_piece,
+        (755, 155),
+        (945, 345),
+        (35, 35, 35),
+        -1,
+    )
+    cv2.rectangle(
+        moved_piece,
+        (670, 370),
+        (830, 530),
+        (35, 35, 35),
+        -1,
+    )
+    detector = GuidanceActivityDetector(
+        rolling_baseline_before_activity=True,
+        require_halo_activity=True,
+    )
+    ignored_squares = ((0, 6), (2, 5))
+    for _index in range(10):
+        assert not detector.observe(
+            frame,
+            _camera_grid(),
+            ignored_squares,
+        )
+
+    hand = moved_piece.copy()
+    cv2.rectangle(hand, (300, 100), (520, 340), (20, 20, 20), -1)
+    assert not detector.observe(hand, _camera_grid(), ignored_squares)
+    assert not detector.observe(hand, _camera_grid(), ignored_squares)
+    assert detector.lifecycle_state == "manipulating"
+
+    for _index in range(4):
+        assert not detector.observe(
+            moved_piece,
+            _camera_grid(),
+            ignored_squares,
+        )
+    assert detector.observe(
+        moved_piece,
+        _camera_grid(),
+        ignored_squares,
+    )
+    assert detector.lifecycle_state == "departed"
+
+
+def test_lichess_guidance_ignores_external_halo_after_entry() -> None:
+    frame = _frame()
+    detector = GuidanceActivityDetector(
+        rolling_baseline_before_activity=True,
+        require_halo_activity=True,
+    )
+    ignored_squares = ((0, 4), (0, 5))
+    for _index in range(10):
+        assert not detector.observe(
+            frame,
+            _camera_grid(),
+            ignored_squares,
+        )
+
+    hand = frame.copy()
+    cv2.rectangle(hand, (300, 100), (520, 340), (20, 20, 20), -1)
+    assert not detector.observe(hand, _camera_grid(), ignored_squares)
+    assert not detector.observe(hand, _camera_grid(), ignored_squares)
+
+    unexpected = frame.copy()
+    cv2.rectangle(
+        unexpected,
+        (880, 110),
+        (1030, 190),
+        (20, 20, 20),
+        -1,
+    )
+    for _index in range(4):
+        assert not detector.observe(
+            unexpected,
+            _camera_grid(),
+            ignored_squares,
+        )
+    assert detector.observe(
+        unexpected,
+        _camera_grid(),
+        ignored_squares,
+    )
+    assert detector.lifecycle_state == "departed"
+
+
+def test_lichess_guidance_requires_board_boundary_crossing() -> None:
+    frame = _frame()
+    detector = GuidanceActivityDetector(
+        rolling_baseline_before_activity=True,
+        require_halo_activity=True,
+    )
+    for _index in range(10):
+        assert not detector.observe(frame, _camera_grid())
+
+    outside_only = frame.copy()
+    cv2.rectangle(
+        outside_only,
+        (420, 110),
+        (620, 190),
+        (20, 20, 20),
+        -1,
+    )
+    for _index in range(4):
+        assert not detector.observe(outside_only, _camera_grid())
+    assert detector.lifecycle_state == "arming"
+    assert detector.manipulation_active is False
+
+    crossing = frame.copy()
+    cv2.rectangle(
+        crossing,
+        (420, 110),
+        (620, 240),
+        (20, 20, 20),
+        -1,
+    )
+    assert not detector.observe(crossing, _camera_grid())
+    assert not detector.observe(crossing, _camera_grid())
+    assert detector.lifecycle_state == "manipulating"
+
+
+def test_lichess_guidance_clears_after_smooth_exposure_drift() -> None:
+    frame = _frame()
+    height, width = frame.shape[:2]
+    horizontal = np.linspace(-45.0, 45.0, width, dtype=np.float32)
+    exposure_offset = np.broadcast_to(horizontal, (height, width))
+    exposed = np.clip(
+        frame.astype(np.float32) + exposure_offset[:, :, None],
+        0,
+        255,
+    ).astype(np.uint8)
+    detector = GuidanceActivityDetector(
+        rolling_baseline_before_activity=True,
+        require_halo_activity=True,
+    )
+    ignored_squares = ((1, 3), (3, 3))
+    for _index in range(10):
+        assert not detector.observe(
+            frame,
+            _camera_grid(),
+            ignored_squares,
+        )
+
+    hand = exposed.copy()
+    cv2.rectangle(hand, (300, 100), (520, 340), (20, 20, 20), -1)
+    assert not detector.observe(hand, _camera_grid(), ignored_squares)
+    assert not detector.observe(hand, _camera_grid(), ignored_squares)
+    assert detector.lifecycle_state == "manipulating"
+
+    for _index in range(4):
+        assert not detector.observe(
+            exposed,
+            _camera_grid(),
+            ignored_squares,
+        )
+    assert detector.observe(
+        exposed,
+        _camera_grid(),
+        ignored_squares,
+    )
+    assert detector.lifecycle_state == "departed"
 
 
 def test_reset_clears_completed_manipulation_lifecycle() -> None:
@@ -104,7 +483,9 @@ def test_activity_in_near_edge_halo_waits_for_quiet_before_blackout() -> None:
     assert not detector.observe(changed, _camera_grid())
     for _ in range(4):
         assert not detector.observe(changed, _camera_grid())
-    assert detector.observe(changed, _camera_grid())
+    for _ in range(4):
+        assert not detector.observe(frame, _camera_grid())
+    assert detector.observe(frame, _camera_grid())
 
 
 def test_activity_outside_board_halo_is_ignored() -> None:
@@ -283,6 +664,8 @@ def test_pending_lichess_guidance_has_no_fixed_timeout() -> None:
         _lichess_guidance_generation=0,
         _lichess_guidance_projection_active=False,
         _lichess_guidance_blackout_pending=False,
+        _lichess_guidance_reprojection_pending=False,
+        _record_runtime_diagnostic=MagicMock(),
     )
 
     with patch(
@@ -295,6 +678,7 @@ def test_pending_lichess_guidance_has_no_fixed_timeout() -> None:
 
     single_shot.assert_not_called()
     assert window._lichess_guidance_projection_active is True
+    assert window._lichess_guidance_squares == ((1, 4), (3, 4))
     window._board_widget.set_illegal_source.assert_called_once_with(None)
     window._board_widget.set_reconciliation_squares.assert_called_once_with(())
     window._board_widget.set_guidance_move.assert_called_once_with(
@@ -304,6 +688,10 @@ def test_pending_lichess_guidance_has_no_fixed_timeout() -> None:
     window._projector_status.setText.assert_called_once_with(
         "Projecting pending Lichess move e7-e5 until the hand leaves the "
         "board."
+    )
+    assert (
+        window._record_runtime_diagnostic.call_args.args[0]
+        == "lichess-guidance-projected"
     )
 
 
@@ -356,6 +744,8 @@ def test_pending_lichess_guidance_uses_complete_two_turn_orientation() -> None:
         _lichess_guidance_generation=0,
         _lichess_guidance_projection_active=False,
         _lichess_guidance_blackout_pending=False,
+        _lichess_guidance_reprojection_pending=False,
+        _record_runtime_diagnostic=MagicMock(),
     )
     window._physical_board_square = lambda row, column: (
         CameraWindow._physical_board_square(window, row, column)
@@ -429,6 +819,8 @@ def test_en_passant_guidance_projects_all_three_squares() -> None:
         _lichess_guidance_generation=0,
         _lichess_guidance_projection_active=False,
         _lichess_guidance_blackout_pending=False,
+        _lichess_guidance_reprojection_pending=False,
+        _record_runtime_diagnostic=MagicMock(),
     )
     squares = ((3, 4), (2, 3), (3, 3))
 
@@ -459,6 +851,7 @@ def test_settled_manipulation_blacks_projector_before_observation() -> None:
         _lichess_blackout_settling_detector=MagicMock(),
         _reference_move_tracker=MagicMock(),
         _projector_status=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
         _finish_lichess_guidance_blackout=MagicMock(),
     )
 
@@ -521,18 +914,30 @@ def test_active_manipulation_keeps_opponent_guidance_projected() -> None:
             mapping=SimpleNamespace(camera_grid=object())
         ),
         _lichess_guidance_projection_active=True,
+        _lichess_guidance_squares=((1, 4), (3, 4)),
+        _lichess_guidance_activity_logged=False,
+        _lichess_guidance_generation=3,
         _guidance_activity_detector=detector,
         _projector_status=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
         _begin_lichess_guidance_observation=MagicMock(),
     )
 
     CameraWindow._observe_lichess_guidance_activity(window)
+    CameraWindow._observe_lichess_guidance_activity(window)
 
     window._begin_lichess_guidance_observation.assert_not_called()
-    window._projector_status.setText.assert_called_once_with(
+    detector.observe.assert_called_with(
+        window._latest_frame,
+        window._calibration_result.mapping.camera_grid,
+        ((1, 4), (3, 4)),
+    )
+    assert detector.observe.call_count == 2
+    window._projector_status.setText.assert_called_with(
         "Opponent move in progress; guidance remains projected until the hand "
         "leaves the board."
     )
+    window._record_runtime_diagnostic.assert_called_once()
 
 
 def test_offline_move_marking_uses_fixed_one_second_intervals() -> None:
@@ -634,13 +1039,61 @@ def test_guidance_activity_precedes_black_output_gate() -> None:
         _offline_move_marking_blackout_pending=False,
         _lichess_guidance_projection_active=True,
         _lichess_guidance_blackout_pending=False,
+        _update_board_edge_activity_indicator=MagicMock(),
         _observe_lichess_guidance_activity=MagicMock(),
         _alignment_monitor=SimpleNamespace(output_mode="move"),
     )
 
     CameraWindow._update_occupancy(window)
 
+    window._update_board_edge_activity_indicator.assert_called_once_with()
     window._observe_lichess_guidance_activity.assert_called_once_with()
+
+
+def test_board_edge_indicator_records_only_state_transitions() -> None:
+    detector = SimpleNamespace(
+        observe=MagicMock(side_effect=(True, True, False)),
+        crossing_detected=True,
+        largest_component_pixels=1400,
+        largest_component_inside_pixels=700,
+        largest_component_outside_pixels=700,
+        largest_component_outer_halo_pixels=100,
+        largest_component_bounds=(100, 200, 30, 40),
+    )
+    window = SimpleNamespace(
+        _latest_frame=object(),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(camera_grid=object())
+        ),
+        _board_edge_activity_detector=detector,
+        _board_edge_indicator_active=False,
+        _projector_window=SimpleNamespace(
+            set_edge_activity_indicator=MagicMock()
+        ),
+        _record_runtime_diagnostic=MagicMock(),
+    )
+
+    CameraWindow._update_board_edge_activity_indicator(window)
+    CameraWindow._update_board_edge_activity_indicator(window)
+    detector.crossing_detected = False
+    detector.largest_component_pixels = 0
+    detector.largest_component_inside_pixels = 0
+    detector.largest_component_outside_pixels = 0
+    detector.largest_component_outer_halo_pixels = 0
+    detector.largest_component_bounds = None
+    CameraWindow._update_board_edge_activity_indicator(window)
+
+    assert [
+        call.args[0]
+        for call in window._record_runtime_diagnostic.call_args_list
+    ] == [
+        "board-edge-indicator-activated",
+        "board-edge-indicator-cleared",
+    ]
+    assert all(
+        call.kwargs["include_images"]
+        for call in window._record_runtime_diagnostic.call_args_list
+    )
 
 
 def test_black_button_starts_pending_move_observation() -> None:

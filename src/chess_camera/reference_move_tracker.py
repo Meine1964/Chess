@@ -47,6 +47,7 @@ class ReferenceTrackerUpdate:
     move: tuple[Square, Square] | None
     message: str
     change_scores: FloatArray | None = None
+    decision_details: dict[str, object] | None = None
 
 
 class ReferenceMoveTracker:
@@ -158,6 +159,8 @@ class ReferenceMoveTracker:
         ui_quarter_turns: int,
         position: Position,
         physical_signatures: tuple[LegalMoveSignature, ...] = (),
+        *,
+        required_signature: LegalMoveSignature | None = None,
     ) -> ReferenceTrackerUpdate:
         if self._reference is None:
             return ReferenceTrackerUpdate(
@@ -252,6 +255,7 @@ class ReferenceMoveTracker:
         pending_en_passant_sources: tuple[Square, ...] = ()
         illegal_removed_piece: Square | None = None
         illegal_relocation = False
+        decision_details: dict[str, object] | None = None
         if physical_signatures:
             piece_colors = self._classify_piece_colors(
                 normalized,
@@ -392,7 +396,29 @@ class ReferenceMoveTracker:
                     )
                     if pending_castling is None:
                         move = relocation
-                        illegal_relocation = True
+                        if (
+                            required_signature is not None
+                            and required_signature.kind == "ordinary"
+                            and relocation
+                            == (
+                                required_signature.source,
+                                required_signature.destination,
+                            )
+                        ):
+                            decision_details = {
+                                "verification": (
+                                    "required-geometric-fallback"
+                                ),
+                                "required_uci": required_signature.uci,
+                                "source_score": float(
+                                    scores[required_signature.source]
+                                ),
+                                "destination_score": float(
+                                    scores[required_signature.destination]
+                                ),
+                            }
+                        else:
+                            illegal_relocation = True
         if (
             move is None
             and pending_castling is not None
@@ -545,6 +571,7 @@ class ReferenceMoveTracker:
             move,
             f"Accepted {square_name(move[0])}-{square_name(move[1])}.",
             scores,
+            decision_details,
         )
 
     def commit_accepted(

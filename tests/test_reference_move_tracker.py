@@ -1,3 +1,6 @@
+from types import SimpleNamespace
+from unittest.mock import patch
+
 import cv2
 import numpy as np
 import pytest
@@ -6,7 +9,7 @@ from src.chess_camera.chess_position import (
     PiecePositionSynchronizer,
     starting_occupied_squares,
 )
-from src.chess_camera.legal_game import LegalGame
+from src.chess_camera.legal_game import LegalGame, LegalMoveSignature
 from src.chess_camera.reference_move_tracker import (
     ReferenceMoveTracker,
     ReferenceTrackerUpdate,
@@ -67,6 +70,8 @@ def _accepted_update(
     image: np.ndarray,
     position: dict[tuple[int, int], str],
     legal_signatures: tuple = (),
+    *,
+    required_signature: LegalMoveSignature | None = None,
 ) -> object:
     update = None
     for _index in range(5):
@@ -76,11 +81,99 @@ def _accepted_update(
             0,
             position,
             legal_signatures,
+            required_signature=required_signature,
         )
         if update.state in ("accepted", "illegal-relocation"):
             return update
     assert update is not None
     return update
+
+
+def test_required_signature_accepts_exact_geometric_relocation() -> None:
+    game = LegalGame(
+        "rnb1k2r/ppB1nppp/1bp1p3/3p4/3P4/2P2NP1/"
+        "PP2PPBP/RN1Q1RK1 b kq - 0 8"
+    )
+    signature = game.legal_move_signature("e8f8")
+    reference = _empty_board()
+    for square, piece in game.position.items():
+        _draw_piece(
+            reference,
+            square,
+            (225, 225, 225) if piece.isupper() else (20, 20, 20),
+        )
+    moved = reference.copy()
+    empty = _empty_board()
+    for square in (signature.source, signature.destination):
+        row, column = square
+        moved[
+            row * 100 : (row + 1) * 100,
+            column * 100 : (column + 1) * 100,
+        ] = empty[
+            row * 100 : (row + 1) * 100,
+            column * 100 : (column + 1) * 100,
+        ]
+    _draw_piece(moved, signature.destination)
+    tracker = ReferenceMoveTracker()
+    tracker.set_reference(reference, _camera_grid(), 0)
+
+    with patch(
+        "src.chess_camera.reference_move_tracker."
+        "match_legal_move_signature",
+        return_value=SimpleNamespace(signature=None),
+    ):
+        update = _accepted_update(
+            tracker,
+            moved,
+            game.position,
+            (signature,),
+            required_signature=signature,
+        )
+
+    assert update.state == "accepted"
+    assert update.move == (signature.source, signature.destination)
+
+
+def test_required_signature_rejects_different_geometric_relocation() -> None:
+    game = LegalGame(
+        "rnb1k2r/ppB1nppp/1bp1p3/3p4/3P4/2P2NP1/"
+        "PP2PPBP/RN1Q1RK1 b kq - 0 8"
+    )
+    signature = game.legal_move_signature("e8f8")
+    source = signature.source
+    destination = (0, 3)
+    reference = _empty_board()
+    for square, piece in game.position.items():
+        _draw_piece(
+            reference,
+            square,
+            (225, 225, 225) if piece.isupper() else (20, 20, 20),
+        )
+    moved = reference.copy()
+    empty = _empty_board()
+    for square in (source, destination):
+        row, column = square
+        moved[
+            row * 100 : (row + 1) * 100,
+            column * 100 : (column + 1) * 100,
+        ] = empty[
+            row * 100 : (row + 1) * 100,
+            column * 100 : (column + 1) * 100,
+        ]
+    _draw_piece(moved, destination)
+    tracker = ReferenceMoveTracker()
+    tracker.set_reference(reference, _camera_grid(), 0)
+
+    update = _accepted_update(
+        tracker,
+        moved,
+        game.position,
+        (signature,),
+        required_signature=signature,
+    )
+
+    assert update.state == "illegal-relocation"
+    assert update.move == (source, destination)
 
 
 def test_change_scores_localize_source_and_destination() -> None:

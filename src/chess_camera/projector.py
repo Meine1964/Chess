@@ -2,7 +2,7 @@ from typing import Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -108,6 +108,8 @@ def focus_pattern(
 
 
 class ProjectorWindow(QWidget):
+    projection_changed = Signal()
+
     def __init__(self) -> None:
         super().__init__(
             None,
@@ -137,6 +139,7 @@ class ProjectorWindow(QWidget):
         self._result_text: ProjectedResult | None = None
         self._expired_player: Literal["white", "black"] | None = None
         self._clock_board_quarter_turns = 0
+        self._edge_activity_indicator_active = False
         self.setWindowTitle("Chess Projector Output")
         self.setCursor(Qt.CursorShape.BlankCursor)
 
@@ -164,7 +167,12 @@ class ProjectorWindow(QWidget):
         self.activateWindow()
 
     def show_black(self) -> None:
-        self._display_mode = "black"
+        self._show_mode("black")
+
+    def set_edge_activity_indicator(self, active: bool) -> None:
+        if self._edge_activity_indicator_active == active:
+            return
+        self._edge_activity_indicator_active = active
         self.update()
 
     def set_turn_indicator(
@@ -218,8 +226,7 @@ class ProjectorWindow(QWidget):
             contiguous_pattern.strides[0],
             QImage.Format.Format_Grayscale8,
         ).copy()
-        self._display_mode = "pattern"
-        self.update()
+        self._show_mode("pattern")
 
     def set_projector_grid(self, grid: NDArray[np.float32]) -> None:
         if grid.shape != (9, 9, 2):
@@ -234,14 +241,12 @@ class ProjectorWindow(QWidget):
     def show_grid(self) -> None:
         if self._projector_grid is None:
             raise RuntimeError("No calibrated projector grid is available.")
-        self._display_mode = "grid"
-        self.update()
+        self._show_mode("grid")
 
     def show_all_squares(self) -> None:
         if self._projector_grid is None:
             raise RuntimeError("No calibrated projector grid is available.")
-        self._display_mode = "squares"
-        self.update()
+        self._show_mode("squares")
 
     def show_square(
         self,
@@ -256,8 +261,7 @@ class ProjectorWindow(QWidget):
             raise ValueError("Projected square must be inside the 8x8 board.")
         self._selected_square = (row, column)
         self._selected_square_is_light = light_square
-        self._display_mode = "selected_square"
-        self.update()
+        self._show_mode("selected_square")
 
     def show_move(
         self,
@@ -293,8 +297,7 @@ class ProjectorWindow(QWidget):
                 )
         self._move_squares = tuple(dict.fromkeys(squares))
         self._show_turn_indicator_with_move = include_turn_indicator
-        self._display_mode = "move"
-        self.update()
+        self._show_mode("move")
 
     def show_illegal_square(
         self,
@@ -306,8 +309,7 @@ class ProjectorWindow(QWidget):
         if not 0 <= row < 8 or not 0 <= column < 8:
             raise ValueError("Projected square must be inside the 8x8 board.")
         self._illegal_square = (row, column)
-        self._display_mode = "illegal"
-        self.update()
+        self._show_mode("illegal")
 
     def show_correction(
         self,
@@ -322,8 +324,7 @@ class ProjectorWindow(QWidget):
                     "Projected correction squares must be inside the board."
                 )
         self._correction_squares = (source, destination)
-        self._display_mode = "correction"
-        self.update()
+        self._show_mode("correction")
 
     def show_reconciliation(
         self,
@@ -339,8 +340,7 @@ class ProjectorWindow(QWidget):
                     "Projected reconciliation squares must be inside the board."
                 )
         self._reconciliation_squares = tuple(dict.fromkeys(squares))
-        self._display_mode = "reconciliation"
-        self.update()
+        self._show_mode("reconciliation")
 
     def show_promotion_choices(
         self,
@@ -357,8 +357,7 @@ class ProjectorWindow(QWidget):
         self._promotion_viewer_edge = viewer_edge
         self._promotion_piece = None
         self._promotion_destination = None
-        self._display_mode = "promotion_choices"
-        self.update()
+        self._show_mode("promotion_choices")
 
     def show_promotion_confirmation(
         self,
@@ -380,8 +379,7 @@ class ProjectorWindow(QWidget):
         self._promotion_viewer_edge = viewer_edge
         self._promotion_piece = piece
         self._promotion_destination = destination
-        self._display_mode = "promotion_confirmation"
-        self.update()
+        self._show_mode("promotion_confirmation")
 
     def paintEvent(self, event: QPaintEvent) -> None:
         painter = QPainter(self)
@@ -627,8 +625,27 @@ class ProjectorWindow(QWidget):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(PROJECTED_LEGAL_MOVE)
             painter.drawPolygon(self._polygon(polygon))
+        if (
+            self._edge_activity_indicator_active
+            and self._projector_grid is not None
+        ):
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(PROJECTED_LEGAL_MOVE)
+            painter.drawPolygon(
+                self._polygon(
+                    self._edge_activity_indicator_polygon(
+                        self._projector_grid
+                    )
+                )
+            )
         painter.end()
         event.accept()
+
+    def _show_mode(self, mode: DisplayMode) -> None:
+        self._display_mode = mode
+        self.projection_changed.emit()
+        self.update()
 
     @staticmethod
     def _polygon(points: NDArray[np.float32]) -> QPolygonF:
@@ -664,6 +681,17 @@ class ProjectorWindow(QWidget):
             x,
             y,
             0.14,
+        )
+
+    @staticmethod
+    def _edge_activity_indicator_polygon(
+        grid: NDArray[np.float32],
+    ) -> NDArray[np.float32]:
+        return board_circle_polygon(
+            grid,
+            8.5,
+            4.5,
+            0.08,
         )
 
     @staticmethod

@@ -1,6 +1,6 @@
 # Projector/Camera Chessboard Calibration Specification
 
-**Version:** 2.4
+**Version:** 2.5
 **Status:** Core camera/projector workflow implemented and hardware validated
 **Initial platform:** Python on Windows  
 **Camera connection:** USB  
@@ -398,6 +398,31 @@ all-64 stepping remain planned test modes.
 - Illuminate alternating squares as a checkerboard.
 - Swap illuminated and non-illuminated squares periodically.
 - Make one-square alignment errors easier to see.
+
+#### Board-edge activity indicator
+
+- After camera and projector calibration, render a small white circular
+  indicator beside h4 with its center half a square outside the h-file.
+- Make the indicator available as an overlay in every projector display mode,
+  including an otherwise black frame.
+- Illuminate the indicator only when camera activity contains a connected
+  component with material pixels inside the board, outside the board, and at
+  the outer rim of the one-square observation halo. This full connected path
+  distinguishes a hand or arm entering from outside from a changed edge piece
+  whose silhouette extends only a short distance beyond the playing grid.
+- Use an independent rolling camera baseline and illuminate on the first
+  qualifying crossing observation so projector content, board-confined
+  changes, and activity wholly outside the board do not illuminate the
+  indicator.
+- Clear the indicator on the first observation without a qualifying boundary
+  crossing.
+- Keep this diagnostic independent of Lichess manipulation lifecycle state;
+  it shall not trigger blackout, move verification, or other game behavior.
+- Record every activation and clearing transition with the current camera
+  image, active state, current crossing decision, component area, inside-board
+  pixels, outside-board pixels, outer-halo-rim pixels, and component bounding
+  box. Expose the same latest measurements in runtime state so persistent
+  false crossings can be traced to their actual image region.
 
 The operational indicator colors are currently fixed. Brightness, inset, and
 color controls remain possible future enhancements.

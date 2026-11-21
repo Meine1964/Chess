@@ -698,11 +698,6 @@ class LichessConnectionWorker(QObject):
                         export_board.fen() == snapshot.game.state.fen
                     )
             missing_plies = current_board.ply() - authoritative_board.ply()
-            if not one_move_behind and missing_plies <= 1:
-                raise LichessProtocolError(
-                    "The polling clock snapshot is incompatible with the "
-                    "ongoing game position."
-                )
             previous = self._polling_clock_state
             previous_at = self._polling_clock_monotonic
             elapsed_previous = (
