@@ -3467,10 +3467,9 @@ class CameraWindow(QMainWindow):
         status_message = _reference_tracking_status_message(update)
         if status_message is not None:
             self._occupancy_status.setText(status_message)
-        if (
-            update.state != self._last_runtime_tracker_state
-            or update.state
-            in {
+        if update.state != self._last_runtime_tracker_state:
+            self._last_runtime_tracker_state = update.state
+            if update.state in {
                 "accepted",
                 "ambiguous",
                 "illegal-removal",
@@ -3478,15 +3477,13 @@ class CameraWindow(QMainWindow):
                 "pending-capture",
                 "pending-castling",
                 "pending-en-passant",
-            }
-        ):
-            self._last_runtime_tracker_state = update.state
-            self._record_runtime_diagnostic(
-                "reference-tracker",
-                update.message,
-                tracker_update=update,
-                include_images=True,
-            )
+            }:
+                self._record_runtime_diagnostic(
+                    "reference-tracker",
+                    update.message,
+                    tracker_update=update,
+                    include_images=True,
+                )
         self._restore_pending_lichess_guidance_after_no_change(update)
         self._restore_offline_accepted_projection_after_no_change(update)
         rejected_move = self._last_rejected_move
@@ -6688,15 +6685,25 @@ class CameraWindow(QMainWindow):
             if images is None:
                 images = {}
             images.update(additional_images)
+        if include_images:
+            if images is None:
+                images = {}
+            images.update(self._runtime_board_snapshot_images())
         try:
-            self._runtime_diagnostics.record(
+            queued = self._runtime_diagnostics.record_async(
                 event_type,
                 message,
                 state,
                 details=details,
                 images=images,
             )
-            self._save_runtime_board_snapshots()
+            writer_error = self._runtime_diagnostics.take_async_error()
+            if writer_error is not None:
+                raise OSError(writer_error)
+            if not queued:
+                raise OSError(
+                    f"Runtime diagnostic event {event_type} was not queued."
+                )
             self._runtime_diagnostics_error = None
         except (OSError, ValueError) as error:
             self._runtime_diagnostics_error = str(error)
@@ -6704,20 +6711,26 @@ class CameraWindow(QMainWindow):
                 f"Runtime diagnostics unavailable: {error}"
             )
 
-    def _save_runtime_board_snapshots(self) -> None:
-        diagnostic_root = _PROJECT_ROOT / "diagnostics"
-        diagnostic_root.mkdir(parents=True, exist_ok=True)
+    def _runtime_board_snapshot_images(self) -> dict[str, ImageArray]:
+        images: dict[str, ImageArray] = {}
         for name, widget in (
             ("physical-ui", self._board_widget),
             ("lichess-ui", self._lichess_board_widget),
         ):
-            temporary_path = diagnostic_root / f"runtime-{name}.tmp.png"
-            final_path = diagnostic_root / f"runtime-{name}.png"
-            if not widget.grab().save(str(temporary_path), "PNG"):
-                raise OSError(
-                    f"Could not save runtime {name} board snapshot."
-                )
-            temporary_path.replace(final_path)
+            image = widget.grab().toImage().convertToFormat(
+                QImage.Format.Format_RGB888
+            )
+            width = image.width()
+            height = image.height()
+            bytes_per_line = image.bytesPerLine()
+            buffer = np.frombuffer(
+                image.bits(),
+                dtype=np.uint8,
+                count=image.sizeInBytes(),
+            ).reshape(height, bytes_per_line)
+            rgb = buffer[:, : width * 3].reshape(height, width, 3)
+            images[name] = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        return images
 
     def _lichess_thread_finished(self) -> None:
         self._lichess_thread = None
@@ -7272,6 +7285,7 @@ class CameraWindow(QMainWindow):
         if self._camera is not None:
             self._camera.stop()
         self._projector_window.close()
+        self._runtime_diagnostics.close()
         event.accept()
 
 

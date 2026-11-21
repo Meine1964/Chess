@@ -888,7 +888,12 @@ restoration. Repeated camera frames within one phase shall not generate
 duplicate lifecycle events. Events may carry token-free operation details
 needed to reconstruct the failure context. Runtime files shall remain
 excluded from version control, image files shall be overwritten rather than
-accumulated, and event history shall be bounded.
+accumulated, and event history shall be bounded. Routine move-tracker
+observations shall not write images. Significant physical decisions shall
+queue immutable state and image snapshots to a bounded single-writer
+background queue so diagnostic compression and file output cannot delay
+physical move acceptance. Queue overflow or writer failure shall be reported
+in the runtime UI.
 
 ## 18. Implementation Boundaries
 

@@ -1,11 +1,21 @@
 import json
+from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from queue import Full, Queue
+from threading import Lock, Thread
 from uuid import uuid4
 
 import cv2
 
 from .board_detector import BoardDetection, ImageArray
+
+
+@dataclass(frozen=True)
+class _PendingRuntimeRecord:
+    payload: dict[str, object]
+    images: dict[str, ImageArray] | None
 
 
 class DiagnosticStore:
@@ -106,13 +116,27 @@ class RuntimeDiagnosticLog:
         root: Path,
         *,
         maximum_bytes: int = 2_000_000,
+        maximum_pending_records: int = 8,
     ) -> None:
         if maximum_bytes < 10_000:
             raise ValueError("maximum_bytes must be at least 10000.")
+        if maximum_pending_records < 1:
+            raise ValueError("maximum_pending_records must be positive.")
         self._root = root
         self._maximum_bytes = maximum_bytes
         self._state_path = root / "runtime-state.json"
         self._events_path = root / "runtime-events.jsonl"
+        self._pending_records: Queue[_PendingRuntimeRecord | None] = Queue(
+            maxsize=maximum_pending_records
+        )
+        self._async_error: str | None = None
+        self._async_error_lock = Lock()
+        self._writer = Thread(
+            target=self._write_pending_records,
+            name="runtime-diagnostic-writer",
+            daemon=True,
+        )
+        self._writer.start()
 
     @property
     def state_path(self) -> Path:
@@ -131,6 +155,74 @@ class RuntimeDiagnosticLog:
         details: dict[str, object] | None = None,
         images: dict[str, ImageArray] | None = None,
     ) -> None:
+        payload = self._create_payload(
+            event_type,
+            message,
+            state,
+            details,
+        )
+        self._write_record(payload, images)
+
+    def record_async(
+        self,
+        event_type: str,
+        message: str,
+        state: dict[str, object],
+        *,
+        details: dict[str, object] | None = None,
+        images: dict[str, ImageArray] | None = None,
+    ) -> bool:
+        payload = self._create_payload(
+            event_type,
+            message,
+            deepcopy(state),
+            deepcopy(details),
+        )
+        copied_images = (
+            None
+            if images is None
+            else {
+                name: image.copy()
+                for name, image in images.items()
+            }
+        )
+        try:
+            self._pending_records.put_nowait(
+                _PendingRuntimeRecord(payload, copied_images)
+            )
+        except Full:
+            self._set_async_error(
+                "Runtime diagnostics queue is full; "
+                f"{event_type} was not recorded."
+            )
+            return False
+        return True
+
+    def take_async_error(self) -> str | None:
+        with self._async_error_lock:
+            error = self._async_error
+            self._async_error = None
+        return error
+
+    def close(self, timeout_seconds: float = 2.0) -> None:
+        if timeout_seconds <= 0:
+            raise ValueError("Diagnostic close timeout must be positive.")
+        if not self._writer.is_alive():
+            return
+        self._pending_records.put(None)
+        self._writer.join(timeout_seconds)
+        if self._writer.is_alive():
+            self._set_async_error(
+                "Runtime diagnostics did not finish before shutdown."
+            )
+
+    @staticmethod
+    def _create_payload(
+        event_type: str,
+        message: str,
+        state: dict[str, object],
+        details: dict[str, object] | None,
+    ) -> dict[str, object]:
         if not event_type.strip():
             raise ValueError("A runtime diagnostic event type is required.")
         payload: dict[str, object] = {
@@ -144,6 +236,13 @@ class RuntimeDiagnosticLog:
             "state": state,
         }
         _reject_sensitive_diagnostic_keys(payload)
+        return payload
+
+    def _write_record(
+        self,
+        payload: dict[str, object],
+        images: dict[str, ImageArray] | None,
+    ) -> None:
         self._root.mkdir(parents=True, exist_ok=True)
         serialized = json.dumps(payload, sort_keys=True)
         temporary_path = self._state_path.with_suffix(".json.tmp")
@@ -163,6 +262,22 @@ class RuntimeDiagnosticLog:
             raise OSError(
                 f"Could not write runtime diagnostics: {error}"
             ) from error
+
+    def _write_pending_records(self) -> None:
+        while True:
+            pending = self._pending_records.get()
+            try:
+                if pending is None:
+                    return
+                self._write_record(pending.payload, pending.images)
+            except (OSError, ValueError) as error:
+                self._set_async_error(str(error))
+            finally:
+                self._pending_records.task_done()
+
+    def _set_async_error(self, message: str) -> None:
+        with self._async_error_lock:
+            self._async_error = message
 
     def _write_runtime_image(
         self,

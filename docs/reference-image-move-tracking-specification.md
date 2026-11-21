@@ -587,6 +587,16 @@ For every activity episode, diagnostics shall be able to record:
 Diagnostics shall make it possible to reproduce a missed or incorrect move
 without relying on screenshots of the UI.
 
+Routine `watching`, `settling`, `activity`, and first-candidate observations
+shall not synchronously encode images or write runtime files. Significant
+tracker decisions may capture immutable diagnostic snapshots on the UI
+thread, but JSON serialization, PNG encoding, event truncation, and disk
+writes shall run on one bounded background writer. The move decision shall
+continue immediately after a diagnostic record is queued. Repeated ambiguous
+or pending observations shall be coalesced until the tracker changes state.
+Queue overflow and writer failures shall be surfaced explicitly rather than
+silently discarding significant diagnostics.
+
 ## 19. Performance Requirements
 
 On the current 1920x1080 C930e camera:
@@ -596,9 +606,19 @@ On the current 1920x1080 C930e camera:
 - Settled candidate comparison target: under `100 ms`.
 - Typical accepted-move latency target: under `700 ms` after the hand leaves.
 - UI and projector updates shall not block camera capture.
+- Runtime diagnostic compression and file output shall not block move
+  acceptance.
 
 Performance optimization shall not weaken reference integrity or ambiguity
 rejection.
+
+Per-square appearance features derived from the accepted reference shall be
+computed once and cached with the logical position used to label reference
+samples. Candidate observations shall reuse that immutable model. The cache
+shall be invalidated whenever the reference is cleared, replaced, remapped,
+or advanced after an accepted move, and whenever the supplied logical
+position differs. Cached classification shall produce the same labels,
+distances, and margins as classification from a freshly built model.
 
 ## 20. Tests
 

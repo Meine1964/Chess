@@ -1,7 +1,11 @@
 import cv2
 import numpy as np
 
-from src.chess_camera.piece_color_classifier import classify_piece_colors
+from src.chess_camera.piece_color_classifier import (
+    build_piece_color_reference,
+    classify_piece_colors,
+    classify_piece_colors_from_reference,
+)
 
 
 def _empty_board() -> np.ndarray:
@@ -79,3 +83,18 @@ def test_uncertain_color_does_not_force_a_piece_label() -> None:
     )
 
     assert classifications[(4, 4)].label == "uncertain"
+
+
+def test_cached_reference_classification_matches_fresh_model() -> None:
+    reference = _empty_board()
+    _draw_piece(reference, (6, 0), 225)
+    _draw_piece(reference, (1, 0), 20)
+    candidate = _empty_board()
+    _draw_piece(candidate, (4, 1), 225)
+    position = {(6, 0): "P", (1, 0): "p"}
+
+    fresh = classify_piece_colors(reference, candidate, position)
+    model = build_piece_color_reference(reference, position)
+    cached = classify_piece_colors_from_reference(model, candidate)
+
+    assert cached == fresh

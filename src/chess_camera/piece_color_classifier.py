@@ -19,6 +19,50 @@ class PieceColorClassification:
     margin: float
 
 
+@dataclass(frozen=True)
+class PieceColorReferenceModel:
+    image_shape: tuple[int, ...]
+    empty_samples: tuple[
+        tuple[FeatureArray, ...],
+        tuple[FeatureArray, ...],
+    ]
+    white_samples: tuple[FeatureArray, ...]
+    black_samples: tuple[FeatureArray, ...]
+
+
+def build_piece_color_reference(
+    reference: ImageArray,
+    position: Position,
+) -> PieceColorReferenceModel:
+    reference_features = _appearance_features(reference)
+    empty_samples: tuple[
+        list[FeatureArray],
+        list[FeatureArray],
+    ] = ([], [])
+    white_samples: list[FeatureArray] = []
+    black_samples: list[FeatureArray] = []
+    for row in range(8):
+        for column in range(8):
+            square = (row, column)
+            feature = reference_features[row, column]
+            piece = position.get(square)
+            if piece is None:
+                empty_samples[sum(square) % 2].append(feature)
+            elif piece.isupper():
+                white_samples.append(feature)
+            else:
+                black_samples.append(feature)
+    return PieceColorReferenceModel(
+        tuple(reference.shape),
+        (
+            tuple(empty_samples[0]),
+            tuple(empty_samples[1]),
+        ),
+        tuple(white_samples),
+        tuple(black_samples),
+    )
+
+
 def classify_piece_colors(
     reference: ImageArray,
     candidate: ImageArray,
@@ -27,52 +71,45 @@ def classify_piece_colors(
     maximum_distance: float = 0.35,
     minimum_margin: float = 0.04,
 ) -> dict[Square, PieceColorClassification]:
-    if reference.shape != candidate.shape:
+    model = build_piece_color_reference(reference, position)
+    return classify_piece_colors_from_reference(
+        model,
+        candidate,
+        maximum_distance=maximum_distance,
+        minimum_margin=minimum_margin,
+    )
+
+
+def classify_piece_colors_from_reference(
+    model: PieceColorReferenceModel,
+    candidate: ImageArray,
+    *,
+    maximum_distance: float = 0.35,
+    minimum_margin: float = 0.04,
+) -> dict[Square, PieceColorClassification]:
+    if tuple(candidate.shape) != model.image_shape:
         raise ValueError("Reference and candidate images must have equal shape.")
     if maximum_distance <= 0 or minimum_margin <= 0:
         raise ValueError("Classification thresholds must be positive.")
-    reference_features = _appearance_features(reference)
     candidate_features = _appearance_features(candidate)
-    samples: dict[PieceColorLabel, list[tuple[Square, FeatureArray]]] = {
-        "empty": [],
-        "white": [],
-        "black": [],
-        "uncertain": [],
-    }
-    for row in range(8):
-        for column in range(8):
-            square = (row, column)
-            piece = position.get(square)
-            label: PieceColorLabel = (
-                "empty"
-                if piece is None
-                else "white"
-                if piece.isupper()
-                else "black"
-            )
-            samples[label].append((square, reference_features[row, column]))
-
     classifications: dict[Square, PieceColorClassification] = {}
     for row in range(8):
         for column in range(8):
             square = (row, column)
             feature = candidate_features[row, column]
             distances: list[tuple[float, PieceColorLabel]] = []
-            for label in ("empty", "white", "black"):
-                label_samples = samples[label]
-                if label == "empty":
-                    label_samples = [
-                        sample
-                        for sample in label_samples
-                        if sum(sample[0]) % 2 == sum(square) % 2
-                    ]
+            for label, label_samples in (
+                ("empty", model.empty_samples[sum(square) % 2]),
+                ("white", model.white_samples),
+                ("black", model.black_samples),
+            ):
                 if not label_samples:
                     continue
                 distances.append(
                     (
                         min(
                             float(np.linalg.norm(feature - sample_feature))
-                            for _sample_square, sample_feature in label_samples
+                            for sample_feature in label_samples
                         ),
                         label,
                     )

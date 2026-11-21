@@ -392,6 +392,52 @@ def test_king_first_castling_relocation_waits_when_visual_match_fails(
     assert accepted.move == (king_source, king_destination)
 
 
+def test_piece_color_reference_is_cached_until_reference_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.chess_camera.reference_move_tracker as tracker_module
+
+    reference = _empty_board()
+    position = {(7, 4): "K", (0, 4): "k"}
+    for square, piece in position.items():
+        _draw_piece(
+            reference,
+            square,
+            (225, 225, 225) if piece.isupper() else (20, 20, 20),
+        )
+    original_build = tracker_module.build_piece_color_reference
+    build_count = 0
+
+    def counted_build(
+        image: np.ndarray,
+        model_position: dict[tuple[int, int], str],
+    ):
+        nonlocal build_count
+        build_count += 1
+        return original_build(image, model_position)
+
+    monkeypatch.setattr(
+        tracker_module,
+        "build_piece_color_reference",
+        counted_build,
+    )
+    tracker = ReferenceMoveTracker()
+    tracker.set_reference(reference, _camera_grid(), 0)
+
+    tracker.observe(reference, _camera_grid(), 0, position)
+    watching = tracker.observe(reference, _camera_grid(), 0, position)
+    assert watching.state == "watching"
+    assert build_count == 1
+
+    tracker._classify_piece_colors(reference, position)
+    tracker._classify_piece_colors(reference, dict(position))
+    assert build_count == 1
+
+    tracker.note_camera_grid_remap()
+    tracker._classify_piece_colors(reference, position)
+    assert build_count == 2
+
+
 def test_captured_pawn_first_en_passant_waits_for_attacker() -> None:
     game = LegalGame(
         "rnbqkbnr/1pp1pppp/p7/3pP3/8/8/PPPP1PPP/"

@@ -1030,6 +1030,7 @@ def test_normal_close_persists_main_window_geometry() -> None:
         _alignment_monitor=MagicMock(),
         _camera=None,
         _projector_window=MagicMock(),
+        _runtime_diagnostics=MagicMock(),
     )
     event = QCloseEvent()
 
@@ -1040,6 +1041,7 @@ def test_normal_close_persists_main_window_geometry() -> None:
         geometry,
     )
     settings.sync.assert_called_once_with()
+    window._runtime_diagnostics.close.assert_called_once_with()
     assert event.isAccepted()
 
 
@@ -1633,6 +1635,43 @@ def test_first_accepted_black_move_determines_offline_turn() -> None:
     assert window._legal_game.status.turn == "white"
     assert synchronizer.position[(2, 0)] == "p"
     window._persist_game_state.assert_called_once_with()
+
+
+def test_routine_tracker_transition_does_not_write_diagnostics() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    tracker = MagicMock()
+    tracker.observe.return_value = ReferenceTrackerUpdate(
+        "settling",
+        None,
+        "Board is clear; confirming a settled image.",
+    )
+    tracker.rejected_move_is_restored.return_value = False
+    window = SimpleNamespace(
+        _latest_frame=object(),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(camera_grid=object())
+        ),
+        _pending_lichess_local_move=None,
+        _lichess_game_controller=None,
+        _piece_synchronizer=SimpleNamespace(position={}),
+        _legal_game=LegalGame(),
+        _game_mode="diagnostic",
+        _reference_move_tracker=tracker,
+        _board_quarter_turns=0,
+        _occupancy_status=MagicMock(),
+        _last_runtime_tracker_state="watching",
+        _record_runtime_diagnostic=MagicMock(),
+        _restore_pending_lichess_guidance_after_no_change=MagicMock(),
+        _restore_offline_accepted_projection_after_no_change=MagicMock(),
+        _last_rejected_move=None,
+    )
+
+    CameraWindow._update_reference_move_tracking(window)
+
+    assert window._last_runtime_tracker_state == "settling"
+    window._record_runtime_diagnostic.assert_not_called()
 
 
 def test_illegal_first_move_keeps_offline_turn_undetermined() -> None:

@@ -17,7 +17,9 @@ from .legal_signature_matcher import (
 )
 from .piece_color_classifier import (
     PieceColorClassification,
-    classify_piece_colors,
+    PieceColorReferenceModel,
+    build_piece_color_reference,
+    classify_piece_colors_from_reference,
 )
 from .occupancy import rectify_board
 
@@ -76,6 +78,8 @@ class ReferenceMoveTracker:
         self._candidate_count = 0
         self._pending_reference: ImageArray | None = None
         self._camera_grid_remapped = False
+        self._piece_color_reference: PieceColorReferenceModel | None = None
+        self._piece_color_reference_position: Position | None = None
 
     @property
     def initialized(self) -> bool:
@@ -88,6 +92,7 @@ class ReferenceMoveTracker:
     def clear(self) -> None:
         self._reference = None
         self._camera_grid_remapped = False
+        self._clear_piece_color_reference()
         self.reset_activity()
 
     def reset_activity(self) -> None:
@@ -110,6 +115,7 @@ class ReferenceMoveTracker:
             self._canonical_size,
         )
         self._camera_grid_remapped = False
+        self._clear_piece_color_reference()
         self.reset_activity()
 
     def canonical_frame(
@@ -136,10 +142,12 @@ class ReferenceMoveTracker:
             )
         self._reference = np.asarray(reference, dtype=np.uint8).copy()
         self._camera_grid_remapped = False
+        self._clear_piece_color_reference()
         self.reset_activity()
 
     def note_camera_grid_remap(self) -> None:
         self._camera_grid_remapped = True
+        self._clear_piece_color_reference()
         self.reset_activity()
 
     def observe(
@@ -224,6 +232,7 @@ class ReferenceMoveTracker:
                     "A hand or object still obscures multiple board squares.",
                     scores,
                 )
+            self._ensure_piece_color_reference(position)
             self._clear_pending()
             return ReferenceTrackerUpdate(
                 "watching",
@@ -243,8 +252,7 @@ class ReferenceMoveTracker:
         illegal_removed_piece: Square | None = None
         illegal_relocation = False
         if physical_signatures:
-            piece_colors = classify_piece_colors(
-                self._reference,
+            piece_colors = self._classify_piece_colors(
                 normalized,
                 position,
             )
@@ -542,6 +550,51 @@ class ReferenceMoveTracker:
         self.reset_activity()
         self._reference = accepted_reference
         self._camera_grid_remapped = False
+        self._clear_piece_color_reference()
+
+    def _classify_piece_colors(
+        self,
+        candidate: ImageArray,
+        position: Position,
+    ) -> dict[Square, PieceColorClassification]:
+        if self._reference is None:
+            raise RuntimeError(
+                "Piece colors cannot be classified without a reference."
+            )
+        if (
+            self._piece_color_reference is None
+            or self._piece_color_reference_position != position
+        ):
+            self._ensure_piece_color_reference(position)
+        if self._piece_color_reference is None:
+            raise RuntimeError("Piece-color reference cache was not built.")
+        return classify_piece_colors_from_reference(
+            self._piece_color_reference,
+            candidate,
+        )
+
+    def _ensure_piece_color_reference(
+        self,
+        position: Position,
+    ) -> None:
+        if self._reference is None:
+            raise RuntimeError(
+                "Piece-color reference cannot be built without a reference."
+            )
+        if (
+            self._piece_color_reference is not None
+            and self._piece_color_reference_position == position
+        ):
+            return
+        self._piece_color_reference = build_piece_color_reference(
+            self._reference,
+            position,
+        )
+        self._piece_color_reference_position = dict(position)
+
+    def _clear_piece_color_reference(self) -> None:
+        self._piece_color_reference = None
+        self._piece_color_reference_position = None
 
     def rejected_move_is_restored(
         self,
