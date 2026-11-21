@@ -5,7 +5,11 @@ import cv2
 import numpy as np
 
 from src.chess_camera.camera_app import CameraWindow
-from src.chess_camera.guidance_activity import GuidanceActivityDetector
+from src.chess_camera.guidance_activity import (
+    BlackoutSettlingDetector,
+    BlackoutSettlingUpdate,
+    GuidanceActivityDetector,
+)
 from src.chess_camera.reference_move_tracker import ReferenceTrackerUpdate
 
 
@@ -119,6 +123,59 @@ def test_uniform_brightness_change_is_normalized() -> None:
 
     assert not detector.observe(brighter, _camera_grid())
     assert not detector.observe(brighter, _camera_grid())
+
+
+def test_blackout_settling_finishes_after_minimum_and_three_stable_frames() -> None:
+    now = 0.0
+    detector = BlackoutSettlingDetector(clock=lambda: now)
+    frame = _frame()
+    detector.reset()
+
+    now = 0.3
+    assert detector.observe(frame, _camera_grid()).state == "waiting"
+    now = 0.4
+    first = detector.observe(frame, _camera_grid())
+    now = 0.5
+    second = detector.observe(frame, _camera_grid())
+    now = 0.6
+    third = detector.observe(frame, _camera_grid())
+
+    assert first.stable_observations == 1
+    assert second.stable_observations == 2
+    assert third.state == "stable"
+    assert third.stable_observations == 3
+
+
+def test_blackout_instability_resets_stable_observations() -> None:
+    now = 0.0
+    detector = BlackoutSettlingDetector(clock=lambda: now)
+    frame = _frame()
+    changed = frame.copy()
+    changed[400:600, 400:600] = 180
+    detector.reset()
+
+    now = 0.4
+    detector.observe(frame, _camera_grid())
+    now = 0.5
+    stable = detector.observe(frame, _camera_grid())
+    now = 0.6
+    unstable = detector.observe(changed, _camera_grid())
+
+    assert stable.stable_observations == 1
+    assert unstable.state == "waiting"
+    assert unstable.stable_observations == 0
+
+
+def test_blackout_settling_uses_one_second_timeout() -> None:
+    now = 0.0
+    detector = BlackoutSettlingDetector(clock=lambda: now)
+    detector.reset()
+
+    now = 1.0
+    update = detector.observe(_frame(), _camera_grid())
+
+    assert update.state == "timeout"
+    assert update.elapsed_milliseconds == 1000
 
 
 def test_ignored_correction_squares_do_not_trigger_activity() -> None:
@@ -322,6 +379,7 @@ def test_settled_manipulation_blacks_projector_before_observation() -> None:
         _guidance_activity_detector=MagicMock(),
         _projector_window=MagicMock(),
         _alignment_monitor=MagicMock(),
+        _lichess_blackout_settling_detector=MagicMock(),
         _reference_move_tracker=MagicMock(),
         _projector_status=MagicMock(),
         _finish_lichess_guidance_blackout=MagicMock(),
@@ -337,10 +395,43 @@ def test_settled_manipulation_blacks_projector_before_observation() -> None:
     assert window._lichess_guidance_reprojection_pending is True
     window._projector_window.show_black.assert_called_once_with()
     window._alignment_monitor.set_black.assert_called_once_with()
+    window._lichess_blackout_settling_detector.reset.assert_called_once_with()
     window._reference_move_tracker.reset_activity.assert_called_once_with()
     assert single_shot.call_args.args[0] == 1000
     single_shot.call_args.args[1]()
-    window._finish_lichess_guidance_blackout.assert_called_once_with(4)
+    window._finish_lichess_guidance_blackout.assert_called_once_with(
+        4,
+        "fallback",
+    )
+
+
+def test_stable_blackout_observations_finish_guidance_early() -> None:
+    detector = MagicMock()
+    detector.observe.return_value = BlackoutSettlingUpdate(
+        "stable",
+        3,
+        3,
+        620,
+    )
+    window = SimpleNamespace(
+        _latest_frame=object(),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(camera_grid=object())
+        ),
+        _lichess_guidance_blackout_pending=True,
+        _lichess_guidance_generation=7,
+        _lichess_blackout_settling_detector=detector,
+        _finish_lichess_guidance_blackout=MagicMock(),
+        _projector_status=MagicMock(),
+        _occupancy_status=MagicMock(),
+    )
+
+    CameraWindow._observe_lichess_guidance_blackout(window)
+
+    window._finish_lichess_guidance_blackout.assert_called_once_with(
+        7,
+        "stable",
+    )
 
 
 def test_active_manipulation_keeps_opponent_guidance_projected() -> None:
@@ -373,6 +464,7 @@ def test_offline_accepted_projection_returns_when_hand_moves_nothing() -> None:
         _offline_accepted_reprojection_pending=True,
         _offline_accepted_no_change_count=0,
         _offline_accepted_move=move,
+        _offline_accepted_projection_mode="until-next-hand-leaves",
         _game_mode="offline-game",
         _project_offline_accepted_move=MagicMock(),
         _occupancy_status=MagicMock(),
@@ -400,14 +492,66 @@ def test_offline_accepted_projection_returns_when_hand_moves_nothing() -> None:
     )
 
     assert window._offline_accepted_reprojection_pending is False
-    window._project_offline_accepted_move.assert_called_once_with(move)
+    window._project_offline_accepted_move.assert_called_once_with(
+        move,
+        mode="until-next-hand-leaves",
+    )
     window._occupancy_status.setText.assert_called_once_with(
         "No physical move detected; accepted-move illumination restored."
     )
 
 
-def test_offline_hand_entry_requests_accepted_move_reprojection() -> None:
+def test_brief_offline_marking_schedules_exact_two_second_blackout() -> None:
+    move = ((6, 4), (4, 4))
+    window = SimpleNamespace(
+        _camera_only_calibration=False,
+        _calibration_result=object(),
+        _open_projector=MagicMock(return_value=True),
+        _physical_board_square=lambda row, column: (row, column),
+        _projector_window=MagicMock(),
+        _offline_move_marking_mode="brief",
+        _offline_accepted_projection_generation=2,
+        _offline_guidance_activity_detector=MagicMock(),
+        _offline_blackout_settling_detector=MagicMock(),
+        _alignment_monitor=MagicMock(),
+        _projector_status=MagicMock(),
+        _begin_offline_accepted_blackout=MagicMock(),
+    )
+
+    with patch(
+        "src.chess_camera.camera_app.QTimer.singleShot"
+    ) as single_shot:
+        CameraWindow._project_offline_accepted_move(window, move)
+
+    assert window._offline_accepted_projection_active is True
+    assert window._offline_accepted_projection_mode == "brief"
+    assert single_shot.call_args.args[0] == 2000
+    single_shot.call_args.args[1]()
+    window._begin_offline_accepted_blackout.assert_called_once_with(
+        3,
+        reproject_if_unchanged=False,
+    )
+
+
+def test_brief_offline_marking_ignores_hand_activity() -> None:
     detector = MagicMock()
+    window = SimpleNamespace(
+        _latest_frame=object(),
+        _calibration_result=object(),
+        _offline_accepted_projection_active=True,
+        _offline_accepted_projection_mode="brief",
+        _offline_guidance_activity_detector=detector,
+        _projector_window=SimpleNamespace(output_mode="move"),
+    )
+
+    CameraWindow._observe_offline_accepted_projection(window)
+
+    detector.observe.assert_not_called()
+
+
+def test_until_hand_leaves_keeps_projection_during_activity() -> None:
+    detector = MagicMock()
+    detector.observe.return_value = False
     detector.manipulation_active = True
     window = SimpleNamespace(
         _latest_frame=object(),
@@ -415,25 +559,85 @@ def test_offline_hand_entry_requests_accepted_move_reprojection() -> None:
             mapping=SimpleNamespace(camera_grid=object())
         ),
         _offline_accepted_projection_active=True,
+        _offline_accepted_projection_mode="until-next-hand-leaves",
+        _offline_accepted_projection_generation=8,
         _offline_accepted_reprojection_pending=False,
         _offline_accepted_no_change_count=1,
         _offline_guidance_activity_detector=detector,
-        _projector_window=SimpleNamespace(
-            output_mode="move",
-            show_black=MagicMock(),
-        ),
-        _alignment_monitor=MagicMock(),
-        _reference_move_tracker=MagicMock(),
+        _projector_window=SimpleNamespace(output_mode="move"),
+        _begin_offline_accepted_blackout=MagicMock(),
         _projector_status=MagicMock(),
     )
 
     CameraWindow._observe_offline_accepted_projection(window)
 
+    assert window._offline_accepted_projection_active is True
+    window._begin_offline_accepted_blackout.assert_not_called()
+
+    detector.observe.return_value = True
+    CameraWindow._observe_offline_accepted_projection(window)
+
+    window._begin_offline_accepted_blackout.assert_called_once_with(
+        8,
+        reproject_if_unchanged=True,
+    )
+
+
+def test_stale_offline_marking_timer_cannot_black_newer_projection() -> None:
+    window = SimpleNamespace(
+        _offline_accepted_projection_generation=5,
+        _offline_accepted_projection_active=True,
+        _projector_window=MagicMock(),
+    )
+
+    CameraWindow._begin_offline_accepted_blackout(
+        window,
+        4,
+        reproject_if_unchanged=False,
+    )
+
+    assert window._offline_accepted_projection_active is True
+    window._projector_window.show_black.assert_not_called()
+
+
+def test_offline_marking_blackout_pauses_until_exposure_settles() -> None:
+    window = SimpleNamespace(
+        _offline_accepted_projection_generation=5,
+        _offline_accepted_projection_active=True,
+        _offline_accepted_blackout_pending=False,
+        _offline_accepted_reprojection_pending=False,
+        _offline_accepted_no_change_count=1,
+        _offline_guidance_activity_detector=MagicMock(),
+        _offline_blackout_settling_detector=MagicMock(),
+        _projector_window=MagicMock(),
+        _alignment_monitor=MagicMock(),
+        _reference_move_tracker=MagicMock(),
+        _projector_status=MagicMock(),
+        _finish_offline_accepted_blackout=MagicMock(),
+    )
+
+    with patch(
+        "src.chess_camera.camera_app.QTimer.singleShot"
+    ) as single_shot:
+        CameraWindow._begin_offline_accepted_blackout(
+            window,
+            5,
+            reproject_if_unchanged=True,
+        )
+
     assert window._offline_accepted_projection_active is False
+    assert window._offline_accepted_blackout_pending is True
     assert window._offline_accepted_reprojection_pending is True
-    assert window._offline_accepted_no_change_count == 0
     window._projector_window.show_black.assert_called_once_with()
+    window._alignment_monitor.set_black.assert_called_once_with()
+    window._offline_blackout_settling_detector.reset.assert_called_once_with()
     window._reference_move_tracker.reset_activity.assert_called_once_with()
+    assert single_shot.call_args.args[0] == 1000
+    single_shot.call_args.args[1]()
+    window._finish_offline_accepted_blackout.assert_called_once_with(
+        5,
+        "fallback",
+    )
 
 
 def test_unchanged_board_restores_pending_lichess_guidance() -> None:
@@ -481,6 +685,7 @@ def test_guidance_activity_precedes_black_output_gate() -> None:
         _illegal_correction_projection_active=False,
         _illegal_correction_blackout_pending=False,
         _offline_accepted_projection_active=False,
+        _offline_accepted_blackout_pending=False,
         _lichess_guidance_projection_active=True,
         _lichess_guidance_blackout_pending=False,
         _observe_lichess_guidance_activity=MagicMock(),
@@ -496,8 +701,12 @@ def test_black_button_starts_pending_move_observation() -> None:
     window = SimpleNamespace(
         _lichess_guidance_projection_active=True,
         _offline_accepted_projection_active=False,
+        _offline_accepted_blackout_pending=False,
         _offline_accepted_reprojection_pending=False,
+        _offline_accepted_projection_generation=0,
+        _offline_accepted_projection_mode=None,
         _offline_guidance_activity_detector=MagicMock(),
+        _offline_blackout_settling_detector=MagicMock(),
         _illegal_correction_activity_detector=MagicMock(),
         _illegal_correction_generation=0,
         _illegal_correction_physical_squares=(),

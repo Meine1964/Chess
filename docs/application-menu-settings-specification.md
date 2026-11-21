@@ -128,10 +128,12 @@ menu actions. Moving a command shall not change its operational behavior.
 
 - **Devices:** camera and projector display selectors.
 - **Chess:** promotion mode with **Auto-queen** and
-  **Select promoted piece** choices, plus **Automatically reset a detected
-  starting position** and **Project turn indicator beside the board**.
+  **Select promoted piece** choices, Offline move marking duration with
+  **Brief (2 seconds)** and **Until next hand leaves** choices, plus
+  **Automatically reset a detected starting position** and
+  **Project turn indicator beside the board**.
   Auto-queen, automatic starting-position reset, and physical turn projection
-  remain the defaults.
+  remain the defaults. Brief Offline move marking is the default.
 - **Diagnostics:** the **Save diagnostic snapshots** setting.
 - **Lichess:** current connection status, persistent AI-game defaults for AI
   level, player color, and clock, plus a fresh configured/not-configured check
@@ -150,6 +152,18 @@ local promotion as queen promotion once its physical evidence is complete.
 workflow defined by the Lichess physical-move synchronization specification.
 Changing the setting while a promotion workflow is already pending shall not
 change that workflow; the new mode shall apply to the next promotion.
+
+The Offline move-marking duration shall persist and apply symmetrically after
+White and Black moves. **Brief (2 seconds)** shall display the accepted source
+and destination for exactly two seconds without ending early when a hand
+enters. **Until next hand leaves** shall retain the previous move marking
+through the next detected manipulation and remove it only after that hand has
+left the board. A choice changed while marking is active shall apply to the
+next accepted move. In either mode, camera move verification shall remain
+paused while marking is projected and resume only after the projector has
+returned to black and its exposure has stabilized. The accepted reference
+shall never be updated from a marked frame. After the marking ends, the
+current side's configured turn indicator may remain in projector-black mode.
 
 The automatic starting-position reset setting shall persist and default to
 enabled. When enabled and no Lichess game is active, the application shall

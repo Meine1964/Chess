@@ -1,7 +1,125 @@
+from collections.abc import Callable
+from dataclasses import dataclass
+from time import monotonic
+from typing import Literal
+
 import cv2
 import numpy as np
 
 from .board_detector import FloatArray, ImageArray
+from .occupancy import rectify_board
+
+
+BlackoutSettlingState = Literal["waiting", "stable", "timeout"]
+
+
+@dataclass(frozen=True)
+class BlackoutSettlingUpdate:
+    state: BlackoutSettlingState
+    stable_observations: int
+    required_observations: int
+    elapsed_milliseconds: int
+
+
+class BlackoutSettlingDetector:
+    def __init__(
+        self,
+        *,
+        minimum_milliseconds: int = 400,
+        maximum_milliseconds: int = 1000,
+        required_observations: int = 3,
+        maximum_mean_pixel_change: float = 2.5,
+        maximum_square_change: float = 4.0,
+        clock: Callable[[], float] = monotonic,
+    ) -> None:
+        if (
+            minimum_milliseconds < 0
+            or maximum_milliseconds <= minimum_milliseconds
+        ):
+            raise ValueError("Blackout settling durations are invalid.")
+        if required_observations < 1:
+            raise ValueError("Stable observation count must be positive.")
+        if maximum_mean_pixel_change <= 0 or maximum_square_change <= 0:
+            raise ValueError("Blackout stability thresholds must be positive.")
+        self._minimum_seconds = minimum_milliseconds / 1000.0
+        self._maximum_seconds = maximum_milliseconds / 1000.0
+        self._required_observations = required_observations
+        self._maximum_mean_pixel_change = maximum_mean_pixel_change
+        self._maximum_square_change = maximum_square_change
+        self._clock = clock
+        self._started_at: float | None = None
+        self._previous: np.ndarray | None = None
+        self._stable_observations = 0
+
+    def reset(self) -> None:
+        self._started_at = self._clock()
+        self._previous = None
+        self._stable_observations = 0
+
+    def observe(
+        self,
+        frame: ImageArray,
+        camera_grid: FloatArray,
+    ) -> BlackoutSettlingUpdate:
+        if self._started_at is None:
+            raise RuntimeError("Blackout settling detector is not active.")
+        elapsed = self._clock() - self._started_at
+        elapsed_milliseconds = max(0, round(elapsed * 1000))
+        if elapsed >= self._maximum_seconds:
+            return BlackoutSettlingUpdate(
+                "timeout",
+                self._stable_observations,
+                self._required_observations,
+                elapsed_milliseconds,
+            )
+        canonical = rectify_board(frame, camera_grid, 160)
+        current = cv2.GaussianBlur(
+            cv2.cvtColor(canonical, cv2.COLOR_BGR2GRAY),
+            (5, 5),
+            0,
+        )
+        previous = self._previous
+        self._previous = current
+        if previous is None or elapsed < self._minimum_seconds:
+            self._stable_observations = 0
+            return BlackoutSettlingUpdate(
+                "waiting",
+                0,
+                self._required_observations,
+                elapsed_milliseconds,
+            )
+        difference = cv2.absdiff(previous, current)
+        square_changes = tuple(
+            float(
+                np.mean(
+                    difference[
+                        row * 20 : (row + 1) * 20,
+                        column * 20 : (column + 1) * 20,
+                    ]
+                )
+            )
+            for row in range(8)
+            for column in range(8)
+        )
+        stable = (
+            float(np.mean(difference)) <= self._maximum_mean_pixel_change
+            and max(square_changes, default=0.0)
+            <= self._maximum_square_change
+        )
+        self._stable_observations = (
+            self._stable_observations + 1 if stable else 0
+        )
+        state: BlackoutSettlingState = (
+            "stable"
+            if self._stable_observations >= self._required_observations
+            else "waiting"
+        )
+        return BlackoutSettlingUpdate(
+            state,
+            self._stable_observations,
+            self._required_observations,
+            elapsed_milliseconds,
+        )
 
 
 class GuidanceActivityDetector:

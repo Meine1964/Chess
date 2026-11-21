@@ -18,6 +18,7 @@ from src.chess_camera.camera_app import (
     _physical_promotion_edge,
     _projected_turn_corner,
     _reference_tracking_status_message,
+    _stored_offline_move_marking_mode,
     _turn_indicator_state,
     _inferred_offline_game_for_source,
 )
@@ -127,6 +128,7 @@ def test_stable_menu_preferences_are_persisted() -> None:
         _settings=settings,
         _preferred_lichess_game_id="",
         _promotion_mode="auto-queen",
+        _offline_move_marking_mode="brief",
         _automatic_start_reset=True,
         _project_turn_indicator=True,
         _reset_pieces_button=MagicMock(),
@@ -137,6 +139,10 @@ def test_stable_menu_preferences_are_persisted() -> None:
     CameraWindow._save_diagnostics_preference_changed(window, False)
     CameraWindow._remember_lichess_game_selection(window, "game1234")
     CameraWindow._set_promotion_mode(window, "select-promoted-piece")
+    CameraWindow._set_offline_move_marking_mode(
+        window,
+        "until-next-hand-leaves",
+    )
     CameraWindow._set_automatic_start_reset(window, False)
     CameraWindow._set_project_turn_indicator(window, False)
 
@@ -144,16 +150,41 @@ def test_stable_menu_preferences_are_persisted() -> None:
         call("diagnostics/save_snapshots", False),
         call("lichess/selected_game_id", "game1234"),
         call("chess/promotion_mode", "select-promoted-piece"),
+        call(
+            "chess/offline_move_marking",
+            "until-next-hand-leaves",
+        ),
         call("chess/automatic_start_reset", False),
         call("chess/project_turn_indicator", False),
     ]
-    assert settings.sync.call_count == 5
+    assert settings.sync.call_count == 6
     assert window._preferred_lichess_game_id == "game1234"
     assert window._promotion_mode == "select-promoted-piece"
+    assert (
+        window._offline_move_marking_mode
+        == "until-next-hand-leaves"
+    )
     assert window._automatic_start_reset is False
     assert window._project_turn_indicator is False
     window._reset_pieces_button.setVisible.assert_called_once_with(True)
     window._update_projected_turn_indicator.assert_called_once_with()
+
+
+def test_offline_move_marking_mode_rejects_invalid_values() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    assert _stored_offline_move_marking_mode("brief") == "brief"
+    assert (
+        _stored_offline_move_marking_mode("until-next-hand-leaves")
+        == "until-next-hand-leaves"
+    )
+    assert _stored_offline_move_marking_mode("invalid") == "brief"
+
+    window = SimpleNamespace(_settings=MagicMock())
+    with pytest.raises(ValueError, match="Unsupported Offline"):
+        CameraWindow._set_offline_move_marking_mode(window, "invalid")
+    window._settings.setValue.assert_not_called()
 
 
 def test_created_ai_game_follows_exact_returned_id() -> None:

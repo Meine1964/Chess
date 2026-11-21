@@ -709,6 +709,7 @@ def test_lichess_ai_defaults_apply_and_cancel_transactionally(
             self._save_diagnostics = QCheckBox()
             self._lichess_status = QLabel("Disconnected")
             self._promotion_mode = "auto-queen"
+            self._offline_move_marking_mode = "brief"
             self._automatic_start_reset = True
             self._project_turn_indicator = True
 

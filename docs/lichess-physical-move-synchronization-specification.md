@@ -460,10 +460,18 @@ consecutive observations.
 
 After manipulation has started and then settled, the guidance projection shall
 be removed and the projector returned to black. The application shall discard
-frames during a one-second projector-settling interval, reset transient
-tracker activity, and only then evaluate change scores, color evidence,
-obstruction, or settling. The durable UI guidance shall remain visible during
-physical confirmation.
+at least 400 ms of frames, then compare consecutive downscaled black-projector
+board observations for global luminance stability and per-square exposure
+stability. Three consecutive stable observations may end settling early. Any
+unstable observation resets that count. A one-second timer remains the
+mandatory fallback and shall end settling when adaptive measurement is
+unavailable or has not stabilized. Transient tracker activity shall be reset
+when black settling completes, and only then may change scores, color
+evidence, obstruction, or move settling be evaluated. The durable UI guidance
+shall remain visible during physical confirmation. This adaptive timing shall
+apply only to projected Lichess move guidance and removal of Offline accepted
+move marking; startup, reconciliation, illegal-correction, and other blackout
+workflows retain their existing timing.
 
 Guidance may be shown again when:
 
