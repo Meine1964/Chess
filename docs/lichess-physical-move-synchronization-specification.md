@@ -28,9 +28,10 @@ When Lichess advances the remote game, the application shall:
 6. Advance the physical position and replace the camera reference only after
    exact confirmation.
 
-Outgoing ordinary moves, non-promotion captures, castling, and en passant are
-supported. Promotion remains reconciliation-only until its outgoing slice is
-implemented.
+Outgoing ordinary moves, non-promotion captures, castling, en passant,
+auto-queen promotion, and auto-queen capture-promotion are supported.
+Underpromotion remains reconciliation-only until its computer-selection
+workflow is implemented.
 
 ## 2. Design Principles
 
@@ -87,8 +88,8 @@ The first implementation shall support:
 - Complete move-history prefix validation.
 - One or more newly reported moves in a single update.
 - An ordered queue of moves not yet confirmed physically.
-- Ordinary moves, non-promotion captures, castling, and en passant for both
-  colors.
+- Ordinary moves, non-promotion captures, castling, en passant, auto-queen
+  promotion, and auto-queen capture-promotion for both colors.
 - Direct submission of those supported local-player move kinds.
 - Opponent-move projection and physical confirmation.
 - Durable UI guidance.
@@ -103,8 +104,7 @@ The first implementation shall support:
 After ordinary moves and captures are live-accepted, the same state machine
 shall be extended to:
 
-- Queen promotion.
-- Capture-promotion.
+- Underpromotion selection.
 
 The legal-signature model already represents these move kinds. Their rollout
 may be staged because projection and multi-action physical workflows require
@@ -482,7 +482,26 @@ captured-pawn square in white on both the physical UI board and projector.
 
 Later slices shall derive involved squares from the expected signature:
 
-- Promotion: source and destination plus queen-replacement guidance.
+- Promotion: source and destination.
+
+### 10.4 Auto-queen promotion
+
+**Auto-queen** is the only implemented promotion mode. A pawn reaching the
+last rank shall be interpreted and submitted as a queen promotion. The camera
+shall require the promotion source to become empty and the destination to
+contain a piece of the moving color. Because occupancy and color evidence
+cannot distinguish a pawn from a same-color queen, that evidence shall commit
+the authoritative queen without claiming optical piece-type verification.
+
+Capture-promotion shall support complete final-position evidence and the
+existing captured-piece-first workflow. Removing the destination piece alone
+shall preserve the original authoritative state and reference until the
+attacking pawn reaches the promotion destination.
+
+Incoming underpromotion shall enter reconciliation-required rather than being
+interpreted as queen promotion. Local underpromotion shall remain unavailable
+until a future computer interaction allows the user to select rook, bishop, or
+knight.
 
 ## 11. Camera Confirmation
 
@@ -567,12 +586,12 @@ The user may:
 After restoration, the application shall resume guidance for the same pending
 move. After an exact expected final position, it may commit normally.
 
-## 13. Local Ordinary-Move, Capture, Castling, and En Passant Submission
+## 13. Local Supported-Move Submission
 
 Local submission is available only when the physical and server positions are
 synchronized, it is the configured player's turn, and the camera identifies a
 unique ordinary move, non-promotion capture, completed castling signature, or
-completed en passant signature.
+completed en passant signature, queen promotion, or queen capture-promotion.
 
 The application shall use a two-phase commit:
 
@@ -818,8 +837,8 @@ Phase 7 slices are declared complete.
 
 ## 21. Implementation Status
 
-The ordinary-move, non-promotion capture, castling, and en passant slices are
-implemented:
+The ordinary-move, non-promotion capture, castling, en passant, and auto-queen
+promotion slices are implemented:
 
 - A pure synchronization controller validates complete history prefixes.
 - Server and physical legal cursors advance independently.
@@ -852,11 +871,15 @@ implemented:
   complete final position or king-first, rook-second physical handling.
 - Incoming and local en passant use three-square guidance and accept either
   the complete final position or captured-pawn-first physical handling.
-- Promotions and capture-promotions explicitly enter reconciliation until
-  their staged slices are implemented.
+- Incoming and local queen promotion use source/destination guidance and
+  commit the authoritative queen from exact occupancy/color evidence.
+- Queen capture-promotion accepts complete evidence or captured-piece-first
+  physical handling.
+- Underpromotion explicitly enters reconciliation until computer-based piece
+  selection is implemented.
 
-The validated automated suite contains 252 passing tests. Live ordinary-move,
+The validated automated suite contains 259 passing tests. Live ordinary-move,
 polling, reconciliation, and guidance acceptance has been exercised on the
-target camera/projector setup. Lichess capture, castling, and en passant
-behavior is automated-test validated and awaits live acceptance. Promotions
-and capture-promotions remain staged limitations.
+target camera/projector setup. Lichess capture, castling, en passant, and
+auto-queen behavior is automated-test validated and awaits live acceptance.
+Underpromotion remains a staged limitation.

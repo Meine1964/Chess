@@ -57,17 +57,53 @@ def test_stable_menu_preferences_are_persisted() -> None:
     window = SimpleNamespace(
         _settings=settings,
         _preferred_lichess_game_id="",
+        _promotion_mode="auto-queen",
     )
 
     CameraWindow._save_diagnostics_preference_changed(window, False)
     CameraWindow._remember_lichess_game_selection(window, "game1234")
+    CameraWindow._set_promotion_mode(window, "auto-queen")
 
     assert settings.setValue.call_args_list == [
         call("diagnostics/save_snapshots", False),
         call("lichess/selected_game_id", "game1234"),
+        call("chess/promotion_mode", "auto-queen"),
     ]
-    assert settings.sync.call_count == 2
+    assert settings.sync.call_count == 3
     assert window._preferred_lichess_game_id == "game1234"
+    assert window._promotion_mode == "auto-queen"
+
+
+def test_normal_close_persists_main_window_geometry() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from PySide6.QtCore import QByteArray
+    from PySide6.QtGui import QCloseEvent
+
+    settings = MagicMock()
+    geometry = QByteArray(b"saved-geometry")
+    window = SimpleNamespace(
+        _lichess_submission_thread=None,
+        _lichess_worker=None,
+        _lichess_thread=None,
+        _settings=settings,
+        saveGeometry=MagicMock(return_value=geometry),
+        _calibrator=MagicMock(),
+        _alignment_monitor=MagicMock(),
+        _camera=None,
+        _projector_window=MagicMock(),
+    )
+    event = QCloseEvent()
+
+    CameraWindow.closeEvent(window, event)
+
+    settings.setValue.assert_called_once_with(
+        "window/main_geometry",
+        geometry,
+    )
+    settings.sync.assert_called_once_with()
+    assert event.isAccepted()
 
 
 def test_lichess_game_state_message_reports_clocks_and_result() -> None:

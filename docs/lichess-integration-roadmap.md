@@ -395,11 +395,10 @@ committing the move.
 
 ### 7.4 Promotion
 
-After detecting the pawn relocation:
-
-1. Enter a pending-promotion state.
-2. Apply queen promotion.
-3. Commit the logical position and reference together.
+The initial promotion mode is **Auto-queen**. After exact source-empty and
+destination-moving-color evidence, apply queen promotion and commit the
+logical position and reference together. The camera does not claim to
+distinguish the same-color physical pawn from a queen.
 
 Selection of rook, bishop, or knight is deferred to a later extension.
 
@@ -590,6 +589,10 @@ guidance and king-first, rook-second confirmation, and awaits live acceptance.
 Incoming and locally submitted en passant is implemented with three-square
 white guidance and captured-pawn-first confirmation, and awaits live
 acceptance.
+Incoming and locally submitted queen promotion and capture-promotion are
+implemented in persistent Auto-queen mode. Capture-promotion supports
+captured-piece-first evidence. Underpromotion remains reconciliation-only
+until computer-based piece selection is implemented.
 The synchronization flow maintains separate server and physical legal cursors,
 validates streamed history prefixes and verified polling transitions,
 queues one or more reported moves in server order, shows one pending move at a
@@ -597,8 +600,9 @@ time in white on the physical UI board and projector, and commits the physical
 position and camera reference only after exact expected evidence. It also
 supports explicit game selection, automatic current-position reconciliation,
 manual trusted acceptance through **Stop reconciliation** when the visible
-board already matches Lichess, and ordinary/capture/castling/en-passant local
-move submission. Promotions and capture-promotions remain staged work.
+board already matches Lichess, and
+ordinary/capture/castling/en-passant/auto-queen local move submission.
+Underpromotion selection remains staged work.
 
 When Lichess reports an opponent move:
 

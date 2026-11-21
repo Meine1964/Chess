@@ -105,7 +105,14 @@ class LichessGameController:
                 for signature in self._physical_game.legal_move_signatures
                 if signature.uci == expected_uci
                 and signature.kind
-                in ("ordinary", "capture", "castling", "en-passant")
+                in (
+                    "ordinary",
+                    "capture",
+                    "castling",
+                    "en-passant",
+                    "promotion",
+                    "capture-promotion",
+                )
             ),
             None,
         )
@@ -134,7 +141,14 @@ class LichessGameController:
             signature
             for signature in self._physical_game.legal_move_signatures
             if signature.kind
-            in ("ordinary", "capture", "castling", "en-passant")
+            in (
+                "ordinary",
+                "capture",
+                "castling",
+                "en-passant",
+                "promotion",
+                "capture-promotion",
+            )
         )
 
     def prepare_local_move(
@@ -265,7 +279,8 @@ class LichessGameController:
             return self._update(
                 (),
                 "The pending Lichess move is not supported by the ordinary, "
-                "capture, castling, and en passant synchronization slice.",
+                "capture, castling, en passant, and auto-queen promotion "
+                "synchronization slice.",
             )
         expected = (signature.source, signature.destination)
         if move != expected:

@@ -56,6 +56,7 @@ menu actions. Moving a command shall not change its operational behavior.
 **File > Settings...** shall open a modal settings dialog with:
 
 - **Devices:** camera and projector display selectors.
+- **Chess:** promotion mode. **Auto-queen** is the only current choice.
 - **Diagnostics:** the **Save diagnostic snapshots** setting.
 - **Lichess:** current connection status plus a fresh configured/not-configured
   check of `LICHESS_TOKEN` from the process environment, without displaying or
@@ -123,6 +124,12 @@ The main window shall retain:
 - Camera, detection, projector, alignment, occupancy, piece, Lichess
   connection, and synchronization status text.
 
+The main-window geometry shall persist on a normal close and restore after the
+next startup. Qt's geometry state is authoritative so the previous screen,
+position, size, and maximized state are restored together. If the stored
+geometry is absent or invalid, the application shall use its default
+1500-by-900 size.
+
 The lower-left interaction panel shall use a minimum 12-point font for its
 turn indicator text, calibration state, progress text, status messages, and
 instructions so they remain readable at the normal operating distance. This
@@ -157,14 +164,17 @@ interaction rows.
    12 points.
 8. Camera, projector, game mode, diagnostic snapshots, and exact Lichess game
    selection persist; unavailable identities are retained without substitution.
+   The promotion mode also persists and currently resolves to **Auto-queen**.
 9. Connection and in-progress hardware operation state does not persist.
 10. Remembered unavailable camera and projector identities remain visible and
     selected in the Devices tab.
+11. A normally closed main window reopens with its previous screen, position,
+    size, and maximized state.
 
 ## 7. Validation Status
 
 The implemented menu bar exposes File, Camera, Game, Projector, and
-Calibration menus. The complete automated suite contains 252 passing tests,
+Calibration menus. The complete automated suite contains 259 passing tests,
 including menu structure, transactional selector-copy behavior, existing UI
 state transitions, reconciliation controls, and the readable interaction-font
 minimum. Token-status coverage confirms configured and missing environment
@@ -175,4 +185,6 @@ exact Lichess game restoration without selecting a replacement. An offscreen
 full-window smoke check also confirms that the complete Qt window constructs
 the expected menu bar and File > Settings action. Projector-refresh coverage
 confirms that current Qt display enumeration replaces stale cached availability
-without changing the remembered selection.
+without changing the remembered selection. Window-state coverage confirms that
+geometry is written only on an accepted close and restored through Qt's native
+geometry state.

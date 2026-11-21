@@ -406,3 +406,21 @@ def test_interaction_panel_font_is_readable(
 
     assert status.font().pointSize() >= 12
     panel.close()
+
+
+def test_main_window_geometry_restores_previous_size(
+    application: QApplication,
+) -> None:
+    from src.chess_camera.camera_app import _restore_window_geometry
+
+    previous = QMainWindow()
+    previous.resize(700, 500)
+    stored = previous.saveGeometry()
+    restored = QMainWindow()
+    restored.resize(320, 240)
+
+    assert _restore_window_geometry(restored, stored)
+    assert restored.size() == previous.size()
+
+    previous.close()
+    restored.close()

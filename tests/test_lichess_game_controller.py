@@ -167,19 +167,70 @@ def test_controller_prepares_and_commits_local_capture() -> None:
     assert controller.physical_fen == controller.server_fen
 
 
-def test_controller_keeps_promotion_in_reconciliation() -> None:
+def test_controller_queues_and_confirms_incoming_auto_queen() -> None:
+    controller = LichessGameController(
+        "game1234",
+        "4k3/P7/8/8/8/8/8/4K3 w - - 0 1",
+        "black",
+        "Stockfish level 1",
+    )
+
+    update = controller.accept_server_history(("a7a8q",))
+
+    assert update.state == "guidance"
+    signature = controller.expected_signature
+    assert signature is not None
+    assert signature.kind == "promotion"
+    assert controller.confirm_expected_move(
+        (signature.source, signature.destination)
+    ).state == "synchronized"
+
+
+def test_controller_keeps_underpromotion_in_reconciliation() -> None:
+    controller = LichessGameController(
+        "game1234",
+        "4k3/P7/8/8/8/8/8/4K3 w - - 0 1",
+        "black",
+        "Stockfish level 1",
+    )
+
+    update = controller.accept_server_history(("a7a8n",))
+
+    assert update.state == "reconciliation-required"
+    assert controller.expected_signature is None
+
+
+def test_controller_prepares_and_commits_local_auto_queen() -> None:
     controller = LichessGameController(
         "game1234",
         "4k3/P7/8/8/8/8/8/4K3 w - - 0 1",
         "white",
-        "Stockfish level 1",
+        "Remote",
     )
     controller.accept_server_history(())
 
-    update = controller.accept_server_history(("a7a8q",))
+    uci, preview = controller.prepare_local_move(((1, 0), (0, 0)))
 
-    assert update.state == "reconciliation-required"
-    assert controller.expected_signature is None
+    assert uci == "a7a8q"
+    assert preview.position[(0, 0)] == "Q"
+    committed = controller.commit_local_move(((1, 0), (0, 0)))
+    assert committed.fen == preview.fen
+    assert controller.server_moves == ("a7a8q",)
+
+
+def test_controller_prepares_local_capture_promotion() -> None:
+    controller = LichessGameController(
+        "game1234",
+        "1r5k/P7/8/8/8/8/8/7K w - - 0 1",
+        "white",
+        "Remote",
+    )
+    controller.accept_server_history(())
+
+    uci, preview = controller.prepare_local_move(((1, 0), (0, 1)))
+
+    assert uci == "a7b8q"
+    assert preview.position[(0, 1)] == "Q"
 
 
 def test_controller_queues_and_confirms_incoming_castling() -> None:

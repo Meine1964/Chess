@@ -9,7 +9,7 @@ from typing import cast
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QSettings, QThread, QTimer, Qt
+from PySide6.QtCore import QByteArray, QSettings, QThread, QTimer, Qt
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -110,6 +110,8 @@ _PROJECTOR_SETTING = "projector/screen_name"
 _PROJECTOR_LABEL_SETTING = "projector/screen_label"
 _SAVE_DIAGNOSTICS_SETTING = "diagnostics/save_snapshots"
 _LICHESS_GAME_SETTING = "lichess/selected_game_id"
+_PROMOTION_MODE_SETTING = "chess/promotion_mode"
+_WINDOW_GEOMETRY_SETTING = "window/main_geometry"
 _PIECE_POSITION_SETTING = "pieces/accepted_position"
 _GAME_MODE_SETTING = "game/mode"
 _LEGAL_GAME_FEN_SETTING = "game/offline_fen"
@@ -400,6 +402,19 @@ def _set_readable_interaction_font(widget: QWidget) -> None:
     widget.setFont(font)
 
 
+def _restore_window_geometry(
+    window: QMainWindow,
+    stored_geometry: object,
+) -> bool:
+    if isinstance(stored_geometry, QByteArray):
+        geometry = stored_geometry
+    elif isinstance(stored_geometry, (bytes, bytearray)):
+        geometry = QByteArray(bytes(stored_geometry))
+    else:
+        return False
+    return not geometry.isEmpty() and window.restoreGeometry(geometry)
+
+
 class CameraWindow(QMainWindow):
     def __init__(self, camera_selector: str | None) -> None:
         super().__init__()
@@ -481,6 +496,14 @@ class CameraWindow(QMainWindow):
         self._piece_synchronizer = PiecePositionSynchronizer()
         self._legal_game = LegalGame()
         self._game_mode: GameMode = "diagnostic"
+        stored_promotion_mode = str(
+            self._settings.value(_PROMOTION_MODE_SETTING, "auto-queen")
+        )
+        self._promotion_mode = (
+            stored_promotion_mode
+            if stored_promotion_mode == "auto-queen"
+            else "auto-queen"
+        )
         self._lichess_thread: QThread | None = None
         self._lichess_worker: LichessConnectionWorker | None = None
         self._lichess_client: LichessReadOnlyClient | None = None
@@ -873,6 +896,10 @@ class CameraWindow(QMainWindow):
 
         self.setWindowTitle("Chessboard Camera Detection")
         self.resize(1500, 900)
+        _restore_window_geometry(
+            self,
+            self._settings.value(_WINDOW_GEOMETRY_SETTING),
+        )
         self._projector_selector.currentIndexChanged.connect(
             self._projector_selection_changed
         )
@@ -1087,6 +1114,15 @@ class CameraWindow(QMainWindow):
         diagnostics_tab.setLayout(diagnostics_layout)
         tabs.addTab(diagnostics_tab, "Diagnostics")
 
+        chess_tab = QWidget()
+        chess_layout = QFormLayout()
+        promotion_mode = QComboBox()
+        promotion_mode.addItem("Auto-queen", "auto-queen")
+        promotion_mode.setCurrentIndex(0)
+        chess_layout.addRow("Promotion:", promotion_mode)
+        chess_tab.setLayout(chess_layout)
+        tabs.addTab(chess_tab, "Chess")
+
         lichess_tab = QWidget()
         lichess_layout = QVBoxLayout()
         lichess_status = QLabel(self._lichess_status.text())
@@ -1133,6 +1169,10 @@ class CameraWindow(QMainWindow):
             self._save_diagnostics.setChecked(
                 save_diagnostics.isChecked()
             )
+            selected_promotion_mode = promotion_mode.currentData()
+            if not isinstance(selected_promotion_mode, str):
+                raise RuntimeError("Promotion mode has no stored identity.")
+            self._set_promotion_mode(selected_promotion_mode)
 
         def accept_values() -> None:
             apply_values()
@@ -1169,6 +1209,13 @@ class CameraWindow(QMainWindow):
 
     def _save_diagnostics_preference_changed(self, checked: bool) -> None:
         self._settings.setValue(_SAVE_DIAGNOSTICS_SETTING, checked)
+        self._settings.sync()
+
+    def _set_promotion_mode(self, mode: str) -> None:
+        if mode != "auto-queen":
+            raise ValueError(f"Unsupported promotion mode: {mode}")
+        self._promotion_mode = mode
+        self._settings.setValue(_PROMOTION_MODE_SETTING, mode)
         self._settings.sync()
 
     @staticmethod
@@ -4667,6 +4714,11 @@ class CameraWindow(QMainWindow):
             self._lichess_worker.request_stop()
             event.ignore()
             return
+        self._settings.setValue(
+            _WINDOW_GEOMETRY_SETTING,
+            self.saveGeometry(),
+        )
+        self._settings.sync()
         self._calibrator.cancel()
         self._alignment_monitor.clear()
         if self._camera is not None:

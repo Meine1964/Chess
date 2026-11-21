@@ -77,7 +77,7 @@ def match_legal_move_signature(
             continue
         if (
             piece_colors is not None
-            and signature.kind in ("castling", "en-passant")
+            and signature.kind in ("castling", "en-passant", "promotion")
             and not _changed_square_colors_match(signature, piece_colors)
         ):
             continue
@@ -90,7 +90,7 @@ def match_legal_move_signature(
         source_score = expected_scores.get(signature.source)
         required_change = (
             minimum_square_change * LEGAL_SOURCE_CHANGE_RATIO
-            if signature.kind in ("castling", "en-passant")
+            if signature.kind in ("castling", "en-passant", "promotion")
             else minimum_square_change
         )
         if (

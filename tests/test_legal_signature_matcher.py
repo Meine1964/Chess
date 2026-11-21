@@ -171,6 +171,24 @@ def test_pending_en_passant_matches_captured_pawn_first() -> None:
     )
 
 
+def test_matches_low_contrast_auto_queen_promotion() -> None:
+    game = LegalGame("4k3/P7/8/8/8/8/8/4K3 w - - 0 1")
+    colors = {
+        (1, 0): PieceColorClassification("empty", 0.01, 0.2),
+        (0, 0): PieceColorClassification("white", 0.01, 0.2),
+    }
+
+    match = match_legal_move_signature(
+        _scores(((1, 0), 0.065), ((0, 0), 0.064)),
+        game.physical_move_signatures,
+        piece_colors=colors,
+    )
+
+    assert match.signature is not None
+    assert match.signature.uci == "a7a8q"
+    assert match.signature.kind == "promotion"
+
+
 def test_capture_requires_vacated_source_and_mover_color_destination() -> None:
     game = LegalGame("4k3/8/8/4p3/8/5N2/8/4K3 w - - 0 1")
     scores = _scores(((5, 5), 0.2), ((3, 4), 0.2))
