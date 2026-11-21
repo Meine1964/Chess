@@ -866,10 +866,16 @@ messages. Structured events shall cover application and camera startup,
 hardware selection and errors, saved-calibration restoration, every
 calibration operation and outcome, board-snapshot detection, physical-board
 clicks, square-projection outcomes, Lichess transitions, and physical
-move-tracker decisions. Events may carry token-free operation details needed
-to reconstruct the failure context. Runtime files shall remain excluded from
-version control, image files shall be overwritten rather than accumulated,
-and event history shall be bounded.
+move-tracker decisions. Illegal-correction diagnostics shall expose the
+current projection/blackout phase, generation, projected physical squares,
+and detector manipulation state. One structured event shall be recorded for
+initial projection or reprojection, first confirmed hand entry, blackout after
+hand departure, black-settling completion, and accepted-reference
+restoration. Repeated camera frames within one phase shall not generate
+duplicate lifecycle events. Events may carry token-free operation details
+needed to reconstruct the failure context. Runtime files shall remain
+excluded from version control, image files shall be overwritten rather than
+accumulated, and event history shall be bounded.
 
 ## 18. Implementation Boundaries
 

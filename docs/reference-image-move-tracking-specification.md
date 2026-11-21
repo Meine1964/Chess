@@ -443,6 +443,13 @@ confirmation, active-manipulation state, and quiet progress shall all be
 cleared. A detector reused after blackout shall never inherit a completed
 manipulation from the preceding projection.
 
+Runtime diagnostics shall record each illegal-correction lifecycle transition
+once: projection or reprojection, confirmed hand entry, blackout after hand
+departure, readiness for black-frame verification, and restoration of the
+accepted reference. Each event shall include the correction generation and
+relevant logical or physical squares, and the current diagnostic state shall
+expose projection-active, blackout-pending, and detector-active flags.
+
 When legal signatures are supplied and no signature matches, an otherwise
 unambiguous settled source-to-empty-destination relocation shall be reported
 as an illegal relocation rather than accepted or left ambiguous. This outcome

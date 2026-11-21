@@ -521,6 +521,8 @@ def test_illegal_correction_projects_both_squares_without_timeout() -> None:
         _illegal_correction_blackout_pending=False,
         _illegal_correction_generation=0,
         _illegal_correction_physical_squares=(),
+        _illegal_correction_activity_logged=False,
+        _illegal_correction_last_projected_move=None,
         _illegal_correction_activity_detector=MagicMock(),
         _camera_only_calibration=False,
         _calibration_result=object(),
@@ -529,6 +531,7 @@ def test_illegal_correction_projects_both_squares_without_timeout() -> None:
         _projector_window=MagicMock(),
         _alignment_monitor=MagicMock(),
         _projector_status=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
     )
 
     with patch(
@@ -545,6 +548,28 @@ def test_illegal_correction_projects_both_squares_without_timeout() -> None:
     )
     assert window._illegal_correction_projection_active is True
     single_shot.assert_not_called()
+    window._record_runtime_diagnostic.assert_called_once()
+    assert (
+        window._record_runtime_diagnostic.call_args.args[0]
+        == "illegal-correction-projected"
+    )
+    assert window._record_runtime_diagnostic.call_args.kwargs["details"] == {
+        "generation": 1,
+        "logical_move": ["c2", "c3"],
+        "physical_squares": [[6, 2], [5, 2]],
+    }
+
+    window._illegal_correction_projection_active = False
+    CameraWindow._project_illegal_move_correction(
+        window,
+        ((6, 2), (5, 2)),
+    )
+
+    assert window._record_runtime_diagnostic.call_count == 2
+    assert (
+        window._record_runtime_diagnostic.call_args.args[0]
+        == "illegal-correction-reprojected"
+    )
 
 
 def test_illegal_correction_remains_while_hand_is_present() -> None:
@@ -559,16 +584,25 @@ def test_illegal_correction_remains_while_hand_is_present() -> None:
         _illegal_correction_projection_active=True,
         _illegal_correction_activity_detector=detector,
         _illegal_correction_physical_squares=((6, 2), (5, 2)),
+        _illegal_correction_activity_logged=False,
+        _illegal_correction_generation=3,
         _begin_illegal_correction_observation=MagicMock(),
         _projector_status=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
     )
 
     CameraWindow._observe_illegal_correction_activity(window)
+    CameraWindow._observe_illegal_correction_activity(window)
 
     window._begin_illegal_correction_observation.assert_not_called()
-    window._projector_status.setText.assert_called_once_with(
+    window._projector_status.setText.assert_called_with(
         "Correction in progress; both red squares remain projected until "
         "the hand leaves the board."
+    )
+    window._record_runtime_diagnostic.assert_called_once()
+    assert (
+        window._record_runtime_diagnostic.call_args.args[0]
+        == "illegal-correction-hand-entered"
     )
 
 
@@ -590,6 +624,7 @@ def test_illegal_correction_blackout_starts_after_hand_leaves() -> None:
         _reference_move_tracker=MagicMock(),
         _projector_status=MagicMock(),
         _finish_illegal_correction_blackout=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
     )
 
     with patch(
@@ -601,4 +636,8 @@ def test_illegal_correction_blackout_starts_after_hand_leaves() -> None:
     assert window._illegal_correction_projection_active is False
     assert window._illegal_correction_blackout_pending is True
     window._projector_window.show_black.assert_called_once_with()
+    assert (
+        window._record_runtime_diagnostic.call_args.args[0]
+        == "illegal-correction-blackout-started"
+    )
     assert callback is not None
