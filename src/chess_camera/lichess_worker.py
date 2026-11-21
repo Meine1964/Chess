@@ -1,6 +1,7 @@
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from threading import Event, Lock
+from time import monotonic, time
 from typing import Literal
 
 import chess
@@ -20,10 +21,102 @@ from .lichess_client import (
     LichessProtocolError,
     LichessReadOnlyClient,
     OngoingGame,
+    PlayerColor,
     reconnect_delays,
 )
 
 _POLLING_INTERVAL_SECONDS = 5
+
+
+def _elapsed_clock_state(
+    state: LichessGameState,
+    elapsed_ms: int,
+) -> LichessGameState:
+    if state.result != "*" or elapsed_ms <= 0:
+        return state
+    if state.turn == "white":
+        return replace(
+            state,
+            white_time_ms=max(0, state.white_time_ms - elapsed_ms),
+        )
+    return replace(
+        state,
+        black_time_ms=max(0, state.black_time_ms - elapsed_ms),
+    )
+
+
+def _completed_turn_clock_state(
+    previous: LichessGameState,
+    current: LichessGameState,
+) -> LichessGameState:
+    white_time_ms = previous.white_time_ms
+    black_time_ms = previous.black_time_ms
+    if previous.turn == "white":
+        white_time_ms += previous.white_increment_ms
+    else:
+        black_time_ms += previous.black_increment_ms
+    return replace(
+        current,
+        white_time_ms=white_time_ms,
+        black_time_ms=black_time_ms,
+        white_increment_ms=previous.white_increment_ms,
+        black_increment_ms=previous.black_increment_ms,
+        white_draw_offer=previous.white_draw_offer,
+        black_draw_offer=previous.black_draw_offer,
+    )
+
+
+def _resumed_clock_state(
+    *,
+    current: LichessGameState,
+    export_turn: chess.Color,
+    missing_plies: int,
+    local_color: PlayerColor,
+    local_time_ms: int,
+    raw_white_time_ms: int,
+    raw_black_time_ms: int,
+    white_increment_ms: int,
+    black_increment_ms: int,
+    elapsed_since_export_ms: int,
+) -> LichessGameState:
+    white_moves = 0
+    black_moves = 0
+    turn = export_turn
+    for _ in range(missing_plies):
+        if turn == chess.WHITE:
+            white_moves += 1
+        else:
+            black_moves += 1
+        turn = not turn
+    white_budget_ms = (
+        raw_white_time_ms + white_moves * white_increment_ms
+    )
+    black_budget_ms = (
+        raw_black_time_ms + black_moves * black_increment_ms
+    )
+    if local_color == "white":
+        local_elapsed_ms = max(0, white_budget_ms - local_time_ms)
+        black_time_ms = max(
+            0,
+            black_budget_ms
+            - max(0, elapsed_since_export_ms - local_elapsed_ms),
+        )
+        white_time_ms = local_time_ms
+    else:
+        local_elapsed_ms = max(0, black_budget_ms - local_time_ms)
+        white_time_ms = max(
+            0,
+            white_budget_ms
+            - max(0, elapsed_since_export_ms - local_elapsed_ms),
+        )
+        black_time_ms = local_time_ms
+    return replace(
+        current,
+        white_time_ms=white_time_ms,
+        black_time_ms=black_time_ms,
+        white_increment_ms=white_increment_ms,
+        black_increment_ms=black_increment_ms,
+    )
 
 
 class LichessMoveSubmissionWorker(QObject):
@@ -347,6 +440,8 @@ class LichessConnectionWorker(QObject):
         self._polling_initial_fen: str | None = None
         self._polling_fen: str | None = None
         self._polling_moves: tuple[str, ...] = ()
+        self._polling_clock_state: LichessGameState | None = None
+        self._polling_clock_monotonic: float | None = None
         self._polling_lock = Lock()
         self._wait = (
             self._stop_requested.wait if wait is None else wait
@@ -570,6 +665,8 @@ class LichessConnectionWorker(QObject):
         game: OngoingGame,
         authoritative: LichessPollingSnapshot,
     ) -> LichessPollingSnapshot:
+        observed_at = monotonic()
+        observed_wall_ms = int(time() * 1000)
         snapshot = self._polling_snapshot(game)
         if authoritative.game.game_id != game.game_id:
             raise LichessProtocolError(
@@ -601,54 +698,97 @@ class LichessConnectionWorker(QObject):
                         export_board.fen() == snapshot.game.state.fen
                     )
             missing_plies = current_board.ply() - authoritative_board.ply()
-            if one_move_behind or missing_plies > 1:
-                white_time_ms = (
-                    authoritative.raw_white_time_ms
-                    if authoritative.raw_white_time_ms is not None
-                    else state.white_time_ms
+            if not one_move_behind and missing_plies <= 1:
+                raise LichessProtocolError(
+                    "The polling clock snapshot is incompatible with the "
+                    "ongoing game position."
                 )
-                black_time_ms = (
-                    authoritative.raw_black_time_ms
-                    if authoritative.raw_black_time_ms is not None
-                    else state.black_time_ms
+            previous = self._polling_clock_state
+            previous_at = self._polling_clock_monotonic
+            elapsed_previous = (
+                _elapsed_clock_state(
+                    previous,
+                    int(max(0.0, observed_at - previous_at) * 1000),
                 )
-                turn = authoritative_board.turn
-                for _ in range(missing_plies):
-                    if turn == chess.WHITE:
-                        white_time_ms = max(
-                            0,
-                            white_time_ms
-                            - _POLLING_INTERVAL_SECONDS * 1000,
-                        ) + state.white_increment_ms
-                    else:
-                        black_time_ms = max(
-                            0,
-                            black_time_ms
-                            - _POLLING_INTERVAL_SECONDS * 1000,
-                        ) + state.black_increment_ms
-                    turn = not turn
-                state = LichessGameState(
-                    snapshot.game.state.moves,
-                    snapshot.game.state.fen,
-                    snapshot.game.state.turn,
-                    white_time_ms,
-                    black_time_ms,
-                    state.white_increment_ms,
-                    state.black_increment_ms,
-                    "started",
-                    None,
-                    "*",
-                )
+                if previous is not None and previous_at is not None
+                else None
+            )
+            if (
+                elapsed_previous is not None
+                and elapsed_previous.fen == snapshot.game.state.fen
+            ):
+                state = elapsed_previous
+                clocks_available = True
             else:
-                clocks_available = False
-                state = replace(
-                    snapshot.game.state,
-                    white_time_ms=0,
-                    black_time_ms=0,
-                    white_increment_ms=state.white_increment_ms,
-                    black_increment_ms=state.black_increment_ms,
-                )
-        if game.seconds_left_ms is not None:
+                previous_is_one_move_behind = False
+                if elapsed_previous is not None and game.last_move is not None:
+                    try:
+                        previous_board = chess.Board(elapsed_previous.fen)
+                        previous_move = previous_board.parse_uci(
+                            game.last_move
+                        )
+                        previous_board.push(previous_move)
+                    except ValueError:
+                        pass
+                    else:
+                        previous_is_one_move_behind = (
+                            previous_board.fen()
+                            == snapshot.game.state.fen
+                        )
+                if (
+                    previous_is_one_move_behind
+                    and elapsed_previous is not None
+                ):
+                    state = _completed_turn_clock_state(
+                        elapsed_previous,
+                        snapshot.game.state,
+                    )
+                    clocks_available = True
+                elif one_move_behind and authoritative.clocks_available:
+                    state = _completed_turn_clock_state(
+                        state,
+                        snapshot.game.state,
+                    )
+                    clocks_available = True
+                elif (
+                    missing_plies > 1
+                    and authoritative.clocks_available
+                    and authoritative.clock_sample_at_ms is not None
+                    and authoritative.raw_white_time_ms is not None
+                    and authoritative.raw_black_time_ms is not None
+                    and game.seconds_left_ms is not None
+                ):
+                    state = _resumed_clock_state(
+                        current=snapshot.game.state,
+                        export_turn=authoritative_board.turn,
+                        missing_plies=missing_plies,
+                        local_color=game.color,
+                        local_time_ms=game.seconds_left_ms,
+                        raw_white_time_ms=(
+                            authoritative.raw_white_time_ms
+                        ),
+                        raw_black_time_ms=(
+                            authoritative.raw_black_time_ms
+                        ),
+                        white_increment_ms=state.white_increment_ms,
+                        black_increment_ms=state.black_increment_ms,
+                        elapsed_since_export_ms=max(
+                            0,
+                            observed_wall_ms
+                            - authoritative.clock_sample_at_ms,
+                        ),
+                    )
+                    clocks_available = True
+                else:
+                    clocks_available = False
+                    state = replace(
+                        snapshot.game.state,
+                        white_time_ms=0,
+                        black_time_ms=0,
+                        white_increment_ms=state.white_increment_ms,
+                        black_increment_ms=state.black_increment_ms,
+                    )
+        if game.seconds_left_ms is not None and clocks_available:
             if game.color == "white":
                 state = replace(
                     state,
@@ -659,26 +799,47 @@ class LichessConnectionWorker(QObject):
                     state,
                     black_time_ms=game.seconds_left_ms,
                 )
+        if (
+            game.seconds_left_ms == 0
+            and game.is_my_turn
+            and state.result == "*"
+        ):
+            winner: PlayerColor = (
+                "black" if game.color == "white" else "white"
+            )
+            state = replace(
+                state,
+                status="outoftime",
+                winner=winner,
+                result="0-1" if winner == "black" else "1-0",
+            )
+        final_state = LichessGameState(
+            snapshot.game.state.moves,
+            snapshot.game.state.fen,
+            snapshot.game.state.turn,
+            state.white_time_ms,
+            state.black_time_ms,
+            state.white_increment_ms,
+            state.black_increment_ms,
+            state.status,
+            state.winner,
+            state.result,
+            state.white_draw_offer,
+            state.black_draw_offer,
+        )
+        if clocks_available and final_state.result == "*":
+            self._polling_clock_state = final_state
+            self._polling_clock_monotonic = observed_at
+        else:
+            self._polling_clock_state = None
+            self._polling_clock_monotonic = None
         return LichessPollingSnapshot(
             LichessGameFull(
                 snapshot.game.game_id,
                 snapshot.game.initial_fen,
                 authoritative.game.white,
                 authoritative.game.black,
-                LichessGameState(
-                    snapshot.game.state.moves,
-                    snapshot.game.state.fen,
-                    snapshot.game.state.turn,
-                    state.white_time_ms,
-                    state.black_time_ms,
-                    state.white_increment_ms,
-                    state.black_increment_ms,
-                    state.status,
-                    state.winner,
-                    state.result,
-                    state.white_draw_offer,
-                    state.black_draw_offer,
-                ),
+                final_state,
             ),
             clocks_available,
         )
@@ -788,7 +949,28 @@ class LichessConnectionWorker(QObject):
             self._set_polling_baseline(game.game_id, current_fen)
         elif current_fen != self._polling_fen:
             advanced = False
-            if self._polling_fen is not None and game.last_move is not None:
+            retained_confirmed_position = False
+            if self._polling_fen is not None and self._polling_moves:
+                try:
+                    stale_board = current_board.copy()
+                    confirmed_move = stale_board.parse_uci(
+                        self._polling_moves[-1]
+                    )
+                    stale_board.push(confirmed_move)
+                except ValueError:
+                    pass
+                else:
+                    retained_confirmed_position = (
+                        stale_board.fen() == self._polling_fen
+                    )
+                    if retained_confirmed_position:
+                        current_board = stale_board
+                        current_fen = self._polling_fen
+            if (
+                not retained_confirmed_position
+                and self._polling_fen is not None
+                and game.last_move is not None
+            ):
                 try:
                     previous_board = chess.Board(self._polling_fen)
                     move = previous_board.parse_uci(game.last_move)
@@ -803,7 +985,7 @@ class LichessConnectionWorker(QObject):
                         )
                         self._polling_fen = current_fen
                         advanced = True
-            if not advanced:
+            if not advanced and not retained_confirmed_position:
                 self._set_polling_baseline(game.game_id, current_fen)
         initial_fen = self._polling_initial_fen
         if initial_fen is None:
@@ -846,6 +1028,8 @@ class LichessConnectionWorker(QObject):
         self._polling_initial_fen = fen
         self._polling_fen = fen
         self._polling_moves = ()
+        self._polling_clock_state = None
+        self._polling_clock_monotonic = None
 
     def _reset_polling_cursor(self) -> None:
         with self._polling_lock:
@@ -853,6 +1037,8 @@ class LichessConnectionWorker(QObject):
             self._polling_initial_fen = None
             self._polling_fen = None
             self._polling_moves = ()
+            self._polling_clock_state = None
+            self._polling_clock_monotonic = None
 
     def _wait_for_active_game(
         self,

@@ -1,5 +1,7 @@
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from typing import cast
+from unittest.mock import patch
 
 import chess
 
@@ -694,7 +696,7 @@ def test_worker_falls_back_to_read_only_polling() -> None:
     assert snapshot.game.state.black_time_ms == 604000
 
 
-def test_active_polling_accepts_ongoing_position_one_move_ahead_of_export(
+def test_active_polling_adds_increment_once_when_export_is_one_move_behind(
 ) -> None:
     before = chess.Board()
     for uci in ("e2e4", "e7e5", "g1f3", "f8d6", "f1c4"):
@@ -746,19 +748,54 @@ def test_active_polling_accepts_ongoing_position_one_move_ahead_of_export(
         True,
         1795272166192,
     )
+    caught_up_export = LichessPollingSnapshot(
+        replace(
+            stale_export.game,
+            state=replace(
+                stale_export.game.state,
+                moves=(*stale_export.game.state.moves, "b8c6"),
+                fen=after.fen(),
+                turn="white",
+                white_time_ms=341000,
+                black_time_ms=605000,
+            ),
+        ),
+        True,
+    )
     worker._polling_snapshot(before_game)
 
-    snapshot = worker._active_polling_snapshot(after_game, stale_export)
+    with patch(
+        "src.chess_camera.lichess_worker.monotonic",
+        side_effect=(100.0, 102.0, 103.0),
+    ):
+        snapshot = worker._active_polling_snapshot(
+            after_game,
+            stale_export,
+        )
+        repeated = worker._active_polling_snapshot(
+            replace(after_game, seconds_left_ms=341000),
+            stale_export,
+        )
+        synchronized = worker._active_polling_snapshot(
+            replace(after_game, seconds_left_ms=340000),
+            caught_up_export,
+        )
 
     assert snapshot.game.state.moves == ("b8c6",)
     assert snapshot.game.state.fen == after.fen()
     assert snapshot.game.state.turn == "white"
     assert snapshot.game.state.white_time_ms == 343000
-    assert snapshot.game.state.black_time_ms == 603390
+    assert snapshot.game.state.black_time_ms == 608390
     assert snapshot.clocks_available
+    assert repeated.game.state.white_time_ms == 341000
+    assert repeated.game.state.black_time_ms == 608390
+    assert repeated.clocks_available
+    assert synchronized.game.state.white_time_ms == 340000
+    assert synchronized.game.state.black_time_ms == 605000
+    assert synchronized.clocks_available
 
 
-def test_active_polling_accepts_position_three_moves_ahead_of_export() -> None:
+def test_active_polling_estimates_clocks_three_moves_ahead_of_export() -> None:
     export_board = chess.Board()
     for uci in ("e2e4", "e7e5", "c2c4", "b8c6", "d2d3"):
         export_board.push_uci(uci)
@@ -810,20 +847,30 @@ def test_active_polling_accepts_position_three_moves_ahead_of_export() -> None:
             ),
         ),
         True,
+        1000000,
+        541000,
+        602000,
     )
     worker._polling_snapshot(previous_game)
 
-    snapshot = worker._active_polling_snapshot(current_game, stale_export)
+    with patch(
+        "src.chess_camera.lichess_worker.time",
+        return_value=1020.0,
+    ):
+        snapshot = worker._active_polling_snapshot(
+            current_game,
+            stale_export,
+        )
 
     assert snapshot.game.state.moves == ("d8e7",)
     assert snapshot.game.state.fen == current_board.fen()
     assert snapshot.game.state.turn == "white"
     assert snapshot.game.state.white_time_ms == 541000
-    assert snapshot.game.state.black_time_ms == 602000
+    assert snapshot.game.state.black_time_ms == 597000
     assert snapshot.clocks_available
 
 
-def test_reconnect_accepts_current_position_when_export_is_one_move_behind(
+def test_reconnect_estimates_clocks_when_export_is_one_move_behind(
 ) -> None:
     before = chess.Board()
     for uci in ("e2e4", "e7e5", "g1f3", "f8d6", "f1c4"):
@@ -872,7 +919,53 @@ def test_reconnect_accepts_current_position_when_export_is_one_move_behind(
     assert snapshot.game.state.moves == ()
     assert snapshot.game.state.fen == after.fen()
     assert snapshot.game.state.white_time_ms == 343000
+    assert snapshot.game.state.black_time_ms == 608390
     assert snapshot.clocks_available
+
+
+def test_authenticated_zero_local_time_emits_time_forfeit() -> None:
+    board = chess.Board()
+    worker = LichessConnectionWorker(
+        cast(LichessReadOnlyClient, PollingFallbackClient())
+    )
+    game = OngoingGame(
+        "timeout1",
+        "timeout1abcd",
+        "white",
+        board.fen(),
+        "Stockfish level 1",
+        True,
+        None,
+        0,
+    )
+    delayed_export = LichessPollingSnapshot(
+        LichessGameFull(
+            "timeout1",
+            chess.STARTING_FEN,
+            LichessPlayer("white", "Meine", 1661),
+            LichessPlayer("black", "Stockfish level 1", None),
+            LichessGameState(
+                (),
+                board.fen(),
+                "white",
+                177070,
+                176200,
+                5000,
+                5000,
+                "started",
+                None,
+                "*",
+            ),
+        ),
+        True,
+    )
+
+    snapshot = worker._active_polling_snapshot(game, delayed_export)
+
+    assert snapshot.game.state.white_time_ms == 0
+    assert snapshot.game.state.status == "outoftime"
+    assert snapshot.game.state.winner == "black"
+    assert snapshot.game.state.result == "0-1"
 
 
 def test_polling_fetches_terminal_move_when_game_disappears() -> None:
@@ -1241,3 +1334,63 @@ def test_local_move_advances_polling_cursor_before_opponent_reply() -> None:
 
     assert current.game.state.moves == ("e2e4", "e7e5")
     assert current.game.state.fen == board.fen()
+
+
+def test_stale_ongoing_position_does_not_undo_confirmed_local_move() -> None:
+    worker = LichessConnectionWorker(
+        cast(LichessReadOnlyClient, MultiplePollingGamesClient())
+    )
+    board = chess.Board()
+    for uci in ("e2e4", "e7e5"):
+        board.push_uci(uci)
+    before_local_move = board.fen()
+    ongoing = OngoingGame(
+        "05xlmG0T",
+        "05xlmG0Tabcd",
+        "white",
+        before_local_move,
+        "Stockfish level 1",
+        True,
+        "e7e5",
+        594000,
+    )
+    worker._polling_snapshot(ongoing)
+
+    board.push_uci("b2b3")
+    confirmed_fen = board.fen()
+    assert worker.note_local_move(
+        "05xlmG0T",
+        "b2b3",
+        confirmed_fen,
+    )
+    caught_up_export = LichessPollingSnapshot(
+        LichessGameFull(
+            "05xlmG0T",
+            chess.STARTING_FEN,
+            LichessPlayer("white", "Meine", 1661),
+            LichessPlayer("black", "Stockfish level 1", None),
+            LichessGameState(
+                ("e2e4", "e7e5", "b2b3"),
+                confirmed_fen,
+                "black",
+                594000,
+                600000,
+                5000,
+                5000,
+                "started",
+                None,
+                "*",
+            ),
+        ),
+        True,
+    )
+
+    snapshot = worker._active_polling_snapshot(
+        ongoing,
+        caught_up_export,
+    )
+
+    assert snapshot.game.state.moves == ("b2b3",)
+    assert snapshot.game.state.fen == confirmed_fen
+    assert snapshot.game.state.turn == "black"
+    assert snapshot.clocks_available

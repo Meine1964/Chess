@@ -1288,6 +1288,11 @@ def test_lichess_clock_refresh_updates_labels_from_monotonic_elapsed_time(
         "White clock: 1:02"
     )
     window._update_projected_lichess_clocks.assert_called_once()
+    projected_game = (
+        window._update_projected_lichess_clocks.call_args.args[0]
+    )
+    assert projected_game.state.white_time_ms == 62500
+    assert projected_game.state.black_time_ms == 9000
     assert window._latest_lichess_game.state is state
 
 

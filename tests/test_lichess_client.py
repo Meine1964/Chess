@@ -409,6 +409,8 @@ def test_polling_fallback_discovers_and_reconstructs_ai_game() -> None:
     assert snapshot.game.state.white_time_ms == 597000
     assert snapshot.game.state.black_time_ms == 596000
     assert snapshot.clock_sample_at_ms == 9999999999999
+    assert snapshot.raw_white_time_ms == 597000
+    assert snapshot.raw_black_time_ms == 596000
     assert transport.requests[-1][0] == (
         "/game/export/oozTO3xk"
         "?clocks=true&evals=false&opening=false&literate=false"

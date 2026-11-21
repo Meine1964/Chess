@@ -93,23 +93,34 @@ During an active game, polling shall treat the authenticated ongoing-game FEN
 and last move as authoritative for the current position. It shall retrieve a
 non-streaming JSON game export on every polling interval to enrich that
 position with player identity, clock samples, increments, status, and result.
-Both clocks shall therefore remain visible during timed games even when the
-long-lived Board event stream is unavailable.
+When that export describes the current position, polling shall replace both
+clock values with the Lichess values. Those values already include the mover's
+increment, so polling shall never add an increment to a same-position Lichess
+clock sample.
 
 The export may temporarily lag behind the authenticated ongoing-game position.
 When its FEN is exactly one reported legal move behind, polling shall accept and
-emit the newer ongoing position, use the ongoing `secondsLeft` value for the
-local player's clock, estimate the missing mover's clock from the preceding
-sample and increment, and continue polling until the export catches up. A
-lag of multiple plies shall likewise emit the newer ongoing position and
-advance each delayed clock sample once per missing turn using the polling
-interval and that player's increment. The authenticated ongoing `secondsLeft`
-value shall then replace the local player's estimate. This estimate keeps both
-clocks visible until the export catches up without presenting a delayed sample
-as exact. A lagging export shall never reject an official move, reset a valid
-polling cursor, terminate the polling worker, or hide otherwise available
-clocks. A malformed ongoing position or wrong-game export shall still fail
-explicitly rather than be merged speculatively.
+emit the newer ongoing position. It shall first count down the previous mover's
+clock to the observation time, then add that mover's increment exactly once,
+switch the active countdown to the opponent, and use authenticated
+`secondsLeft` for the local player's clock. Repeated polls of the same move
+shall continue decreasing only the active player's estimated clock and shall
+not add the completed mover's increment again. The next same-position export
+shall replace both estimates with Lichess values without adding any increment.
+If polling resumes with multiple missing plies, it shall count each side's
+missing moves from the export position and add each corresponding increment
+once to the raw export clocks. It shall derive the local player's elapsed time
+from that increment-adjusted raw clock and authenticated `secondsLeft`, then
+assign the remaining elapsed wall time since the export sample to the
+opponent. This provides a bounded two-clock estimate while the export catches
+up and continues counting down the current side locally. A later
+same-position Lichess sample replaces both estimates directly. If any required
+raw clock, sample timestamp, or local `secondsLeft` value is unavailable,
+polling shall mark both clocks unavailable rather than inventing a value. A
+lagging export shall never reject an official move, reset a valid polling
+cursor, or terminate the polling worker. A malformed ongoing position or
+wrong-game export shall still fail explicitly rather than be merged
+speculatively.
 
 Export clock samples shall retain their server sample timestamp. Elapsed time
 shall be applied only after the worker has established which position the
@@ -123,11 +134,20 @@ selected game.
 Between authoritative stream events or polling snapshots, the displayed clock
 for the side to move shall count down using locally elapsed monotonic time. The
 inactive clock shall remain unchanged. Every new authoritative state shall
-replace both clock values and restart the local elapsed-time baseline. The
-display shall stop at zero, but reaching zero locally shall not declare a
-timeout or otherwise make the game terminal; only an authoritative Lichess
-status may end the game. Local countdown shall stop when clocks are unavailable
-or the authoritative game state is no longer active.
+replace both clock values and restart the local elapsed-time baseline; an
+estimated polling transition shall instead carry forward the elapsed active
+clock as specified above. The display shall stop at zero. Reaching zero only
+through the local monotonic
+countdown shall not declare a timeout. However, when the authenticated
+ongoing-games endpoint reports `secondsLeft == 0` while it is the local
+player's turn, polling shall emit an `outoftime` terminal snapshot immediately,
+with the opponent as winner and the corresponding result, even if the endpoint
+still carries its lagging `started` status. Time cannot be restored without an
+accepted move, so this authenticated zero is terminal clock authority. The UI
+shall state the time-forfeit result, stop both local and projected countdowns,
+and enable **New AI game** while later polling reconciles Lichess's terminal
+status propagation. Local countdown shall stop when clocks are unavailable or
+the effective game state is no longer active.
 
 During an active timed Lichess game, the projector shall also display both
 clocks immediately outside the board's logical a-file: White beside a1-a2 and
@@ -885,7 +905,12 @@ polling cursor through that move after verifying that it transforms the
 cursor's prior FEN into the committed server FEN. This update shall occur
 before a later opponent poll is interpreted, so an immediate reply reported as
 `lastMove` remains a verifiable one-ply transition rather than appearing to
-shorten or rewrite history.
+shorten or rewrite history. If the ongoing-games endpoint temporarily continues
+to report the position immediately before that confirmed local move, polling
+shall retain the advanced cursor rather than resetting it backward. A
+same-position export may then enrich the retained position with clocks, and
+polling shall continue until the ongoing endpoint catches up. Only an
+authoritative terminal history may roll back a locally submitted move.
 
 ## 14. Reconnection and Polling
 
