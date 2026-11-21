@@ -256,6 +256,7 @@ def test_multiple_ongoing_games_require_explicit_ui_selection(
             _clear_lichess_game_information=MagicMock(),
             _last_lichess_game_prompt_ids=None,
             _choose_lichess_game=MagicMock(return_value=None),
+            _show_lichess_connected=MagicMock(),
         ),
     )
 
@@ -301,6 +302,7 @@ def test_remembered_lichess_game_is_not_replaced_by_another_game(
             _remember_lichess_game_selection=MagicMock(),
             _rebuild_lichess_games_menu=MagicMock(),
             _last_lichess_game_prompt_ids=None,
+            _show_lichess_connected=MagicMock(),
         ),
     )
     available = OngoingGame(
@@ -401,6 +403,7 @@ def test_multiple_game_popup_selection_is_applied_once(
             _rebuild_lichess_games_menu=MagicMock(),
             _last_lichess_game_prompt_ids=None,
             _choose_lichess_game=choose,
+            _show_lichess_connected=MagicMock(),
         ),
     )
     remember.side_effect = lambda game_id: setattr(

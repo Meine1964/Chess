@@ -171,6 +171,57 @@ def test_finished_game_event_terminalizes_cached_started_state() -> None:
     assert _can_start_new_lichess_game(window._latest_lichess_state)
 
 
+def test_connected_status_enables_disconnect_button() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    window = SimpleNamespace(
+        _lichess_disconnect_requested=False,
+        _lichess_connection_button=MagicMock(),
+        _lichess_status=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
+        _show_lichess_connected=lambda: CameraWindow._show_lichess_connected(
+            window
+        ),
+    )
+
+    CameraWindow._lichess_connection_status_changed(
+        window,
+        "Connected to Lichess by polling; waiting for a game.",
+    )
+
+    window._lichess_connection_button.setText.assert_called_once_with(
+        "Disconnect"
+    )
+    window._lichess_connection_button.setEnabled.assert_called_once_with(
+        True
+    )
+
+
+def test_polling_result_establishes_connected_button_state() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    window = SimpleNamespace(
+        _show_lichess_connected=MagicMock(),
+        _mark_lichess_game_finished=MagicMock(),
+        _lichess_game_id=None,
+        _preferred_lichess_game_id="",
+        _last_lichess_game_prompt_ids=frozenset(),
+        _lichess_game_selector=MagicMock(),
+        _clear_lichess_game_information=MagicMock(),
+        _start_new_lichess_game_button=MagicMock(),
+        _lichess_ai_creation_thread=None,
+        _pending_created_lichess_game_id=None,
+        _rebuild_lichess_games_menu=MagicMock(),
+        _lichess_worker=None,
+    )
+
+    CameraWindow._lichess_ongoing_games_received(window, ())
+
+    window._show_lichess_connected.assert_called_once_with()
+
+
 def test_normal_close_persists_main_window_geometry() -> None:
     from types import SimpleNamespace
     from unittest.mock import MagicMock

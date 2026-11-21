@@ -4230,7 +4230,7 @@ class CameraWindow(QMainWindow):
         if self._lichess_worker is not None:
             self._lichess_disconnect_requested = True
             self._lichess_connection_button.setEnabled(False)
-            self._lichess_connection_button.setText("Disconnect")
+            self._lichess_connection_button.setText("Disconnecting...")
             self._lichess_status.setText(
                 "Disconnecting from Lichess after the current keep-alive."
             )
@@ -4266,7 +4266,8 @@ class CameraWindow(QMainWindow):
         self._lichess_worker = worker
         self._lichess_client = client
         self._lichess_disconnect_requested = False
-        self._lichess_connection_button.setText("Disconnect")
+        self._lichess_connection_button.setText("Connecting...")
+        self._lichess_connection_button.setEnabled(False)
         self._lichess_status.setText("Connecting to Lichess...")
         self._record_runtime_diagnostic(
             "lichess-connect-requested",
@@ -4623,6 +4624,7 @@ class CameraWindow(QMainWindow):
             isinstance(game, OngoingGame) for game in value
         ):
             raise TypeError("Ongoing Lichess games must be a tuple.")
+        self._show_lichess_connected()
         games = cast(tuple[OngoingGame, ...], value)
         remembered = self._preferred_lichess_game_id
         self._lichess_game_selector.blockSignals(True)
@@ -4731,11 +4733,19 @@ class CameraWindow(QMainWindow):
         self._settings.sync()
 
     def _lichess_connection_status_changed(self, message: str) -> None:
+        if message.startswith("Connected to Lichess"):
+            self._show_lichess_connected()
         self._lichess_status.setText(message)
         self._record_runtime_diagnostic(
             "lichess-connection-status",
             message,
         )
+
+    def _show_lichess_connected(self) -> None:
+        if self._lichess_disconnect_requested:
+            return
+        self._lichess_connection_button.setText("Disconnect")
+        self._lichess_connection_button.setEnabled(True)
 
     def _lichess_connection_failed(self, message: str) -> None:
         self._lichess_status.setText(message)

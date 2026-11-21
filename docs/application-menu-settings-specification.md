@@ -33,13 +33,16 @@ main window.
 
 The Lichess position panel shall contain a compact **Connect** or **Disconnect**
 button centered in the Black information row between the player identity and
-Black's clock. During disconnection it shall remain labeled **Disconnect** but
-be disabled. The panel shall also contain a centered Lichess-style icon control
-bar beneath the game status. It shall show takeback, draw, resign, and new-game
-buttons with tooltips and accessible names. Takeback remains a visible disabled
-placeholder and no takeback request shall be submitted. Draw and resign shall
-be enabled only for an active selected game with an authenticated Lichess
-client and while no other game-control request is pending.
+Black's clock. It shall display **Connecting...** while the initial connection
+is pending and **Disconnecting...** while shutdown is pending; the pending
+button shall be disabled. After connection succeeds it shall display
+**Disconnect** and be enabled. The panel shall also contain a centered
+Lichess-style icon control bar beneath the game status. It shall show takeback,
+draw, resign, and new-game buttons with tooltips and accessible names. Takeback
+remains a visible disabled placeholder and no takeback request shall be
+submitted. Draw and resign shall be enabled only for an active selected game
+with an authenticated Lichess client and while no other game-control request is
+pending.
 
 The draw button shall submit a draw offer through the Board API and disable
 while the local player's offer remains active. When authoritative stream state
@@ -240,7 +243,7 @@ interaction rows.
 ## 7. Validation Status
 
 The implemented menu bar exposes File, Camera, Game, Projector, and
-Calibration menus. The complete automated suite contains 283 passing tests,
+Calibration menus. The complete automated suite contains 285 passing tests,
 including menu structure, transactional selector-copy behavior, existing UI
 state transitions, reconciliation controls, and the readable interaction-font
 minimum. Token-status coverage confirms configured and missing environment
