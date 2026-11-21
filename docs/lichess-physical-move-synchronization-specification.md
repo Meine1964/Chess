@@ -951,6 +951,12 @@ If a settled action represents a move other than the active expected move:
 - Mark the relevant incorrect squares red.
 - Keep durable correction guidance visible.
 
+This includes an illegal capture in which a piece leaves its occupied source
+and replaces an opposing piece on an occupied destination without matching
+any legal physical signature. The source and occupied destination shall be
+reported as an illegal relocation so both squares receive the same durable red
+correction used for other incorrect moves.
+
 ### 12.2 Incomplete multi-action move
 
 An isolated settled piece removal remains illegal unless it is a recognized

@@ -759,6 +759,47 @@ def test_wrong_side_relocation_is_reported_as_illegal() -> None:
     np.testing.assert_array_equal(tracker.reference, reference)
 
 
+def test_illegal_capture_is_reported_as_illegal_relocation() -> None:
+    game = LegalGame(
+        "rnbq1rk1/pppp1ppp/4p3/2b5/2P3n1/5NP1/"
+        "PP1PPPBP/RNBQ1RK1 w - - 1 6"
+    )
+    source = (6, 3)
+    destination = (3, 2)
+    reference = _empty_board()
+    for square, piece in game.position.items():
+        _draw_piece(
+            reference,
+            square,
+            (225, 225, 225) if piece.isupper() else (20, 20, 20),
+        )
+    changed = reference.copy()
+    empty = _empty_board()
+    for square in (source, destination):
+        row, column = square
+        changed[
+            row * 100 : (row + 1) * 100,
+            column * 100 : (column + 1) * 100,
+        ] = empty[
+            row * 100 : (row + 1) * 100,
+            column * 100 : (column + 1) * 100,
+        ]
+    _draw_piece(changed, destination, (225, 225, 225))
+    tracker = ReferenceMoveTracker()
+    tracker.set_reference(reference, _camera_grid(), 0)
+
+    update = _accepted_update(
+        tracker,
+        changed,
+        game.position,
+        game.physical_move_signatures,
+    )
+
+    assert update.state == "illegal-relocation"
+    assert update.move == (source, destination)
+    np.testing.assert_array_equal(tracker.reference, reference)
+
+
 def test_b2_b4_is_illegal_when_black_is_to_move() -> None:
     game = LegalGame(
         "rnbqkbnr/p3pppp/2p5/1p3P2/2PpP3/3P4/PP4PP/"

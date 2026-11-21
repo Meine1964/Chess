@@ -756,7 +756,11 @@ class ReferenceMoveTracker:
         destination_candidates = {
             square
             for square, classification in piece_colors.items()
-            if square not in position and classification.label == source_color
+            if classification.label == source_color
+            and (
+                square not in position
+                or position[square].isupper() != source_piece.isupper()
+            )
         }
         if not destination_candidates:
             return None
