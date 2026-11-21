@@ -139,7 +139,6 @@ _PROJECTOR_LABEL_SETTING = "projector/screen_label"
 _SAVE_DIAGNOSTICS_SETTING = "diagnostics/save_snapshots"
 _LICHESS_GAME_SETTING = "lichess/selected_game_id"
 _PROMOTION_MODE_SETTING = "chess/promotion_mode"
-_OFFLINE_MOVE_MARKING_SETTING = "chess/offline_move_marking"
 _AUTOMATIC_START_RESET_SETTING = "chess/automatic_start_reset"
 _PROJECT_TURN_INDICATOR_SETTING = "chess/project_turn_indicator"
 _WINDOW_GEOMETRY_SETTING = "window/main_geometry"
@@ -149,9 +148,6 @@ _WINDOW_Y_OFFSET_SETTING = "window/main_y_offset"
 _WINDOW_WIDTH_SETTING = "window/main_width"
 _WINDOW_HEIGHT_SETTING = "window/main_height"
 _WINDOW_MAXIMIZED_SETTING = "window/main_maximized"
-
-OfflineMoveMarkingMode = Literal["brief", "until-next-hand-leaves"]
-
 
 @dataclass
 class _PendingPromotionSelection:
@@ -607,15 +603,6 @@ def _stored_boolean(value: object, default: bool) -> bool:
     return default
 
 
-def _stored_offline_move_marking_mode(
-    value: object,
-) -> OfflineMoveMarkingMode:
-    stored = str(value)
-    if stored in ("brief", "until-next-hand-leaves"):
-        return cast(OfflineMoveMarkingMode, stored)
-    return "brief"
-
-
 def _stored_integer(value: object, default: int) -> int:
     if isinstance(value, int) and not isinstance(value, bool):
         return value
@@ -991,12 +978,6 @@ class CameraWindow(QMainWindow):
         self._lichess_blackout_settling_detector = (
             BlackoutSettlingDetector()
         )
-        self._offline_guidance_activity_detector = GuidanceActivityDetector(
-            arming_observations=3,
-        )
-        self._offline_blackout_settling_detector = (
-            BlackoutSettlingDetector()
-        )
         self._illegal_correction_activity_detector = (
             GuidanceActivityDetector(
                 confirmation_observations=1,
@@ -1027,14 +1008,6 @@ class CameraWindow(QMainWindow):
         self._project_turn_indicator = _stored_boolean(
             self._settings.value(_PROJECT_TURN_INDICATOR_SETTING, True),
             True,
-        )
-        self._offline_move_marking_mode = (
-            _stored_offline_move_marking_mode(
-                self._settings.value(
-                _OFFLINE_MOVE_MARKING_SETTING,
-                "brief",
-            )
-            )
         )
         stored_promotion_mode = str(
             self._settings.value(_PROMOTION_MODE_SETTING, "auto-queen")
@@ -1087,17 +1060,6 @@ class CameraWindow(QMainWindow):
         self._lichess_guidance_projection_active = False
         self._lichess_guidance_blackout_pending = False
         self._lichess_guidance_reprojection_pending = False
-        self._offline_accepted_projection_active = False
-        self._offline_accepted_blackout_pending = False
-        self._offline_accepted_reprojection_pending = False
-        self._offline_accepted_projection_generation = 0
-        self._offline_accepted_projection_mode: (
-            OfflineMoveMarkingMode | None
-        ) = None
-        self._offline_accepted_no_change_count = 0
-        self._offline_accepted_move: (
-            tuple[tuple[int, int], tuple[int, int]] | None
-        ) = None
         self._illegal_correction_projection_active = False
         self._illegal_correction_blackout_pending = False
         self._illegal_correction_generation = 0
@@ -1856,22 +1818,6 @@ class CameraWindow(QMainWindow):
         promotion_index = promotion_mode.findData(self._promotion_mode)
         promotion_mode.setCurrentIndex(max(0, promotion_index))
         chess_layout.addRow("Promotion:", promotion_mode)
-        offline_move_marking = QComboBox()
-        offline_move_marking.addItem("Brief (2 seconds)", "brief")
-        offline_move_marking.addItem(
-            "Until next hand leaves",
-            "until-next-hand-leaves",
-        )
-        offline_move_marking_index = offline_move_marking.findData(
-            self._offline_move_marking_mode
-        )
-        offline_move_marking.setCurrentIndex(
-            max(0, offline_move_marking_index)
-        )
-        chess_layout.addRow(
-            "Offline move marking:",
-            offline_move_marking,
-        )
         automatic_start_reset = QCheckBox(
             "Automatically reset a detected starting position"
         )
@@ -1981,16 +1927,6 @@ class CameraWindow(QMainWindow):
             if not isinstance(selected_promotion_mode, str):
                 raise RuntimeError("Promotion mode has no stored identity.")
             self._set_promotion_mode(selected_promotion_mode)
-            selected_offline_move_marking = (
-                offline_move_marking.currentData()
-            )
-            if not isinstance(selected_offline_move_marking, str):
-                raise RuntimeError(
-                    "Offline move marking has no stored identity."
-                )
-            self._set_offline_move_marking_mode(
-                selected_offline_move_marking
-            )
             self._set_automatic_start_reset(
                 automatic_start_reset.isChecked()
             )
@@ -2059,16 +1995,6 @@ class CameraWindow(QMainWindow):
             raise ValueError(f"Unsupported promotion mode: {mode}")
         self._promotion_mode = mode
         self._settings.setValue(_PROMOTION_MODE_SETTING, mode)
-        self._settings.sync()
-
-    def _set_offline_move_marking_mode(self, mode: str) -> None:
-        if mode not in ("brief", "until-next-hand-leaves"):
-            raise ValueError(f"Unsupported Offline move marking mode: {mode}")
-        self._offline_move_marking_mode = cast(
-            OfflineMoveMarkingMode,
-            mode,
-        )
-        self._settings.setValue(_OFFLINE_MOVE_MARKING_SETTING, mode)
         self._settings.sync()
 
     def _set_automatic_start_reset(self, enabled: bool) -> None:
@@ -2558,14 +2484,6 @@ class CameraWindow(QMainWindow):
 
     def _black_projector(self) -> None:
         lichess_guidance_active = self._lichess_guidance_projection_active
-        self._offline_accepted_projection_active = False
-        self._offline_accepted_blackout_pending = False
-        self._offline_accepted_reprojection_pending = False
-        self._offline_accepted_projection_generation += 1
-        self._offline_accepted_projection_mode = None
-        self._offline_accepted_no_change_count = 0
-        self._offline_guidance_activity_detector.reset()
-        self._offline_blackout_settling_detector.reset()
         self._illegal_correction_projection_active = False
         self._illegal_correction_blackout_pending = False
         self._illegal_correction_generation += 1
@@ -3281,12 +3199,6 @@ class CameraWindow(QMainWindow):
                 "settle."
             )
             return
-        if self._offline_accepted_projection_active:
-            self._observe_offline_accepted_projection()
-            return
-        if self._offline_accepted_blackout_pending:
-            self._observe_offline_accepted_blackout()
-            return
         if self._lichess_guidance_projection_active:
             self._observe_lichess_guidance_activity()
             return
@@ -3559,7 +3471,6 @@ class CameraWindow(QMainWindow):
                     include_images=True,
                 )
         self._restore_pending_lichess_guidance_after_no_change(update)
-        self._restore_offline_accepted_projection_after_no_change(update)
         rejected_move = self._last_rejected_move
         correction_restored = (
             rejected_move is not None
@@ -3815,11 +3726,8 @@ class CameraWindow(QMainWindow):
                 f"Legal move {legal_move.san} accepted; "
                 f"{legal_move.status.turn} to move."
             )
-        if not lichess_pending:
-            if legal_move is None:
-                self._project_accepted_move(update.move)
-            else:
-                self._project_offline_accepted_move(update.move)
+        if not lichess_pending and legal_move is None:
+            self._project_accepted_move(update.move)
 
     def _offline_correction_game(
         self,
@@ -4192,7 +4100,6 @@ class CameraWindow(QMainWindow):
             f"Legal move {legal_move.san} accepted; "
             f"{legal_move.status.turn} to move."
         )
-        self._project_offline_accepted_move(move)
 
     def _fail_promotion_selection(self, message: str) -> None:
         self._pending_promotion_selection = None
@@ -4554,209 +4461,6 @@ class CameraWindow(QMainWindow):
             f"Projecting move {source_name}-{destination_name} for 2 seconds."
         )
         QTimer.singleShot(2000, self._finish_move_projection)
-
-    def _project_offline_accepted_move(
-        self,
-        move: tuple[tuple[int, int], tuple[int, int]],
-        *,
-        mode: OfflineMoveMarkingMode | None = None,
-    ) -> None:
-        if self._camera_only_calibration:
-            return
-        if self._calibration_result is None or not self._open_projector():
-            return
-        source, destination = move
-        try:
-            self._projector_window.show_move(
-                self._physical_board_square(*source),
-                self._physical_board_square(*destination),
-                source_is_light=(sum(source) % 2 == 0),
-                destination_is_light=(sum(destination) % 2 == 0),
-                include_turn_indicator=True,
-            )
-        except (RuntimeError, ValueError) as error:
-            self._projector_status.setText(
-                f"Accepted-move projection failed: {error}"
-            )
-            return
-        projection_mode = mode or self._offline_move_marking_mode
-        self._offline_accepted_projection_generation += 1
-        generation = self._offline_accepted_projection_generation
-        self._offline_accepted_projection_active = True
-        self._offline_accepted_blackout_pending = False
-        self._offline_accepted_reprojection_pending = False
-        self._offline_accepted_projection_mode = projection_mode
-        self._offline_accepted_no_change_count = 0
-        self._offline_accepted_move = move
-        self._offline_guidance_activity_detector.reset()
-        self._offline_blackout_settling_detector.reset()
-        self._alignment_monitor.set_paused("Offline accepted move")
-        if projection_mode == "brief":
-            self._projector_status.setText(
-                "Showing the accepted move for 2 seconds."
-            )
-            QTimer.singleShot(
-                2000,
-                lambda: self._begin_offline_accepted_blackout(
-                    generation,
-                    reproject_if_unchanged=False,
-                ),
-            )
-        else:
-            self._projector_status.setText(
-                "Showing the accepted move until the next player's hand "
-                "leaves."
-            )
-
-    def _observe_offline_accepted_projection(self) -> None:
-        if (
-            self._latest_frame is None
-            or self._calibration_result is None
-            or not self._offline_accepted_projection_active
-        ):
-            return
-        if self._projector_window.output_mode != "move":
-            self._offline_accepted_projection_active = False
-            self._offline_accepted_reprojection_pending = (
-                self._offline_accepted_projection_mode
-                == "until-next-hand-leaves"
-            )
-            self._offline_accepted_no_change_count = 0
-            self._offline_guidance_activity_detector.reset()
-            return
-        if self._offline_accepted_projection_mode == "brief":
-            return
-        try:
-            manipulation_settled = (
-                self._offline_guidance_activity_detector.observe(
-                    self._latest_frame,
-                    self._calibration_result.mapping.camera_grid,
-                )
-            )
-        except (ValueError, RuntimeError, cv2.error) as error:
-            self._projector_status.setText(
-                f"Next-move hand detection unavailable: {error}"
-            )
-            return
-        if not manipulation_settled:
-            return
-        self._begin_offline_accepted_blackout(
-            self._offline_accepted_projection_generation,
-            reproject_if_unchanged=True,
-        )
-
-    def _begin_offline_accepted_blackout(
-        self,
-        generation: int,
-        *,
-        reproject_if_unchanged: bool,
-    ) -> None:
-        if (
-            generation != self._offline_accepted_projection_generation
-            or not self._offline_accepted_projection_active
-        ):
-            return
-        self._offline_accepted_projection_active = False
-        self._offline_accepted_blackout_pending = True
-        self._offline_accepted_reprojection_pending = (
-            reproject_if_unchanged
-        )
-        self._offline_accepted_no_change_count = 0
-        self._offline_guidance_activity_detector.reset()
-        self._offline_blackout_settling_detector.reset()
-        self._projector_window.show_black()
-        self._alignment_monitor.set_black()
-        self._reference_move_tracker.reset_activity()
-        self._projector_status.setText(
-            "Accepted-move marking removed; projector black is settling "
-            "before move verification."
-        )
-        QTimer.singleShot(
-            1000,
-            lambda: self._finish_offline_accepted_blackout(
-                generation,
-                "fallback",
-            ),
-        )
-
-    def _observe_offline_accepted_blackout(self) -> None:
-        if (
-            self._latest_frame is None
-            or self._calibration_result is None
-            or not self._offline_accepted_blackout_pending
-        ):
-            return
-        try:
-            update = self._offline_blackout_settling_detector.observe(
-                self._latest_frame,
-                self._calibration_result.mapping.camera_grid,
-            )
-        except (ValueError, RuntimeError, cv2.error) as error:
-            self._projector_status.setText(
-                "Adaptive projector-black settling unavailable; waiting for "
-                f"the one-second fallback: {error}"
-            )
-            return
-        if update.state in ("stable", "timeout"):
-            self._finish_offline_accepted_blackout(
-                self._offline_accepted_projection_generation,
-                update.state,
-            )
-
-    def _finish_offline_accepted_blackout(
-        self,
-        generation: int,
-        reason: Literal["stable", "timeout", "fallback"] = "fallback",
-    ) -> None:
-        if (
-            generation != self._offline_accepted_projection_generation
-            or self._offline_accepted_projection_active
-            or not self._offline_accepted_blackout_pending
-        ):
-            return
-        self._offline_accepted_blackout_pending = False
-        self._reference_move_tracker.reset_activity()
-        self._projector_status.setText(
-            "Projector black exposure stabilized; watching for the next "
-            "Offline move."
-        )
-
-    def _restore_offline_accepted_projection_after_no_change(
-        self,
-        update: ReferenceTrackerUpdate,
-    ) -> None:
-        if not self._offline_accepted_reprojection_pending:
-            return
-        if update.state == "watching":
-            self._offline_accepted_no_change_count += 1
-            if self._offline_accepted_no_change_count < 2:
-                return
-            move = self._offline_accepted_move
-            projection_mode = self._offline_accepted_projection_mode
-            self._offline_accepted_reprojection_pending = False
-            self._offline_accepted_no_change_count = 0
-            if (
-                move is not None
-                and projection_mode == "until-next-hand-leaves"
-                and self._game_mode == "offline-game"
-            ):
-                self._project_offline_accepted_move(
-                    move,
-                    mode=projection_mode,
-                )
-                self._occupancy_status.setText(
-                    "No physical move detected; accepted-move illumination "
-                    "restored."
-                )
-            return
-        if update.state not in (
-            "activity",
-            "waiting-for-clear",
-            "settling",
-            "candidate",
-        ):
-            self._offline_accepted_reprojection_pending = False
-        self._offline_accepted_no_change_count = 0
 
     def _update_lichess_synchronization_projection(self) -> None:
         controller = self._lichess_game_controller

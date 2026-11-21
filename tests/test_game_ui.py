@@ -18,7 +18,6 @@ from src.chess_camera.camera_app import (
     _physical_promotion_edge,
     _projected_turn_corner,
     _reference_tracking_status_message,
-    _stored_offline_move_marking_mode,
     _turn_indicator_state,
     _inferred_offline_game_for_source,
 )
@@ -128,7 +127,6 @@ def test_stable_menu_preferences_are_persisted() -> None:
         _settings=settings,
         _preferred_lichess_game_id="",
         _promotion_mode="auto-queen",
-        _offline_move_marking_mode="brief",
         _automatic_start_reset=True,
         _project_turn_indicator=True,
         _reset_pieces_button=MagicMock(),
@@ -139,10 +137,6 @@ def test_stable_menu_preferences_are_persisted() -> None:
     CameraWindow._save_diagnostics_preference_changed(window, False)
     CameraWindow._remember_lichess_game_selection(window, "game1234")
     CameraWindow._set_promotion_mode(window, "select-promoted-piece")
-    CameraWindow._set_offline_move_marking_mode(
-        window,
-        "until-next-hand-leaves",
-    )
     CameraWindow._set_automatic_start_reset(window, False)
     CameraWindow._set_project_turn_indicator(window, False)
 
@@ -150,41 +144,16 @@ def test_stable_menu_preferences_are_persisted() -> None:
         call("diagnostics/save_snapshots", False),
         call("lichess/selected_game_id", "game1234"),
         call("chess/promotion_mode", "select-promoted-piece"),
-        call(
-            "chess/offline_move_marking",
-            "until-next-hand-leaves",
-        ),
         call("chess/automatic_start_reset", False),
         call("chess/project_turn_indicator", False),
     ]
-    assert settings.sync.call_count == 6
+    assert settings.sync.call_count == 5
     assert window._preferred_lichess_game_id == "game1234"
     assert window._promotion_mode == "select-promoted-piece"
-    assert (
-        window._offline_move_marking_mode
-        == "until-next-hand-leaves"
-    )
     assert window._automatic_start_reset is False
     assert window._project_turn_indicator is False
     window._reset_pieces_button.setVisible.assert_called_once_with(True)
     window._update_projected_turn_indicator.assert_called_once_with()
-
-
-def test_offline_move_marking_mode_rejects_invalid_values() -> None:
-    from types import SimpleNamespace
-    from unittest.mock import MagicMock
-
-    assert _stored_offline_move_marking_mode("brief") == "brief"
-    assert (
-        _stored_offline_move_marking_mode("until-next-hand-leaves")
-        == "until-next-hand-leaves"
-    )
-    assert _stored_offline_move_marking_mode("invalid") == "brief"
-
-    window = SimpleNamespace(_settings=MagicMock())
-    with pytest.raises(ValueError, match="Unsupported Offline"):
-        CameraWindow._set_offline_move_marking_mode(window, "invalid")
-    window._settings.setValue.assert_not_called()
 
 
 def test_created_ai_game_follows_exact_returned_id() -> None:
@@ -496,7 +465,6 @@ def test_offline_selected_promotion_commits_selected_piece() -> None:
         _persist_game_state=MagicMock(),
         _update_turn_indicator=MagicMock(),
         _piece_status=MagicMock(),
-        _project_offline_accepted_move=MagicMock(),
         _fail_promotion_selection=MagicMock(),
     )
 
@@ -509,9 +477,6 @@ def test_offline_selected_promotion_commits_selected_piece() -> None:
     assert game.position[(0, 0)] == "N"
     assert synchronizer.position[(0, 0)] == "N"
     assert window._pending_promotion_selection is None
-    window._project_offline_accepted_move.assert_called_once_with(
-        ((1, 0), (0, 0))
-    )
 
 
 def test_offline_mode_mismatch_is_preserved_for_explicit_recovery() -> None:
@@ -1589,7 +1554,6 @@ def test_illegal_relocation_projects_source_and_destination_red() -> None:
         _last_runtime_tracker_state="watching",
         _record_runtime_diagnostic=MagicMock(),
         _restore_pending_lichess_guidance_after_no_change=MagicMock(),
-        _restore_offline_accepted_projection_after_no_change=MagicMock(),
         _last_rejected_move=None,
         _board_widget=SimpleNamespace(
             set_illegal_source=MagicMock(),
@@ -1641,7 +1605,6 @@ def test_first_accepted_black_move_determines_offline_turn() -> None:
         _last_runtime_tracker_state="watching",
         _record_runtime_diagnostic=MagicMock(),
         _restore_pending_lichess_guidance_after_no_change=MagicMock(),
-        _restore_offline_accepted_projection_after_no_change=MagicMock(),
         _last_rejected_move=None,
         _illegal_correction_last_projected_move=None,
         _board_widget=MagicMock(),
@@ -1652,7 +1615,6 @@ def test_first_accepted_black_move_determines_offline_turn() -> None:
         _persist_move_reference=MagicMock(),
         _persist_game_state=MagicMock(),
         _update_turn_indicator=MagicMock(),
-        _project_offline_accepted_move=MagicMock(),
     )
 
     CameraWindow._update_reference_move_tracking(window)
@@ -1695,7 +1657,6 @@ def test_routine_tracker_transition_does_not_write_diagnostics() -> None:
         _last_runtime_tracker_state="watching",
         _record_runtime_diagnostic=MagicMock(),
         _restore_pending_lichess_guidance_after_no_change=MagicMock(),
-        _restore_offline_accepted_projection_after_no_change=MagicMock(),
         _last_rejected_move=None,
     )
 
@@ -1736,7 +1697,6 @@ def test_illegal_first_move_keeps_offline_turn_undetermined() -> None:
         _last_runtime_tracker_state="watching",
         _record_runtime_diagnostic=MagicMock(),
         _restore_pending_lichess_guidance_after_no_change=MagicMock(),
-        _restore_offline_accepted_projection_after_no_change=MagicMock(),
         _last_rejected_move=None,
         _board_widget=MagicMock(),
         _piece_status=MagicMock(),

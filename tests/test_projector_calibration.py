@@ -790,7 +790,6 @@ def test_black_action_opens_and_raises_projector_before_clearing_marker() -> Non
         _lichess_guidance_projection_active=False,
         _offline_guidance_activity_detector=MagicMock(),
         _offline_blackout_settling_detector=MagicMock(),
-        _offline_accepted_projection_generation=0,
         _illegal_correction_activity_detector=MagicMock(),
         _illegal_correction_generation=0,
     )

@@ -427,31 +427,12 @@ An accepted move shall be applied atomically:
 6. Persist the logical position and reference metadata.
 7. Return to `watching`.
 
-Offline legal play shall display the optional next-turn dot concurrently with
-the accepted source and destination once the authoritative turn is known.
-The configured marking duration shall use the same lifecycle after White and
-Black moves:
-
-- `brief` shall retain the marking for exactly two seconds. Hand entry shall
-  not shorten that interval.
-- `until-next-hand-leaves` shall retain the marking until a dedicated
-  board-and-halo activity detector has observed the next manipulation start
-  and subsequently settle after the hand leaves. If no manipulation starts,
-  the marking shall remain visible.
-
-After either lifecycle ends, the projector shall return to black, retaining
-the configured next-turn dot, and ordinary move verification shall remain
-paused until black-projector exposure settling completes. No frame captured
-under accepted-move marking may replace the accepted reference. In
-`until-next-hand-leaves` mode, if the settled board still matches the accepted
-reference on two consecutive black-frame observations, the same accepted
-square projection and dot shall reappear. The activity detector shall arm
-only after the restored projection has stabilized, preventing its light
-transition from causing a blackout/reprojection loop. Changing the configured
-duration while a marking is visible shall affect only the next accepted move.
-Diagnostic movement may retain temporary accepted-square projection, and
-illegal correction may retain its red projection; neither shall expose the
-turn dot.
+Offline legal play shall keep the projector black after an accepted move so
+ordinary verification continues against the newly accepted reference without
+a marking-removal handoff. The optional next-turn dot may remain visible
+independently. Diagnostic movement may retain temporary accepted-square
+projection, and illegal correction may retain its red projection; neither
+shall expose the turn dot.
 
 Illegal-relocation correction shall project both the authoritative source and
 observed destination in red until a board-and-halo activity detector confirms

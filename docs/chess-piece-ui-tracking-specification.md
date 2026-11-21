@@ -210,20 +210,10 @@ After an accepted move, both its source and destination squares shall remain
 visibly lighter on the UI board until another move is accepted. An explicit
 reset to the standard starting position shall clear the highlight.
 
-In Offline legal mode, the projector shall illuminate the accepted source and
-destination without a fixed timeout. The illumination shall remain steady
-while the board is unobstructed and shall include the next-turn dot as soon as
-the authoritative turn is known. The dot lies outside the camera-evidence
-board and therefore shall coexist with this accepted-move illumination. The
-illumination shall be removed as soon as the next player's hand enters the
-board or its one-square halo. The projector shall then return immediately to
-idle-dark output with the same next-turn dot and observe the new move. The
-player shall not have to wait for accepted-move illumination to expire. If the
-hand leaves without changing any piece, black-frame comparison shall confirm
-on two consecutive observations that the board still matches the accepted
-reference before the same accepted-move illumination reappears. The restored
-projection shall be allowed to settle before its hand detector is armed so the
-projected squares cannot trigger a repeated blackout/reprojection cycle. Red
+In Offline legal mode, accepting a move shall not illuminate its source and
+destination on the projector. The projector shall remain idle-dark so camera
+verification of the next move continues immediately. The optional next-turn
+dot lies outside the camera-evidence board and may remain visible. Red
 illegal-move correction projection and every other actionable projector mode
 shall continue to suppress the turn dot.
 

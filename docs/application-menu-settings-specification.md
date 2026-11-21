@@ -128,12 +128,11 @@ menu actions. Moving a command shall not change its operational behavior.
 
 - **Devices:** camera and projector display selectors.
 - **Chess:** promotion mode with **Auto-queen** and
-  **Select promoted piece** choices, Offline move marking duration with
-  **Brief (2 seconds)** and **Until next hand leaves** choices, plus
-  **Automatically reset a detected starting position** and
+  **Select promoted piece** choices, plus **Automatically reset a detected
+  starting position** and
   **Project turn indicator beside the board**.
   Auto-queen, automatic starting-position reset, and physical turn projection
-  remain the defaults. Brief Offline move marking is the default.
+  remain the defaults.
 - **Diagnostics:** the **Save diagnostic snapshots** setting.
 - **Lichess:** current connection status, persistent AI-game defaults for AI
   level, player color, and clock, plus a fresh configured/not-configured check
