@@ -16,6 +16,7 @@ from src.chess_camera.lichess_client import (
     OngoingGame,
 )
 from src.chess_camera.lichess_worker import (
+    LichessAiGameCreationWorker,
     LichessConnectionWorker,
     LichessGameAction,
     LichessGameActionWorker,
@@ -239,6 +240,52 @@ class GameActionClient:
     def decline_draw(self, game_id: str) -> None:
         self.actions.append(("decline-draw", game_id))
 
+    def abort_game(self, game_id: str) -> None:
+        self.actions.append(("abort", game_id))
+
+
+class AiCreationClient:
+    def __init__(self) -> None:
+        self.requests: list[
+            tuple[int, str, int | None, int | None]
+        ] = []
+
+    def create_ai_game(
+        self,
+        *,
+        level: int,
+        color: str,
+        clock_limit_seconds: int | None,
+        clock_increment_seconds: int | None,
+    ) -> str:
+        self.requests.append(
+            (
+                level,
+                color,
+                clock_limit_seconds,
+                clock_increment_seconds,
+            )
+        )
+        return "game1234"
+
+
+def test_ai_creation_worker_emits_created_game_id() -> None:
+    client = AiCreationClient()
+    worker = LichessAiGameCreationWorker(
+        cast(LichessReadOnlyClient, client),
+        level=4,
+        color="white",
+        clock_limit_seconds=600,
+        clock_increment_seconds=5,
+    )
+    created: list[str] = []
+    worker.created.connect(created.append)
+
+    worker.run()
+
+    assert client.requests == [(4, "white", 600, 5)]
+    assert created == ["game1234"]
+
 
 def test_game_action_worker_submits_draw_and_resignation() -> None:
     client = GameActionClient()
@@ -248,6 +295,7 @@ def test_game_action_worker_submits_draw_and_resignation() -> None:
         "offer-draw",
         "accept-draw",
         "decline-draw",
+        "abort",
         "resign",
     )
     for action in actions:
@@ -267,12 +315,14 @@ def test_game_action_worker_submits_draw_and_resignation() -> None:
         ("offer-draw", "game1234"),
         ("offer-draw", "game1234"),
         ("decline-draw", "game1234"),
+        ("abort", "game1234"),
         ("resign", "game1234"),
     ]
     assert succeeded == [
         ("game1234", "offer-draw"),
         ("game1234", "accept-draw"),
         ("game1234", "decline-draw"),
+        ("game1234", "abort"),
         ("game1234", "resign"),
     ]
 
@@ -526,25 +576,6 @@ def test_polling_waits_for_selection_when_multiple_games_are_active() -> None:
     assert isinstance(game_events[-1], LichessPollingSnapshot)
     assert game_events[-1].game.game_id == "newGame2"
     assert account_events[-1].game_id == "newGame2"
-
-
-def test_polling_selects_single_new_game_among_existing_games() -> None:
-    client = MultiplePollingGamesClient()
-    worker = LichessConnectionWorker(cast(LichessReadOnlyClient, client))
-    statuses: list[str] = []
-    account_events: list[AccountGameEvent] = []
-    game_events: list[object] = []
-    worker.status_changed.connect(statuses.append)
-    worker.account_event_received.connect(account_events.append)
-    worker.game_event_received.connect(game_events.append)
-    worker.expect_new_game({"oldGame1"})
-
-    assert worker._poll_ongoing_game(None) == "newGame2"
-
-    assert statuses == []
-    assert account_events[-1].game_id == "newGame2"
-    assert isinstance(game_events[-1], LichessPollingSnapshot)
-    assert game_events[-1].game.game_id == "newGame2"
 
 
 def test_polling_cursor_appends_authoritative_last_move() -> None:

@@ -1,6 +1,7 @@
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
@@ -12,6 +13,7 @@ from typing import Callable, ContextManager, Literal, Protocol, cast
 import chess
 
 PlayerColor = Literal["white", "black"]
+AiChallengeColor = Literal["white", "black", "random"]
 AccountEventType = Literal["gameStart", "gameFinish"]
 _USER_AGENT = (
     "ChessProjectorCamera/0.1 "
@@ -130,6 +132,13 @@ class NdjsonTransport(Protocol):
         self,
         path: str,
         headers: Mapping[str, str],
+    ) -> Mapping[str, object]: ...
+
+    def post_form(
+        self,
+        path: str,
+        headers: Mapping[str, str],
+        fields: Mapping[str, str | int],
     ) -> Mapping[str, object]: ...
 
 
@@ -262,6 +271,53 @@ class UrllibNdjsonTransport:
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise LichessProtocolError(
                 "Lichess returned invalid JSON after move submission."
+            ) from error
+        if not isinstance(payload, dict):
+            raise LichessProtocolError(
+                "A Lichess JSON response must be an object."
+            )
+        return cast(dict[str, object], payload)
+
+    def post_form(
+        self,
+        path: str,
+        headers: Mapping[str, str],
+        fields: Mapping[str, str | int],
+    ) -> Mapping[str, object]:
+        if not path.startswith("/"):
+            raise ValueError("Lichess request paths must start with '/'.")
+        request = urllib.request.Request(
+            f"{self._base_url}{path}",
+            data=urllib.parse.urlencode(fields).encode("ascii"),
+            headers={
+                **dict(headers),
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(
+                request,
+                timeout=self._timeout_seconds,
+            ) as response:
+                payload = json.load(response)
+        except urllib.error.HTTPError as error:
+            retry_after = (
+                _retry_after_seconds(error.headers.get("Retry-After"))
+                if error.code == 429
+                else None
+            )
+            raise LichessHTTPError(
+                error.code,
+                retry_after_seconds=retry_after,
+            ) from error
+        except OSError as error:
+            raise LichessConnectionError(
+                "Could not connect to Lichess."
+            ) from error
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise LichessProtocolError(
+                "Lichess returned invalid JSON."
             ) from error
         if not isinstance(payload, dict):
             raise LichessProtocolError(
@@ -441,6 +497,58 @@ class LichessReadOnlyClient:
             "resign",
             "resignation",
         )
+
+    def abort_game(self, game_id: str) -> None:
+        self._submit_game_action(
+            game_id,
+            "abort",
+            "abort",
+        )
+
+    def create_ai_game(
+        self,
+        *,
+        level: int,
+        color: AiChallengeColor,
+        clock_limit_seconds: int | None,
+        clock_increment_seconds: int | None,
+    ) -> str:
+        if not 1 <= level <= 8:
+            raise ValueError("Lichess AI level must be between 1 and 8.")
+        if color not in ("white", "black", "random"):
+            raise ValueError("Lichess AI game color is invalid.")
+        if (clock_limit_seconds is None) != (
+            clock_increment_seconds is None
+        ):
+            raise ValueError(
+                "Lichess AI clock limit and increment must be set together."
+            )
+        fields: dict[str, str | int] = {
+            "level": level,
+            "color": color,
+            "variant": "standard",
+        }
+        if (
+            clock_limit_seconds is not None
+            and clock_increment_seconds is not None
+        ):
+            if not 0 <= clock_limit_seconds <= 10800:
+                raise ValueError("Lichess AI clock limit is invalid.")
+            if not 0 <= clock_increment_seconds <= 60:
+                raise ValueError("Lichess AI clock increment is invalid.")
+            fields["clock.limit"] = clock_limit_seconds
+            fields["clock.increment"] = clock_increment_seconds
+        payload = self._transport.post_form(
+            "/api/challenge/ai",
+            {**self._headers, "Accept": "application/json"},
+            fields,
+        )
+        game_id = payload.get("id")
+        if not isinstance(game_id, str):
+            raise LichessProtocolError(
+                "Lichess did not return the created AI game ID."
+            )
+        return _normalize_game_id(game_id)
 
     def _submit_game_action(
         self,

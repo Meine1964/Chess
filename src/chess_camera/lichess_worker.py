@@ -1,4 +1,4 @@
-from collections.abc import Callable, Collection, Iterator
+from collections.abc import Callable, Iterator
 from threading import Event, Lock
 from typing import Literal
 
@@ -7,6 +7,7 @@ from PySide6.QtCore import QObject, Signal, Slot
 
 from .lichess_client import (
     AccountGameEvent,
+    AiChallengeColor,
     GameStreamEvent,
     LichessConnectionError,
     LichessError,
@@ -98,6 +99,7 @@ LichessGameAction = Literal[
     "offer-draw",
     "accept-draw",
     "decline-draw",
+    "abort",
     "resign",
 ]
 
@@ -126,6 +128,8 @@ class LichessGameActionWorker(QObject):
                 self._client.offer_draw(self._game_id)
             elif self._action == "decline-draw":
                 self._client.decline_draw(self._game_id)
+            elif self._action == "abort":
+                self._client.abort_game(self._game_id)
             else:
                 self._client.resign_game(self._game_id)
         except LichessHTTPError as error:
@@ -156,6 +160,53 @@ class LichessGameActionWorker(QObject):
             self.finished.emit()
 
 
+class LichessAiGameCreationWorker(QObject):
+    created = Signal(str)
+    rejected = Signal(str)
+    uncertain = Signal(str)
+    finished = Signal()
+
+    def __init__(
+        self,
+        client: LichessReadOnlyClient,
+        *,
+        level: int,
+        color: AiChallengeColor,
+        clock_limit_seconds: int | None,
+        clock_increment_seconds: int | None,
+    ) -> None:
+        super().__init__()
+        self._client = client
+        self._level = level
+        self._color = color
+        self._clock_limit_seconds = clock_limit_seconds
+        self._clock_increment_seconds = clock_increment_seconds
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            game_id = self._client.create_ai_game(
+                level=self._level,
+                color=self._color,
+                clock_limit_seconds=self._clock_limit_seconds,
+                clock_increment_seconds=self._clock_increment_seconds,
+            )
+        except LichessHTTPError as error:
+            self.rejected.emit(
+                f"Lichess rejected AI game creation with HTTP {error.status}."
+            )
+        except (LichessConnectionError, OSError) as error:
+            self.uncertain.emit(
+                f"{error} Check ongoing games before creating another game."
+            )
+        except (LichessProtocolError, LichessError, ValueError) as error:
+            self.rejected.emit(str(error))
+        else:
+            self.created.emit(game_id)
+        finally:
+            self.finished.emit()
+
+
 class LichessConnectionWorker(QObject):
     status_changed = Signal(str)
     account_event_received = Signal(object)
@@ -175,7 +226,6 @@ class LichessConnectionWorker(QObject):
         self._stop_requested = Event()
         self._selection_lock = Lock()
         self._selected_game_id: str | None = None
-        self._new_game_baseline_ids: frozenset[str] | None = None
         self._polling_game_id: str | None = None
         self._polling_initial_fen: str | None = None
         self._polling_fen: str | None = None
@@ -192,22 +242,10 @@ class LichessConnectionWorker(QObject):
         selected = None if game_id is None else game_id.strip() or None
         with self._selection_lock:
             self._selected_game_id = selected
-            if selected is not None:
-                self._new_game_baseline_ids = None
 
-    def expect_new_game(
-        self,
-        existing_game_ids: Collection[str],
-    ) -> None:
+    def _selected_game(self) -> str | None:
         with self._selection_lock:
-            self._selected_game_id = None
-            self._new_game_baseline_ids = frozenset(existing_game_ids)
-
-    def _game_selection(
-        self,
-    ) -> tuple[str | None, frozenset[str] | None]:
-        with self._selection_lock:
-            return self._selected_game_id, self._new_game_baseline_ids
+            return self._selected_game_id
 
     def note_local_move(
         self,
@@ -357,24 +395,8 @@ class LichessConnectionWorker(QObject):
                 "Connected to Lichess by polling; waiting for a game."
             )
             return None
-        selected_game_id, new_game_baseline_ids = self._game_selection()
-        if new_game_baseline_ids is not None:
-            new_games = tuple(
-                game
-                for game in games
-                if game.game_id not in new_game_baseline_ids
-            )
-            if len(new_games) == 1:
-                game = new_games[0]
-                self.select_game(game.game_id)
-            else:
-                self._reset_polling_cursor()
-                self.status_changed.emit(
-                    "Connected to Lichess by polling; waiting for the newly "
-                    "started game."
-                )
-                return None
-        elif len(games) == 1:
+        selected_game_id = self._selected_game()
+        if len(games) == 1:
             game = games[0]
             self.select_game(game.game_id)
         else:

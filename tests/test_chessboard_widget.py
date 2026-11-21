@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from PySide6.QtCore import QPointF, QSettings, QUrl
+from PySide6.QtCore import QPointF, QSettings
 from PySide6.QtGui import QAction, QColor
 from PySide6.QtWidgets import QApplication, QComboBox, QMainWindow, QToolButton
 
@@ -18,6 +18,7 @@ from src.chess_camera.chessboard_widget import (
     square_at_position,
 )
 from src.chess_camera.chess_position import standard_position
+from src.chess_camera.legal_game import LegalGame
 from src.chess_camera.lichess_client import OngoingGame
 
 
@@ -253,8 +254,8 @@ def test_multiple_ongoing_games_require_explicit_ui_selection(
             _remember_lichess_game_selection=MagicMock(),
             _lichess_game_id=None,
             _clear_lichess_game_information=MagicMock(),
-            _awaiting_new_lichess_game=False,
-            _new_lichess_game_existing_ids=None,
+            _last_lichess_game_prompt_ids=None,
+            _choose_lichess_game=MagicMock(return_value=None),
         ),
     )
 
@@ -299,8 +300,7 @@ def test_remembered_lichess_game_is_not_replaced_by_another_game(
             _preferred_lichess_game_id="remembered",
             _remember_lichess_game_selection=MagicMock(),
             _rebuild_lichess_games_menu=MagicMock(),
-            _awaiting_new_lichess_game=False,
-            _new_lichess_game_existing_ids=None,
+            _last_lichess_game_prompt_ids=None,
         ),
     )
     available = OngoingGame(
@@ -321,7 +321,47 @@ def test_remembered_lichess_game_is_not_replaced_by_another_game(
     selector.close()
 
 
-def test_newly_started_game_is_selected_among_older_ongoing_games(
+def test_multiple_game_dialog_previews_position_without_hash(
+    application: QApplication,
+) -> None:
+    from src.chess_camera.camera_app import LichessGameSelectionDialog
+
+    game = LegalGame()
+    moved = game.apply_move((6, 4), (4, 4))
+    games = (
+        OngoingGame(
+            "oldGame1",
+            "oldGame1abcd",
+            "black",
+            LegalGame().fen,
+            "Older opponent",
+            True,
+        ),
+        OngoingGame(
+            "newGame2",
+            "newGame2abcd",
+            "white",
+            moved.fen,
+            "New opponent",
+            False,
+            "e2e4",
+        ),
+    )
+    dialog = LichessGameSelectionDialog(games)
+
+    assert "oldGame1" not in dialog._selector.itemText(0)
+    assert dialog._selector.itemText(0) == (
+        "Older opponent - playing Black, your turn"
+    )
+    dialog._selector.setCurrentIndex(1)
+    assert dialog.selected_game_id == "newGame2"
+    assert dialog._board.pieces[(4, 4)] == "P"
+    assert dialog._board.last_move == ((6, 4), (4, 4))
+    assert "Opponent: New opponent." in dialog._details.text()
+    dialog.close()
+
+
+def test_multiple_game_popup_selection_is_applied_once(
     application: QApplication,
 ) -> None:
     from types import SimpleNamespace
@@ -334,7 +374,7 @@ def test_newly_started_game_is_selected_among_older_ongoing_games(
             "oldGame1",
             "oldGame1abcd",
             "black",
-            "unused",
+            LegalGame().fen,
             "Older opponent",
             True,
         ),
@@ -342,32 +382,40 @@ def test_newly_started_game_is_selected_among_older_ongoing_games(
             "newGame2",
             "newGame2abcd",
             "white",
-            "unused",
+            LegalGame().fen,
             "New opponent",
             False,
         ),
     )
     selector = QComboBox()
     worker = MagicMock()
-    remember_selection = MagicMock()
+    choose = MagicMock(return_value="newGame2")
+    remember = MagicMock()
     window = cast(
         CameraWindow,
         SimpleNamespace(
             _lichess_game_selector=selector,
             _lichess_worker=worker,
             _preferred_lichess_game_id="",
-            _remember_lichess_game_selection=remember_selection,
+            _remember_lichess_game_selection=remember,
             _rebuild_lichess_games_menu=MagicMock(),
-            _awaiting_new_lichess_game=True,
-            _new_lichess_game_existing_ids=frozenset({"oldGame1"}),
+            _last_lichess_game_prompt_ids=None,
+            _choose_lichess_game=choose,
         ),
+    )
+    remember.side_effect = lambda game_id: setattr(
+        window,
+        "_preferred_lichess_game_id",
+        game_id,
     )
 
     CameraWindow._lichess_ongoing_games_received(window, games)
+    CameraWindow._lichess_ongoing_games_received(window, games)
 
+    choose.assert_called_once_with(games)
+    remember.assert_called_once_with("newGame2")
     assert selector.currentData() == "newGame2"
-    remember_selection.assert_called_once_with("newGame2")
-    worker.select_game.assert_called_once_with("newGame2")
+    worker.select_game.assert_called_with("newGame2")
     selector.close()
 
 
@@ -400,7 +448,6 @@ def test_main_commands_are_available_from_menus(
                 "_resume_button",
                 "_reset_pieces_button",
                 "_reconcile_button",
-                "_lichess_button",
                 "_open_projector_button",
                 "_focus_pattern_button",
                 "_black_projector_button",
@@ -459,6 +506,9 @@ def test_main_commands_are_available_from_menus(
         and action.menu().title() == "Lichess"
     )
     assert lichess_menu is not None
+    assert [action.text() for action in lichess_menu.actions()] == [
+        "Active game"
+    ]
     assert "Start new Lichess game" not in {
         action.text() for action in lichess_menu.actions()
     }
@@ -490,123 +540,108 @@ def test_lichess_control_button_has_icon_accessibility_and_placeholder_state(
     button.close()
 
 
-def test_start_new_lichess_game_opens_browser_and_waits_for_game(
+def test_ai_game_dialog_uses_requested_development_defaults(
+    application: QApplication,
+) -> None:
+    from src.chess_camera.camera_app import LichessAiGameDialog
+
+    dialog = LichessAiGameDialog(
+        level=4,
+        color="white",
+        clock_key="10+5",
+    )
+
+    assert dialog.configuration == (4, "white", "10+5", 600, 5)
+    dialog.close()
+
+
+def test_lichess_ai_defaults_apply_and_cancel_transactionally(
     application: QApplication,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    from types import SimpleNamespace
-    from unittest.mock import MagicMock
+    from PySide6.QtGui import QScreen
+    from PySide6.QtWidgets import (
+        QCheckBox,
+        QDialog,
+        QDialogButtonBox,
+        QGroupBox,
+        QLabel,
+        QSpinBox,
+    )
 
-    from src.chess_camera import camera_app
     from src.chess_camera.camera_app import CameraWindow
-    from src.chess_camera.lichess_client import LichessGameState
 
-    state = LichessGameState(
-        (),
-        "unused",
-        "white",
-        0,
-        0,
-        0,
-        0,
-        "mate",
-        "white",
-        "1-0",
-    )
-    opened_urls: list[str] = []
+    class SettingsTestWindow(CameraWindow):
+        def __init__(self) -> None:
+            QMainWindow.__init__(self)
+            self._settings = QSettings(
+                str(tmp_path / "settings.ini"),
+                QSettings.Format.IniFormat,
+            )
+            self._devices = []
+            self._screens = list(application.screens())
+            self._camera_selector = QComboBox()
+            self._projector_selector = QComboBox()
+            self._save_diagnostics = QCheckBox()
+            self._lichess_status = QLabel("Disconnected")
 
-    class DesktopServices:
-        @staticmethod
-        def openUrl(url: QUrl) -> bool:
-            opened_urls.append(url.toString())
-            return True
+        def _refresh_projector_screens(
+            self,
+            screens: list[QScreen],
+        ) -> None:
+            self._screens = screens
 
-    monkeypatch.setattr(camera_app, "QDesktopServices", DesktopServices)
-    selector = QComboBox()
-    selector.addItem("Completed game", "oldGame")
-    worker = MagicMock()
-    window = cast(
-        CameraWindow,
-        SimpleNamespace(
-            _latest_lichess_state=state,
-            _lichess_status=MagicMock(),
-            _record_runtime_diagnostic=MagicMock(),
-            _remember_lichess_game_selection=MagicMock(),
-            _awaiting_new_lichess_game=False,
-            _new_lichess_game_existing_ids=None,
-            _lichess_game_id="oldGame",
-            _lichess_player_color="white",
-            _lichess_opponent_name="Opponent",
-            _lichess_game_controller=MagicMock(),
-            _last_projected_lichess_uci="e2e4",
-            _lichess_game_selector=selector,
-            _rebuild_lichess_games_menu=MagicMock(),
-            _lichess_worker=worker,
-            _toggle_lichess_connection=MagicMock(),
-            _start_new_lichess_game_button=MagicMock(),
-        ),
-    )
+        def _set_promotion_mode(self, mode: str) -> None:
+            assert mode == "auto-queen"
 
-    CameraWindow._start_new_lichess_game(window)
+    window = SettingsTestWindow()
+    invocation = 0
 
-    assert opened_urls == ["https://lichess.org/"]
-    window._remember_lichess_game_selection.assert_called_once_with("")
-    worker.expect_new_game.assert_called_once_with(frozenset({"oldGame"}))
-    assert window._awaiting_new_lichess_game
-    assert window._lichess_game_id is None
-    assert selector.currentText() == "Waiting for a new Lichess game..."
-    window._start_new_lichess_game_button.setEnabled.assert_called_with(False)
-    selector.close()
+    def interact(dialog: QDialog) -> int:
+        nonlocal invocation
+        defaults = next(
+            group
+            for group in dialog.findChildren(QGroupBox)
+            if group.title() == "New AI game defaults"
+        )
+        level = defaults.findChild(QSpinBox)
+        combos = defaults.findChildren(QComboBox)
+        color = next(combo for combo in combos if combo.findData("random") >= 0)
+        clock = next(combo for combo in combos if combo.findData("15+10") >= 0)
+        assert level is not None
+        if invocation == 0:
+            assert (level.value(), color.currentData(), clock.currentData()) == (
+                4,
+                "white",
+                "10+5",
+            )
+            level.setValue(6)
+            color.setCurrentIndex(color.findData("black"))
+            clock.setCurrentIndex(clock.findData("15+10"))
+            buttons = dialog.findChild(QDialogButtonBox)
+            assert buttons is not None
+            apply_button = buttons.button(
+                QDialogButtonBox.StandardButton.Apply
+            )
+            assert apply_button is not None
+            apply_button.click()
+        else:
+            level.setValue(2)
+            color.setCurrentIndex(color.findData("random"))
+            clock.setCurrentIndex(clock.findData("unlimited"))
+        invocation += 1
+        return QDialog.DialogCode.Rejected
 
+    monkeypatch.setattr(QDialog, "exec", interact)
 
-def test_start_new_lichess_game_preserves_state_when_browser_fails(
-    application: QApplication,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from types import SimpleNamespace
-    from unittest.mock import MagicMock
+    window._show_settings_dialog()
+    window._show_settings_dialog()
 
-    from src.chess_camera import camera_app
-    from src.chess_camera.camera_app import CameraWindow
-    from src.chess_camera.lichess_client import LichessGameState
-
-    class DesktopServices:
-        @staticmethod
-        def openUrl(_url: QUrl) -> bool:
-            return False
-
-    monkeypatch.setattr(camera_app, "QDesktopServices", DesktopServices)
-    state = LichessGameState(
-        (),
-        "unused",
-        "white",
-        0,
-        0,
-        0,
-        0,
-        "mate",
-        "white",
-        "1-0",
-    )
-    remember_selection = MagicMock()
-    window = cast(
-        CameraWindow,
-        SimpleNamespace(
-            _latest_lichess_state=state,
-            _lichess_status=MagicMock(),
-            _record_runtime_diagnostic=MagicMock(),
-            _remember_lichess_game_selection=remember_selection,
-            _lichess_game_id="completedGame",
-        ),
-    )
-
-    CameraWindow._start_new_lichess_game(window)
-
-    remember_selection.assert_not_called()
-    assert window._lichess_game_id == "completedGame"
-    window._lichess_status.setText.assert_called_once_with(
-        "Could not open the Lichess website in the system browser."
-    )
+    assert window._settings.value("lichess/ai_level", type=int) == 6
+    assert window._settings.value("lichess/ai_color") == "black"
+    assert window._settings.value("lichess/ai_clock") == "15+10"
+    window.deleteLater()
 
 
 def test_interaction_panel_font_is_readable(

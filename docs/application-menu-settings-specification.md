@@ -28,10 +28,13 @@ main window.
 
 - **Mode** contains mutually exclusive **Diagnostic movement** and
   **Offline legal game** actions.
-- **Lichess** contains the dynamic connect/disconnect action and an
-  **Active game** submenu populated from the current ongoing games.
+- **Lichess** contains an **Active game** submenu populated from the current
+  ongoing games.
 
-The Lichess position panel shall contain a centered Lichess-style icon control
+The Lichess position panel shall contain a compact **Connect** or **Disconnect**
+button centered in the Black information row between the player identity and
+Black's clock. During disconnection it shall remain labeled **Disconnect** but
+be disabled. The panel shall also contain a centered Lichess-style icon control
 bar beneath the game status. It shall show takeback, draw, resign, and new-game
 buttons with tooltips and accessible names. Takeback remains a visible disabled
 placeholder and no takeback request shall be submitted. Draw and resign shall
@@ -53,18 +56,44 @@ and report an uncertain outcome when the connection fails before confirmation.
 Resignation shall remain disabled after submission until authoritative terminal
 game state arrives.
 
+An abort button shall be visible beside the other Lichess controls. It shall be
+enabled only for an active standard-start game with fewer than two known plies,
+which conservatively represents the opening interval in which Lichess may allow
+an abort. It shall require confirmation and use the Board API asynchronously.
+Lichess remains authoritative: a rejected abort shall leave the game active and
+surface the rejection. After confirmed submission, abort shall remain disabled
+until terminal game state arrives.
+
 The new-game button shall be available while no Lichess game is loaded and
-after the loaded game has finished, but not during active play or while the
-application is already waiting for a new game. It shall open the Lichess
-website in the system browser, clear the obsolete remembered game selection
-only after the browser accepts the URL, and ensure the application is
-connected so it can detect the newly started game. The completed board,
-players, and result shall remain visible until a replacement snapshot arrives.
-If the browser cannot be opened, the existing selection and state shall remain
-unchanged and the failure shall be reported. If other games were already
-ongoing when the button was invoked, the application shall remember their IDs
-and automatically select the single newly appearing game. It shall require
-explicit selection only when no unique new game can be identified.
+after the loaded game has finished, but not during active play or while a
+creation request is pending. It shall open a native AI-game setup dialog with
+level 1 through 8, player color, and clock choices. The dialog shall be
+prefilled from the persistent defaults in File > Settings > Lichess; initial
+defaults are level 4, White, and 10+5. Changes made only in the setup dialog
+apply to that game and shall not replace the persistent defaults. Confirming
+shall create a standard game through the authenticated Lichess AI challenge
+API outside the UI thread. Cancelling shall make no state or network change.
+
+When the account event stream reports the selected game finished, or polling
+removes it from the ongoing-game list, the cached game state shall become
+terminal before the new-game button is enabled. The final board may remain
+visible, but stale `created` or `started` state shall not block a replacement
+game after resignation or another terminal outcome.
+
+After Lichess confirms creation, the application shall persist and follow the
+returned exact game ID. The completed previous board, players, and result shall
+remain visible until the replacement snapshot arrives. Rejected and uncertain
+creation outcomes shall be reported explicitly without a browser fallback or
+success-shaped local game.
+
+When connection discovers multiple ongoing games and the exact remembered game
+does not identify the intended selection,
+the application shall open a modal game chooser. The chooser shall identify
+each game by opponent, player color, and side to move rather than using the game
+ID as its primary label, and shall show the current board position for the
+highlighted choice. Confirming selects and persists that exact game. Cancelling
+leaves every game unselected and shall not reopen the same chooser on every
+poll; a changed ongoing-game set may prompt again.
 
 ### 2.4 Projector
 
@@ -93,8 +122,9 @@ menu actions. Moving a command shall not change its operational behavior.
 - **Devices:** camera and projector display selectors.
 - **Chess:** promotion mode. **Auto-queen** is the only current choice.
 - **Diagnostics:** the **Save diagnostic snapshots** setting.
-- **Lichess:** current connection status plus a fresh configured/not-configured
-  check of `LICHESS_TOKEN` from the process environment, without displaying or
+- **Lichess:** current connection status, persistent AI-game defaults for AI
+  level, player color, and clock, plus a fresh configured/not-configured check
+  of `LICHESS_TOKEN` from the process environment, without displaying or
   persisting the authentication token. Startup status shall use the same
   environment check and shall not claim that configuration is missing when a
   non-blank token is available.
@@ -210,7 +240,7 @@ interaction rows.
 ## 7. Validation Status
 
 The implemented menu bar exposes File, Camera, Game, Projector, and
-Calibration menus. The complete automated suite contains 275 passing tests,
+Calibration menus. The complete automated suite contains 283 passing tests,
 including menu structure, transactional selector-copy behavior, existing UI
 state transitions, reconciliation controls, and the readable interaction-font
 minimum. Token-status coverage confirms configured and missing environment

@@ -3,6 +3,7 @@ import pytest
 from src.chess_camera.camera_app import (
     CameraWindow,
     _accepted_position_message,
+    _can_abort_lichess_game,
     _can_start_new_lichess_game,
     _format_lichess_clock,
     _illegal_correction_message,
@@ -76,6 +77,100 @@ def test_stable_menu_preferences_are_persisted() -> None:
     assert window._promotion_mode == "auto-queen"
 
 
+def test_created_ai_game_follows_exact_returned_id() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    connection_worker = MagicMock()
+    window = SimpleNamespace(
+        _pending_created_lichess_game_id=None,
+        _remember_lichess_game_selection=MagicMock(),
+        _lichess_worker=connection_worker,
+        _lichess_status=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
+    )
+
+    CameraWindow._lichess_ai_game_created(window, "createdGame")
+
+    assert window._pending_created_lichess_game_id == "createdGame"
+    window._remember_lichess_game_selection.assert_called_once_with(
+        "createdGame"
+    )
+    connection_worker.select_game.assert_called_once_with("createdGame")
+
+
+@pytest.mark.parametrize(
+    "handler_name",
+    [
+        "_lichess_ai_game_creation_rejected",
+        "_lichess_ai_game_creation_uncertain",
+    ],
+)
+def test_failed_ai_game_creation_restores_new_game_button(
+    handler_name: str,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    window = SimpleNamespace(
+        _pending_created_lichess_game_id="pendingGame",
+        _lichess_status=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
+        _lichess_ai_creation_thread=MagicMock(),
+        _lichess_ai_creation_worker=MagicMock(),
+        _start_new_lichess_game_button=MagicMock(),
+        _latest_lichess_state=None,
+        _close_pending=False,
+    )
+
+    getattr(CameraWindow, handler_name)(window, "Creation failed.")
+    CameraWindow._lichess_ai_creation_finished(window)
+
+    assert window._pending_created_lichess_game_id is None
+    window._start_new_lichess_game_button.setEnabled.assert_called_once_with(
+        True
+    )
+
+
+def test_finished_game_event_terminalizes_cached_started_state() -> None:
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from src.chess_camera.lichess_client import LichessGameFull, LichessPlayer
+
+    started = LichessGameState(
+        (),
+        "unused",
+        "white",
+        0,
+        0,
+        0,
+        0,
+        "started",
+        None,
+        "*",
+    )
+    game = LichessGameFull(
+        "game1234",
+        "startpos",
+        LichessPlayer("white", "White", None),
+        LichessPlayer("black", "Black", None),
+        started,
+    )
+    window = SimpleNamespace(
+        _lichess_game_id="game1234",
+        _latest_lichess_state=started,
+        _latest_lichess_game=game,
+    )
+
+    CameraWindow._mark_lichess_game_finished(window, "game1234")
+
+    expected = replace(started, status="finished")
+    assert window._latest_lichess_state == expected
+    assert window._latest_lichess_game.state == expected
+    assert _can_start_new_lichess_game(window._latest_lichess_state)
+
+
 def test_normal_close_persists_main_window_geometry() -> None:
     from types import SimpleNamespace
     from unittest.mock import MagicMock
@@ -86,6 +181,7 @@ def test_normal_close_persists_main_window_geometry() -> None:
     settings = MagicMock()
     geometry = QByteArray(b"saved-geometry")
     window = SimpleNamespace(
+        _lichess_ai_creation_thread=None,
         _lichess_game_action_thread=None,
         _lichess_submission_thread=None,
         _lichess_worker=None,
@@ -196,6 +292,7 @@ def test_draw_and_resign_controls_enable_for_active_game() -> None:
     window = SimpleNamespace(
         _lichess_client=object(),
         _lichess_game_id="game1234",
+        _latest_lichess_game=None,
         _latest_lichess_state=state,
         _lichess_game_action_thread=None,
         _pending_lichess_game_action=None,
@@ -203,10 +300,12 @@ def test_draw_and_resign_controls_enable_for_active_game() -> None:
         _responded_draw_offer_game_id=None,
         _lichess_draw_offer_state_available=True,
         _lichess_player_color="white",
+        _abort_requested_game_id=None,
         _resign_requested_game_id=None,
         _lichess_draw_button=draw_button,
         _lichess_accept_draw_button=MagicMock(),
         _lichess_decline_draw_button=MagicMock(),
+        _lichess_abort_button=MagicMock(),
         _lichess_resign_button=resign_button,
     )
 
@@ -240,6 +339,7 @@ def test_incoming_draw_offer_shows_accept_and_decline_controls() -> None:
     window = SimpleNamespace(
         _lichess_client=object(),
         _lichess_game_id="game1234",
+        _latest_lichess_game=None,
         _latest_lichess_state=state,
         _lichess_game_action_thread=None,
         _pending_lichess_game_action=None,
@@ -247,10 +347,12 @@ def test_incoming_draw_offer_shows_accept_and_decline_controls() -> None:
         _responded_draw_offer_game_id=None,
         _lichess_draw_offer_state_available=True,
         _lichess_player_color="white",
+        _abort_requested_game_id=None,
         _resign_requested_game_id=None,
         _lichess_draw_button=draw_button,
         _lichess_accept_draw_button=accept_button,
         _lichess_decline_draw_button=decline_button,
+        _lichess_abort_button=MagicMock(),
         _lichess_resign_button=MagicMock(),
     )
 
@@ -261,6 +363,58 @@ def test_incoming_draw_offer_shows_accept_and_decline_controls() -> None:
     decline_button.setVisible.assert_called_once_with(True)
     accept_button.setEnabled.assert_called_once_with(True)
     decline_button.setEnabled.assert_called_once_with(True)
+
+
+def test_abort_is_available_only_during_standard_game_opening() -> None:
+    state = LichessGameState(
+        (),
+        LegalGame().fen,
+        "white",
+        60000,
+        60000,
+        0,
+        0,
+        "started",
+        None,
+        "*",
+    )
+    standard = LichessGameFull(
+        "game1234",
+        LegalGame().fen,
+        LichessPlayer("white", "Local", 1500),
+        LichessPlayer("black", "Remote", 1500),
+        state,
+    )
+    custom = LichessGameFull(
+        "game1234",
+        "8/8/8/8/8/8/8/K6k w - - 0 1",
+        standard.white,
+        standard.black,
+        state,
+    )
+
+    assert _can_abort_lichess_game(standard)
+    assert not _can_abort_lichess_game(
+        LichessGameFull(
+            standard.game_id,
+            standard.initial_fen,
+            standard.white,
+            standard.black,
+            LichessGameState(
+                ("e2e4", "e7e5"),
+                state.fen,
+                "white",
+                60000,
+                60000,
+                0,
+                0,
+                "started",
+                None,
+                "*",
+            ),
+        )
+    )
+    assert not _can_abort_lichess_game(custom)
 
 
 def test_polling_message_reports_unavailable_correspondence_clocks() -> None:

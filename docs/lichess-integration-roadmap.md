@@ -681,14 +681,12 @@ clocks when available, side to move, game status, and result. Polling snapshots
 without clocks show unavailable clocks rather than zero. Incremental state
 updates retain player identity from the latest full snapshot.
 
-**Start-new-game slice:** Implemented and automated-test validated. The native
-Lichess-panel button opens the Lichess website for game creation and then
-detects the game through the existing account connection. Native challenge
-creation is deferred until time-control, opponent, color, and rated/casual
-setup are designed. The button does not discard completed-game information
-before the replacement game is received. Existing ongoing-game IDs are
-excluded when identifying the newly created game so unrelated older games do
-not force an unnecessary manual selection.
+**Start-new-game slice:** Implemented and automated-test validated. The
+Lichess-panel button creates AI games natively through a setup dialog for AI
+level, player color, and clock. Persistent defaults are managed in File >
+Settings > Lichess, while dialog changes apply to one game. The exact returned
+game ID is followed automatically. Random-human seeks and named-user
+challenges remain deferred.
 
 **Game-control bar slice:** Implemented and automated-test validated. The
 Lichess panel shows Lichess-style takeback, draw, resign, and new-game icon
@@ -696,10 +694,21 @@ buttons. Takeback remains disabled and intentionally unsupported. Draw offers
 and responses plus confirmed resignations use asynchronous Board API operations
 with explicit pending, rejected, and uncertain states. Incoming offers expose
 accept and decline buttons when authoritative stream state provides the offer
-flags. The new-game button retains the implemented website-assisted behavior.
+flags. The new-game button starts the native AI-game setup flow.
 
-For the first playable version, challenge creation may remain on the Lichess
-website. The application may initially detect and join an already active game.
+**Abort slice:** Implemented and automated-test validated. The Lichess panel
+provides a confirmed asynchronous abort control during the conservative opening
+interval for standard-start games. The server remains authoritative and may
+reject an abort even while the local control is available.
+
+**Multiple-game selection slice:** Implemented and automated-test validated.
+When automatic exact-game selection cannot choose among multiple ongoing
+games, the application shows a modal chooser with
+opponent/color/turn details and a current-position board preview instead of
+requiring selection by game hash.
+
+Native computer-opponent creation is available in the first playable version.
+Human seeks and named-user challenges may remain on the Lichess website.
 
 ## 13. Diagnostics
 

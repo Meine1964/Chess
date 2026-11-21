@@ -32,6 +32,9 @@ class FakeTransport:
         )
         self.requests: list[tuple[str, Mapping[str, str]]] = []
         self.post_responses: dict[str, Mapping[str, object]] = {}
+        self.form_requests: list[
+            tuple[str, Mapping[str, str], Mapping[str, str | int]]
+        ] = []
 
     @contextmanager
     def open_stream(
@@ -56,6 +59,17 @@ class FakeTransport:
         headers: Mapping[str, str],
     ) -> Mapping[str, object]:
         self.requests.append((path, dict(headers)))
+        return self.post_responses[path]
+
+    def post_form(
+        self,
+        path: str,
+        headers: Mapping[str, str],
+        fields: Mapping[str, str | int],
+    ) -> Mapping[str, object]:
+        self.form_requests.append(
+            (path, dict(headers), dict(fields))
+        )
         return self.post_responses[path]
 
 
@@ -161,6 +175,7 @@ def test_submit_move_requires_positive_confirmation() -> None:
     (
         ("offer_draw", "/api/board/game/p8Jy2ayw/draw/yes"),
         ("decline_draw", "/api/board/game/p8Jy2ayw/draw/no"),
+        ("abort_game", "/api/board/game/p8Jy2ayw/abort"),
         ("resign_game", "/api/board/game/p8Jy2ayw/resign"),
     ),
 )
@@ -185,6 +200,44 @@ def test_game_controls_use_board_api(
                 "Authorization": "Bearer secret-token",
                 "Accept": "application/json",
                 "User-Agent": "Chess test client",
+            },
+        )
+    ]
+
+
+def test_create_ai_game_posts_remembered_setup() -> None:
+    transport = FakeTransport({})
+    transport.post_responses["/api/challenge/ai"] = {
+        "id": "p8Jy2ayw"
+    }
+    client = LichessReadOnlyClient(
+        "secret-token",
+        transport=transport,
+        user_agent="Chess test client",
+    )
+
+    game_id = client.create_ai_game(
+        level=4,
+        color="white",
+        clock_limit_seconds=600,
+        clock_increment_seconds=5,
+    )
+
+    assert game_id == "p8Jy2ayw"
+    assert transport.form_requests == [
+        (
+            "/api/challenge/ai",
+            {
+                "Authorization": "Bearer secret-token",
+                "Accept": "application/json",
+                "User-Agent": "Chess test client",
+            },
+            {
+                "level": 4,
+                "color": "white",
+                "variant": "standard",
+                "clock.limit": 600,
+                "clock.increment": 5,
             },
         )
     ]
