@@ -21,6 +21,7 @@ from PySide6.QtGui import (
     QResizeEvent,
     QScreen,
 )
+
 from PySide6.QtMultimedia import (
     QCamera,
     QCameraDevice,
@@ -133,6 +134,7 @@ _PROJECTOR_LABEL_SETTING = "projector/screen_label"
 _SAVE_DIAGNOSTICS_SETTING = "diagnostics/save_snapshots"
 _LICHESS_GAME_SETTING = "lichess/selected_game_id"
 _PROMOTION_MODE_SETTING = "chess/promotion_mode"
+_AUTOMATIC_START_RESET_SETTING = "chess/automatic_start_reset"
 _WINDOW_GEOMETRY_SETTING = "window/main_geometry"
 _WINDOW_SCREEN_SETTING = "window/main_screen"
 _WINDOW_X_OFFSET_SETTING = "window/main_x_offset"
@@ -900,6 +902,7 @@ class CameraWindow(QMainWindow):
             self._camera_grid_checked
         )
         self._occupancy_detector = SquareOccupancyDetector()
+        self._automatic_start_occupancy_detector = SquareOccupancyDetector()
         self._guidance_activity_detector = GuidanceActivityDetector()
         self._promotion_activity_detector = (
             ManipulationSettlingDetector()
@@ -912,6 +915,11 @@ class CameraWindow(QMainWindow):
         self._offline_mode_recovery_error: str | None = None
         self._offline_restore_requested = False
         self._activate_offline_after_reset = False
+        self._automatic_start_reset_recovery = False
+        self._automatic_start_reset = _stored_boolean(
+            self._settings.value(_AUTOMATIC_START_RESET_SETTING, True),
+            True,
+        )
         stored_promotion_mode = str(
             self._settings.value(_PROMOTION_MODE_SETTING, "auto-queen")
         )
@@ -1087,6 +1095,9 @@ class CameraWindow(QMainWindow):
             self._reset_pieces_to_start
         )
         self._reset_pieces_button.setEnabled(False)
+        self._reset_pieces_button.setVisible(
+            not self._automatic_start_reset
+        )
         self._reconcile_button = QAction("Reconcile physical board", self)
         self._reconcile_button.triggered.connect(
             self._toggle_physical_reconciliation
@@ -1501,7 +1512,7 @@ class CameraWindow(QMainWindow):
         if (
             self._pending_offline_restore_game is not None
             or self._offline_mode_recovery_error is not None
-        ):
+        ) and not self._automatic_start_reset_recovery:
             QTimer.singleShot(0, self._show_offline_mode_recovery_dialog)
 
     def _create_application_menus(self) -> None:
@@ -1696,6 +1707,11 @@ class CameraWindow(QMainWindow):
         promotion_index = promotion_mode.findData(self._promotion_mode)
         promotion_mode.setCurrentIndex(max(0, promotion_index))
         chess_layout.addRow("Promotion:", promotion_mode)
+        automatic_start_reset = QCheckBox(
+            "Automatically reset a detected starting position"
+        )
+        automatic_start_reset.setChecked(self._automatic_start_reset)
+        chess_layout.addRow(automatic_start_reset)
         chess_tab.setLayout(chess_layout)
         tabs.addTab(chess_tab, "Chess")
 
@@ -1795,6 +1811,9 @@ class CameraWindow(QMainWindow):
             if not isinstance(selected_promotion_mode, str):
                 raise RuntimeError("Promotion mode has no stored identity.")
             self._set_promotion_mode(selected_promotion_mode)
+            self._set_automatic_start_reset(
+                automatic_start_reset.isChecked()
+            )
             selected_ai_color = ai_color.currentData()
             selected_ai_clock = ai_clock.currentData()
             if not isinstance(selected_ai_color, str):
@@ -1857,6 +1876,21 @@ class CameraWindow(QMainWindow):
             raise ValueError(f"Unsupported promotion mode: {mode}")
         self._promotion_mode = mode
         self._settings.setValue(_PROMOTION_MODE_SETTING, mode)
+        self._settings.sync()
+
+    def _set_automatic_start_reset(self, enabled: bool) -> None:
+        self._automatic_start_reset = enabled
+        automatic_detector = getattr(
+            self,
+            "_automatic_start_occupancy_detector",
+            None,
+        )
+        if automatic_detector is not None:
+            automatic_detector.reset()
+        reset_action = getattr(self, "_reset_pieces_button", None)
+        if reset_action is not None:
+            reset_action.setVisible(not enabled)
+        self._settings.setValue(_AUTOMATIC_START_RESET_SETTING, enabled)
         self._settings.sync()
 
     @staticmethod
@@ -2949,6 +2983,7 @@ class CameraWindow(QMainWindow):
 
     def _reset_occupancy(self, status: str) -> None:
         self._occupancy_detector.reset()
+        self._automatic_start_occupancy_detector.reset()
         self._reference_move_tracker.reset_activity()
         self._latest_stable_occupied_ui = None
         self._board_widget.set_occupied_squares(())
@@ -3021,6 +3056,8 @@ class CameraWindow(QMainWindow):
             self._occupancy_status.setText(
                 "Occupancy unavailable: board orientation is unresolved."
             )
+            return
+        if self._detect_automatic_starting_position():
             return
         if (
             self._reference_move_tracker.initialized
@@ -3143,6 +3180,44 @@ class CameraWindow(QMainWindow):
                 f"Occupancy stable: {update.result.occupied_count} occupied, "
                 f"{update.result.empty_count} empty."
             )
+
+    def _detect_automatic_starting_position(self) -> bool:
+        if (
+            not self._automatic_start_reset
+            or self._lichess_game_controller is not None
+            or self._latest_frame is None
+            or self._calibration_result is None
+        ):
+            return False
+        starting_game = LegalGame()
+        if (
+            self._game_mode == "offline-game"
+            and self._legal_game.fen == starting_game.fen
+            and self._piece_synchronizer.position == starting_game.position
+        ):
+            return False
+        try:
+            update = self._automatic_start_occupancy_detector.observe(
+                self._latest_frame,
+                self._calibration_result.mapping.camera_grid,
+            )
+        except (ValueError, cv2.error) as error:
+            self._occupancy_status.setText(
+                f"Automatic starting-position detection unavailable: {error}"
+            )
+            return False
+        if update.state != "stable" or update.result is None:
+            return False
+        occupied_ui = frozenset(
+            rotate_square(row, column, -self._board_quarter_turns)
+            for row, column in update.result.occupied_squares
+        )
+        if occupied_ui != starting_occupied_squares():
+            return False
+        self._activate_offline_after_reset = True
+        self._automatic_start_reset_recovery = False
+        self._complete_starting_position_reset(occupied_ui)
+        return True
 
     def _update_reference_move_tracking(self) -> None:
         if self._latest_frame is None or self._calibration_result is None:
@@ -4004,7 +4079,14 @@ class CameraWindow(QMainWindow):
                 "Reset verification finished without changing the "
                 "logical position."
             )
-            if self._activate_offline_after_reset:
+            if self._automatic_start_reset_recovery:
+                self._automatic_start_reset_recovery = False
+                self._activate_offline_after_reset = False
+                QTimer.singleShot(
+                    0,
+                    self._show_offline_mode_recovery_dialog,
+                )
+            elif self._activate_offline_after_reset:
                 self._reset_to_start_requested = True
                 self._piece_status.setText(
                     "Arrange all pieces in the standard starting position "
@@ -4014,7 +4096,10 @@ class CameraWindow(QMainWindow):
         self._piece_synchronizer.reset()
         self._legal_game.reset()
         if self._activate_offline_after_reset:
+            self._automatic_start_reset_recovery = False
             self._activate_offline_after_reset = False
+            self._pending_offline_restore_game = None
+            self._offline_mode_recovery_error = None
             self._game_mode = "offline-game"
             self._game_mode_selector.blockSignals(True)
             self._game_mode_selector.setCurrentIndex(1)
@@ -4163,8 +4248,8 @@ class CameraWindow(QMainWindow):
         self._lichess_guidance_reprojection_pending = False
         self._guidance_activity_detector.reset()
         self._projector_status.setText(
-            f"Projecting pending Lichess move {move_name} until hand "
-            "movement is detected."
+            f"Projecting pending Lichess move {move_name} until the hand "
+            "leaves the board."
         )
 
     def _observe_lichess_guidance_activity(self) -> None:
@@ -4175,7 +4260,7 @@ class CameraWindow(QMainWindow):
         ):
             return
         try:
-            activity_detected = self._guidance_activity_detector.observe(
+            manipulation_settled = self._guidance_activity_detector.observe(
                 self._latest_frame,
                 self._calibration_result.mapping.camera_grid,
             )
@@ -4184,8 +4269,13 @@ class CameraWindow(QMainWindow):
                 f"Opponent-move hand detection unavailable: {error}"
             )
             return
-        if activity_detected:
+        if manipulation_settled:
             self._begin_lichess_guidance_observation()
+        elif self._guidance_activity_detector.manipulation_active:
+            self._projector_status.setText(
+                "Opponent move in progress; guidance remains projected until "
+                "the hand leaves the board."
+            )
 
     def _begin_lichess_guidance_observation(self) -> None:
         if not self._lichess_guidance_projection_active:
@@ -4199,8 +4289,8 @@ class CameraWindow(QMainWindow):
         self._alignment_monitor.set_black()
         self._reference_move_tracker.reset_activity()
         self._projector_status.setText(
-            "Hand movement detected; projector returned to black and is "
-            "settling before move verification."
+            "Hand left the board; projector returned to black and is settling "
+            "before move verification."
         )
         QTimer.singleShot(
             1000,
@@ -4682,6 +4772,9 @@ class CameraWindow(QMainWindow):
             or restored.position != self._piece_synchronizer.position
         ):
             self._pending_offline_restore_game = restored
+            if self._automatic_start_reset:
+                self._automatic_start_reset_recovery = True
+                self._activate_offline_after_reset = True
             return
         self._legal_game = restored
         self._game_mode = "offline-game"
@@ -4720,7 +4813,24 @@ class CameraWindow(QMainWindow):
             self._legal_game.fen
         )
         self._offline_mode_recovery_error = None
-        self._show_offline_mode_recovery_dialog()
+        if self._automatic_start_reset:
+            self._begin_automatic_offline_start_reset()
+        else:
+            self._show_offline_mode_recovery_dialog()
+
+    def _begin_automatic_offline_start_reset(self) -> None:
+        self._automatic_start_reset_recovery = True
+        self._activate_offline_after_reset = True
+        if (
+            self._latest_frame is not None
+            and self._calibration_result is not None
+        ):
+            self._reset_pieces_to_start()
+        else:
+            self._piece_status.setText(
+                "Waiting for a calibrated camera to check for the standard "
+                "starting position."
+            )
 
     def _show_offline_mode_recovery_dialog(self) -> None:
         target = self._pending_offline_restore_game
@@ -4761,6 +4871,7 @@ class CameraWindow(QMainWindow):
         elif clicked is reset_button:
             self._pending_offline_restore_game = None
             self._offline_mode_recovery_error = None
+            self._automatic_start_reset_recovery = False
             self._activate_offline_after_reset = True
             if (
                 self._latest_frame is not None
@@ -4786,6 +4897,7 @@ class CameraWindow(QMainWindow):
         self._pending_offline_restore_game = None
         self._offline_mode_recovery_error = None
         self._offline_restore_requested = False
+        self._automatic_start_reset_recovery = False
         self._activate_offline_after_reset = False
         self._game_mode = "diagnostic"
         self._game_mode_selector.blockSignals(True)
@@ -4805,6 +4917,7 @@ class CameraWindow(QMainWindow):
     def _begin_offline_position_restore(self, target: LegalGame) -> None:
         self._pending_offline_restore_game = None
         self._offline_mode_recovery_error = None
+        self._automatic_start_reset_recovery = False
         self._activate_offline_after_reset = False
         self._legal_game = target
         self._game_mode = "offline-game"

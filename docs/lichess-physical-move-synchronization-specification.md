@@ -76,10 +76,10 @@ both the physical-position UI board and the projector. Red is reserved for
 illegal correction and reconciliation discrepancies. The physical UI guidance
 shall remain visible while the projector is black for move verification and
 shall clear only when the move is confirmed, replaced, or enters correction.
-If projected guidance is blacked out after detected activity but the settled
-camera image still matches the accepted reference, the same pending guidance
-shall be projected again. Camera or board drift shall not permanently hide an
-unperformed opponent move.
+If projected guidance is blacked out after manipulation settles but the
+settled camera image still matches the accepted reference, the same pending
+guidance shall be projected again. Camera or board drift shall not permanently
+hide an unperformed opponent move.
 
 ### 2.6 Authoritative game information
 
@@ -428,31 +428,36 @@ For a move made by the local player in the browser:
 Reproduce your Lichess move e2-e4 on the physical board.
 ```
 
-Opponent-move guidance shall remain projected until the camera confirms that a
-hand or similarly large moving object has approached the physical board. It
-shall not use a fixed display timeout.
+Opponent-move guidance shall remain projected while the player performs the
+move. A hand or similarly large moving object approaching or entering the
+physical board shall start manipulation tracking but shall not remove the
+guidance. The guidance shall be removed only after the manipulation has become
+quiet for the required consecutive observations, indicating that the hand has
+left the board. It shall not use a fixed display timeout.
 
 Intent detection shall cover the calibrated 8x8 board plus a
 perspective-aware one-square margin around every edge. Motion elsewhere in the
 camera image shall be ignored. This margin ensures that a hand approaching a
-piece on the nearest rank or an outer file can trigger blackout even when only
-fingertips enter the 64-square board area.
+piece on the nearest rank or an outer file starts manipulation tracking even
+when only fingertips enter the 64-square board area.
 
-The intent detector may compare frames captured under the same static guidance
-projection, but its output shall only request projector blackout. Its frames
-and scores shall never update occupancy, infer a chess move, or replace the
-accepted reference. The detector shall arm only after one second of static
-projected observations so projector startup cannot be mistaken for hand
-activity. It shall then require a material connected changed region and
-confirmation in consecutive frames.
+The manipulation detector may compare frames captured under the same static
+guidance projection, but its frames and scores shall never update occupancy,
+infer a chess move, or replace the accepted reference. The detector shall arm
+only after one second of static projected observations so projector startup
+cannot be mistaken for hand activity. It shall then require material activity
+in consecutive frames, keep the guidance projected throughout that activity,
+and request projector blackout only after the scene is quiet for the required
+consecutive observations.
 
 ### 10.2 Camera observation
 
-After intent is detected, the guidance projection shall be removed and the
-projector returned to black. The application shall discard frames during a
-one-second projector-settling interval, reset transient tracker activity, and
-only then evaluate change scores, color evidence, obstruction, or settling.
-The durable UI guidance shall remain visible during physical confirmation.
+After manipulation has started and then settled, the guidance projection shall
+be removed and the projector returned to black. The application shall discard
+frames during a one-second projector-settling interval, reset transient
+tracker activity, and only then evaluate change scores, color evidence,
+obstruction, or settling. The durable UI guidance shall remain visible during
+physical confirmation.
 
 Guidance may be shown again when:
 
@@ -965,8 +970,9 @@ promotion slices are implemented:
   automatic camera comparison does not converge.
 - The active ordinary signature is the only legal signature offered to the
   reference tracker.
-- Guidance remains projected until confirmed board-or-halo activity, then the
-  projector returns to black and settles before camera evaluation resumes.
+- Guidance remains projected throughout confirmed board-or-halo manipulation;
+  only after consecutive quiet observations does the projector return to black
+  and settle before camera evaluation resumes.
 - Pending legal guidance remains white on both the physical UI board and
   projector; red remains reserved for correction and reconciliation.
 - Correct physical evidence commits the physical position and reference.
@@ -988,7 +994,7 @@ promotion slices are implemented:
   physical replacement, and exact UCI suffix requirements in section 10.4
   before underpromotion is considered implemented.
 
-The validated automated suite contains 303 passing tests. Live ordinary-move,
+The validated automated suite contains 307 passing tests. Live ordinary-move,
 polling, reconciliation, and guidance acceptance has been exercised on the
 target camera/projector setup. Lichess capture, castling, en passant, and
 auto-queen behavior is automated-test validated and awaits live acceptance.

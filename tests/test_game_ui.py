@@ -79,20 +79,26 @@ def test_stable_menu_preferences_are_persisted() -> None:
         _settings=settings,
         _preferred_lichess_game_id="",
         _promotion_mode="auto-queen",
+        _automatic_start_reset=True,
+        _reset_pieces_button=MagicMock(),
     )
 
     CameraWindow._save_diagnostics_preference_changed(window, False)
     CameraWindow._remember_lichess_game_selection(window, "game1234")
     CameraWindow._set_promotion_mode(window, "select-promoted-piece")
+    CameraWindow._set_automatic_start_reset(window, False)
 
     assert settings.setValue.call_args_list == [
         call("diagnostics/save_snapshots", False),
         call("lichess/selected_game_id", "game1234"),
         call("chess/promotion_mode", "select-promoted-piece"),
+        call("chess/automatic_start_reset", False),
     ]
-    assert settings.sync.call_count == 3
+    assert settings.sync.call_count == 4
     assert window._preferred_lichess_game_id == "game1234"
     assert window._promotion_mode == "select-promoted-piece"
+    assert window._automatic_start_reset is False
+    window._reset_pieces_button.setVisible.assert_called_once_with(True)
 
 
 def test_created_ai_game_follows_exact_returned_id() -> None:
@@ -397,16 +403,131 @@ def test_offline_mode_mismatch_is_preserved_for_explicit_recovery() -> None:
         _game_mode="diagnostic",
         _pending_offline_restore_game=None,
         _offline_mode_recovery_error=None,
+        _automatic_start_reset_recovery=False,
+        _activate_offline_after_reset=False,
+        _automatic_start_reset=True,
     )
 
     CameraWindow._restore_game_mode(window)
 
     assert window._pending_offline_restore_game is not None
     assert window._pending_offline_restore_game.fen == saved.fen
+    assert window._automatic_start_reset_recovery is True
+    assert window._activate_offline_after_reset is True
     assert window._game_mode == "diagnostic"
     settings.setValue.assert_not_called()
     settings.remove.assert_not_called()
     settings.sync.assert_not_called()
+
+
+def test_starting_board_automatically_resets_saved_offline_game() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.chess_position import PiecePositionSynchronizer
+
+    saved = LegalGame()
+    saved.apply_move((6, 4), (4, 4))
+    synchronizer = PiecePositionSynchronizer()
+    synchronizer.reset()
+    settings = MagicMock()
+    settings.value.side_effect = lambda key, default="": {
+        "game/mode": "offline-game",
+        "game/offline_fen": saved.fen,
+    }.get(key, default)
+    window = SimpleNamespace(
+        _settings=settings,
+        _piece_synchronizer=synchronizer,
+        _legal_game=LegalGame(),
+        _game_mode="diagnostic",
+        _pending_offline_restore_game=None,
+        _offline_mode_recovery_error=None,
+        _automatic_start_reset_recovery=False,
+        _activate_offline_after_reset=False,
+        _automatic_start_reset=True,
+    )
+
+    CameraWindow._restore_game_mode(window)
+
+    assert window._pending_offline_restore_game is not None
+    assert window._automatic_start_reset_recovery is True
+    assert window._activate_offline_after_reset is True
+    assert window._game_mode == "diagnostic"
+
+
+def test_disabled_automatic_start_reset_preserves_recovery_prompt() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.chess_position import PiecePositionSynchronizer
+
+    saved = LegalGame()
+    saved.apply_move((6, 4), (4, 4))
+    synchronizer = PiecePositionSynchronizer()
+    synchronizer.reset()
+    settings = MagicMock()
+    settings.value.side_effect = lambda key, default="": {
+        "game/mode": "offline-game",
+        "game/offline_fen": saved.fen,
+    }.get(key, default)
+    window = SimpleNamespace(
+        _settings=settings,
+        _piece_synchronizer=synchronizer,
+        _legal_game=LegalGame(),
+        _game_mode="diagnostic",
+        _pending_offline_restore_game=None,
+        _offline_mode_recovery_error=None,
+        _automatic_start_reset_recovery=False,
+        _activate_offline_after_reset=False,
+        _automatic_start_reset=False,
+    )
+
+    CameraWindow._restore_game_mode(window)
+
+    assert window._pending_offline_restore_game is not None
+    assert window._automatic_start_reset_recovery is False
+    assert window._activate_offline_after_reset is False
+
+
+def test_stable_starting_occupancy_triggers_automatic_reset() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.chess_position import starting_occupied_squares
+
+    detector = MagicMock()
+    detector.observe.return_value = SimpleNamespace(
+        state="stable",
+        result=SimpleNamespace(
+            occupied_squares=starting_occupied_squares()
+        ),
+    )
+    window = SimpleNamespace(
+        _automatic_start_reset=True,
+        _lichess_game_controller=None,
+        _latest_frame=object(),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(camera_grid=object())
+        ),
+        _game_mode="diagnostic",
+        _legal_game=LegalGame(),
+        _piece_synchronizer=SimpleNamespace(position={}),
+        _automatic_start_occupancy_detector=detector,
+        _board_quarter_turns=0,
+        _activate_offline_after_reset=False,
+        _automatic_start_reset_recovery=True,
+        _occupancy_status=MagicMock(),
+        _complete_starting_position_reset=MagicMock(),
+    )
+
+    detected = CameraWindow._detect_automatic_starting_position(window)
+
+    assert detected is True
+    assert window._activate_offline_after_reset is True
+    assert window._automatic_start_reset_recovery is False
+    window._complete_starting_position_reset.assert_called_once_with(
+        starting_occupied_squares()
+    )
 
 
 def test_matching_offline_mode_is_restored() -> None:
@@ -431,6 +552,9 @@ def test_matching_offline_mode_is_restored() -> None:
         _game_mode="diagnostic",
         _pending_offline_restore_game=None,
         _offline_mode_recovery_error=None,
+        _automatic_start_reset_recovery=False,
+        _activate_offline_after_reset=False,
+        _automatic_start_reset=True,
     )
 
     CameraWindow._restore_game_mode(window)

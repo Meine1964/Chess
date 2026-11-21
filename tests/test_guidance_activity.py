@@ -55,23 +55,30 @@ def test_projector_transition_during_one_second_arming_is_ignored() -> None:
     assert not detector.observe(projected, _camera_grid())
 
 
-def test_activity_on_board_requires_consecutive_observations() -> None:
+def test_activity_on_board_keeps_guidance_until_scene_is_quiet() -> None:
     frame = _frame()
     changed = frame.copy()
     cv2.rectangle(changed, (430, 430), (500, 560), (20, 20, 20), -1)
     detector = _armed_detector(frame)
 
     assert not detector.observe(changed, _camera_grid())
+    assert not detector.observe(changed, _camera_grid())
+    assert detector.manipulation_active
+    for _ in range(4):
+        assert not detector.observe(changed, _camera_grid())
     assert detector.observe(changed, _camera_grid())
 
 
-def test_activity_in_near_edge_halo_triggers_blackout_intent() -> None:
+def test_activity_in_near_edge_halo_waits_for_quiet_before_blackout() -> None:
     frame = _frame()
     changed = frame.copy()
     cv2.rectangle(changed, (430, 115), (510, 185), (20, 20, 20), -1)
     detector = _armed_detector(frame)
 
     assert not detector.observe(changed, _camera_grid())
+    assert not detector.observe(changed, _camera_grid())
+    for _ in range(4):
+        assert not detector.observe(changed, _camera_grid())
     assert detector.observe(changed, _camera_grid())
 
 
@@ -127,8 +134,8 @@ def test_pending_lichess_guidance_has_no_fixed_timeout() -> None:
     )
     window._guidance_activity_detector.reset.assert_called_once_with()
     window._projector_status.setText.assert_called_once_with(
-        "Projecting pending Lichess move e7-e5 until hand movement is "
-        "detected."
+        "Projecting pending Lichess move e7-e5 until the hand leaves the "
+        "board."
     )
 
 
@@ -199,7 +206,7 @@ def test_en_passant_guidance_projects_all_three_squares() -> None:
     )
 
 
-def test_hand_activity_blacks_projector_and_waits_for_settling() -> None:
+def test_settled_manipulation_blacks_projector_before_observation() -> None:
     window = SimpleNamespace(
         _lichess_guidance_projection_active=True,
         _lichess_guidance_blackout_pending=False,
@@ -226,6 +233,30 @@ def test_hand_activity_blacks_projector_and_waits_for_settling() -> None:
     assert single_shot.call_args.args[0] == 1000
     single_shot.call_args.args[1]()
     window._finish_lichess_guidance_blackout.assert_called_once_with(4)
+
+
+def test_active_manipulation_keeps_opponent_guidance_projected() -> None:
+    detector = MagicMock()
+    detector.observe.return_value = False
+    detector.manipulation_active = True
+    window = SimpleNamespace(
+        _latest_frame=object(),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(camera_grid=object())
+        ),
+        _lichess_guidance_projection_active=True,
+        _guidance_activity_detector=detector,
+        _projector_status=MagicMock(),
+        _begin_lichess_guidance_observation=MagicMock(),
+    )
+
+    CameraWindow._observe_lichess_guidance_activity(window)
+
+    window._begin_lichess_guidance_observation.assert_not_called()
+    window._projector_status.setText.assert_called_once_with(
+        "Opponent move in progress; guidance remains projected until the hand "
+        "leaves the board."
+    )
 
 
 def test_unchanged_board_restores_pending_lichess_guidance() -> None:

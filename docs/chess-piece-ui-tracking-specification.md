@@ -396,7 +396,18 @@ without legal turn enforcement. It shall not silently replace an active or
 persisted offline game.
 
 When the saved legal and accepted physical piece maps differ, the application
+shall first run live starting-position verification with the projector black.
+If all pieces occupy the standard starting squares, it shall automatically
+reset legal, physical, reference, and UI state together, activate Offline
+legal mode, persist that state, and be ready for White's first move. If the
+verified occupancy is not the standard starting position, the application
 shall show a modal recovery choice:
+
+When automatic starting-position reset is enabled, the same stable occupancy
+check shall run passively while the projector is black and no Lichess game is
+active, including in Board setup / diagnostic mode. Physically arranging the
+standard setup shall therefore trigger reset and Offline legal readiness
+without requiring a mode-selection attempt.
 
 - **Restore saved offline position** keeps the saved FEN authoritative and
   enters persistent correction guidance until the camera confirms that
@@ -424,9 +435,13 @@ and accessible name shall state the same turn or game-over information.
 
 ## 14. Recovery and Reset
 
-The UI shall provide an explicit action equivalent to:
+When automatic starting-position reset is disabled, the UI shall provide an
+explicit action equivalent to:
 
 `Reset pieces to starting position`
+
+When automatic starting-position reset is enabled, this Camera-menu action
+shall be hidden.
 
 The action shall:
 

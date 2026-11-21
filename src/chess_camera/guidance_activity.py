@@ -10,10 +10,15 @@ class GuidanceActivityDetector:
         *,
         arming_observations: int = 10,
         confirmation_observations: int = 2,
+        quiet_observations: int = 5,
         pixel_difference_threshold: int = 18,
         minimum_square_fraction: float = 0.06,
     ) -> None:
-        if arming_observations < 1 or confirmation_observations < 1:
+        if (
+            arming_observations < 1
+            or confirmation_observations < 1
+            or quiet_observations < 1
+        ):
             raise ValueError("Observation requirements must be positive.")
         if not 1 <= pixel_difference_threshold <= 255:
             raise ValueError("The pixel difference threshold is invalid.")
@@ -21,11 +26,18 @@ class GuidanceActivityDetector:
             raise ValueError("The minimum square fraction is invalid.")
         self._arming_observations = arming_observations
         self._confirmation_observations = confirmation_observations
+        self._quiet_observations = quiet_observations
         self._pixel_difference_threshold = pixel_difference_threshold
         self._minimum_square_fraction = minimum_square_fraction
         self._baseline: np.ndarray | None = None
         self._arming_count = 0
         self._activity_count = 0
+        self._manipulation_active = False
+        self._quiet_count = 0
+
+    @property
+    def manipulation_active(self) -> bool:
+        return self._manipulation_active
 
     def reset(self) -> None:
         self._baseline = None
@@ -93,11 +105,24 @@ class GuidanceActivityDetector:
         minimum_component = (
             _median_square_area(grid) * self._minimum_square_fraction
         )
-        if largest_component >= minimum_component:
+        changed_materially = largest_component >= minimum_component
+        if not self._manipulation_active and changed_materially:
             self._activity_count += 1
-        else:
+            if self._activity_count >= self._confirmation_observations:
+                self._manipulation_active = True
+                self._baseline = gray
+                self._quiet_count = 0
+            return False
+        if not self._manipulation_active:
             self._activity_count = 0
-        return self._activity_count >= self._confirmation_observations
+            return False
+
+        self._baseline = gray
+        if changed_materially:
+            self._quiet_count = 0
+        else:
+            self._quiet_count += 1
+        return self._quiet_count >= self._quiet_observations
 
 
 def _guidance_region_mask(

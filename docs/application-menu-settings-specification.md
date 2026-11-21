@@ -127,7 +127,9 @@ menu actions. Moving a command shall not change its operational behavior.
 
 - **Devices:** camera and projector display selectors.
 - **Chess:** promotion mode with **Auto-queen** and
-  **Select promoted piece** choices. Auto-queen remains the default.
+  **Select promoted piece** choices, plus **Automatically reset a detected
+  starting position**. Auto-queen and automatic starting-position reset remain
+  the defaults.
 - **Diagnostics:** the **Save diagnostic snapshots** setting.
 - **Lichess:** current connection status, persistent AI-game defaults for AI
   level, player color, and clock, plus a fresh configured/not-configured check
@@ -146,6 +148,20 @@ local promotion as queen promotion once its physical evidence is complete.
 workflow defined by the Lichess physical-move synchronization specification.
 Changing the setting while a promotion workflow is already pending shall not
 change that workflow; the new mode shall apply to the next promotion.
+
+The automatic starting-position reset setting shall persist and default to
+enabled. When enabled and no Lichess game is active, the application shall
+passively verify live occupancy while the projector is black. A stable standard
+starting setup shall automatically trigger the reset even when the application
+is already in Board setup / diagnostic mode; the user shall not have to select
+Offline mode first. An Offline-mode position mismatch shall use the same live
+verification. When disabled, the application shall show the existing recovery
+dialog without attempting an automatic reset. While automatic reset is
+enabled, the Camera menu shall hide **Reset pieces to starting position**
+because the command is redundant. The command shall reappear when automatic
+reset is disabled. The recovery dialog's **Reset to starting position** choice
+shall remain available as a fallback after an automatic check does not find the
+standard setup.
 
 The dialog shall be populated from the current live selectors each time it is
 opened so camera and screen hot-plug changes remain authoritative.
@@ -227,8 +243,11 @@ interaction rows.
   Startup shall not silently replace a persisted Offline legal game choice
   with Board setup / diagnostic.
 - If the saved offline legal position and restored accepted physical position
-  differ, startup or an attempt to activate Offline legal game shall show an
-  explicit modal explanation and offer:
+  differ, startup or an attempt to activate Offline legal game shall first
+  verify the live physical occupancy automatically. If it is the standard
+  starting position, the application shall perform the Reset to starting
+  position behavior without prompting and be ready for White's first move.
+  Otherwise it shall show an explicit modal explanation and offer:
   - **Restore saved offline position:** retain the saved legal game and enter
     correction guidance until the physical board matches it.
   - **Reset to starting position:** verify the standard physical setup, reset
@@ -273,7 +292,7 @@ interaction rows.
 ## 7. Validation Status
 
 The implemented menu bar exposes File, Camera, Game, Projector, and
-Calibration menus. The complete automated suite contains 303 passing tests,
+Calibration menus. The complete automated suite contains 307 passing tests,
 including menu structure, transactional selector-copy behavior, existing UI
 state transitions, reconciliation controls, and the readable interaction-font
 minimum. Token-status coverage confirms configured and missing environment
