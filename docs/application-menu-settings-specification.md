@@ -28,22 +28,36 @@ main window.
 
 - **Mode** contains mutually exclusive **Diagnostic movement** and
   **Offline legal game** actions.
-- **Lichess** contains **Start new Lichess game**, the dynamic
-  connect/disconnect action, and an **Active game** submenu populated from the
-  current ongoing games.
+- **Lichess** contains the dynamic connect/disconnect action and an
+  **Active game** submenu populated from the current ongoing games.
 
-**Start new Lichess game** shall be available while no Lichess game is loaded
-and after the loaded game has finished, but not during active play. It shall
-open the Lichess website in the system browser, clear the obsolete remembered
-game selection only after the browser accepts the URL, and ensure the
-application is connected so it can detect the newly started game. The
-completed board, players, and result shall remain visible until a replacement
-snapshot arrives. If the browser cannot be opened, the existing selection and
-state shall remain unchanged and the failure shall be reported. If other games
-were already ongoing when the action was invoked, the application shall
-remember their IDs and automatically select the single newly appearing game.
-It shall require explicit selection only when no unique new game can be
-identified.
+The Lichess position panel shall contain a centered Lichess-style icon control
+bar beneath the game status. It shall show takeback, draw, resign, and new-game
+buttons with tooltips and accessible names. Takeback remains a visible disabled
+placeholder and no takeback request shall be submitted. Draw and resign shall
+be enabled only for an active selected game with an authenticated Lichess
+client and while no other game-control request is pending.
+
+The draw button shall submit a draw offer through the Board API and disable
+after Lichess confirms the request. The resign button shall require explicit
+confirmation before submitting a resignation. Both operations shall execute
+outside the UI thread, disable game-control buttons while pending, report
+server rejection explicitly, and report an uncertain outcome when the
+connection fails before confirmation. Resignation shall remain disabled after
+submission until authoritative terminal game state arrives.
+
+The new-game button shall be available while no Lichess game is loaded and
+after the loaded game has finished, but not during active play or while the
+application is already waiting for a new game. It shall open the Lichess
+website in the system browser, clear the obsolete remembered game selection
+only after the browser accepts the URL, and ensure the application is
+connected so it can detect the newly started game. The completed board,
+players, and result shall remain visible until a replacement snapshot arrives.
+If the browser cannot be opened, the existing selection and state shall remain
+unchanged and the failure shall be reported. If other games were already
+ongoing when the button was invoked, the application shall remember their IDs
+and automatically select the single newly appearing game. It shall require
+explicit selection only when no unique new game can be identified.
 
 ### 2.4 Projector
 
@@ -138,11 +152,12 @@ The main window shall retain:
 - Camera, detection, projector, alignment, occupancy, piece, Lichess
   connection, and synchronization status text.
 
-The main-window geometry shall persist on a normal close and restore after the
-next startup. Qt's geometry state is authoritative so the previous screen,
-position, size, and maximized state are restored together. If the stored
-geometry is absent or invalid, the application shall use its default
-1500-by-900 size.
+The main-window placement shall persist on a normal close and restore after
+the next startup. The application shall store the named screen, position
+relative to that screen's available area, normal size, and maximized state.
+Qt's native geometry state shall remain a fallback when the named screen or
+explicit placement is unavailable. If all stored placement data is absent or
+invalid, the application shall use its default 1500-by-900 size.
 
 The lower-left interaction panel shall use a minimum 12-point font for its
 turn indicator text, calibration state, progress text, status messages, and
@@ -188,7 +203,7 @@ interaction rows.
 ## 7. Validation Status
 
 The implemented menu bar exposes File, Camera, Game, Projector, and
-Calibration menus. The complete automated suite contains 266 passing tests,
+Calibration menus. The complete automated suite contains 273 passing tests,
 including menu structure, transactional selector-copy behavior, existing UI
 state transitions, reconciliation controls, and the readable interaction-font
 minimum. Token-status coverage confirms configured and missing environment
@@ -200,5 +215,5 @@ full-window smoke check also confirms that the complete Qt window constructs
 the expected menu bar and File > Settings action. Projector-refresh coverage
 confirms that current Qt display enumeration replaces stale cached availability
 without changing the remembered selection. Window-state coverage confirms that
-geometry is written only on an accepted close and restored through Qt's native
-geometry state.
+placement is written only on an accepted close and restored through the named
+screen when it remains available.

@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QScrollArea,
     QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -83,6 +84,8 @@ from .lichess_client import (
 from .lichess_game_controller import LichessGameController
 from .lichess_worker import (
     LichessConnectionWorker,
+    LichessGameAction,
+    LichessGameActionWorker,
     LichessMoveSubmissionWorker,
 )
 from .occupancy import (
@@ -115,6 +118,12 @@ _SAVE_DIAGNOSTICS_SETTING = "diagnostics/save_snapshots"
 _LICHESS_GAME_SETTING = "lichess/selected_game_id"
 _PROMOTION_MODE_SETTING = "chess/promotion_mode"
 _WINDOW_GEOMETRY_SETTING = "window/main_geometry"
+_WINDOW_SCREEN_SETTING = "window/main_screen"
+_WINDOW_X_OFFSET_SETTING = "window/main_x_offset"
+_WINDOW_Y_OFFSET_SETTING = "window/main_y_offset"
+_WINDOW_WIDTH_SETTING = "window/main_width"
+_WINDOW_HEIGHT_SETTING = "window/main_height"
+_WINDOW_MAXIMIZED_SETTING = "window/main_maximized"
 _PIECE_POSITION_SETTING = "pieces/accepted_position"
 _GAME_MODE_SETTING = "game/mode"
 _LEGAL_GAME_FEN_SETTING = "game/offline_fen"
@@ -451,6 +460,25 @@ def _set_readable_interaction_font(widget: QWidget) -> None:
     widget.setFont(font)
 
 
+def _configure_lichess_control_button(
+    button: QToolButton,
+    symbol: str,
+    accessible_name: str,
+    tooltip: str,
+    *,
+    enabled: bool,
+) -> None:
+    button.setText(symbol)
+    button.setAccessibleName(accessible_name)
+    button.setToolTip(tooltip)
+    button.setEnabled(enabled)
+    button.setAutoRaise(True)
+    button.setMinimumSize(40, 36)
+    font = button.font()
+    font.setPointSize(max(font.pointSize(), 18))
+    button.setFont(font)
+
+
 def _restore_window_geometry(
     window: QMainWindow,
     stored_geometry: object,
@@ -462,6 +490,91 @@ def _restore_window_geometry(
     else:
         return False
     return not geometry.isEmpty() and window.restoreGeometry(geometry)
+
+
+def _save_window_placement(
+    window: QMainWindow,
+    settings: QSettings,
+) -> None:
+    settings.setValue(_WINDOW_GEOMETRY_SETTING, window.saveGeometry())
+    screen = window.screen()
+    if screen is not None:
+        geometry = (
+            window.normalGeometry()
+            if window.isMaximized()
+            else window.geometry()
+        )
+        available = screen.availableGeometry()
+        settings.setValue(_WINDOW_SCREEN_SETTING, screen.name())
+        settings.setValue(
+            _WINDOW_X_OFFSET_SETTING,
+            geometry.x() - available.x(),
+        )
+        settings.setValue(
+            _WINDOW_Y_OFFSET_SETTING,
+            geometry.y() - available.y(),
+        )
+        settings.setValue(_WINDOW_WIDTH_SETTING, geometry.width())
+        settings.setValue(_WINDOW_HEIGHT_SETTING, geometry.height())
+        settings.setValue(_WINDOW_MAXIMIZED_SETTING, window.isMaximized())
+    settings.sync()
+
+
+def _restore_window_placement(
+    window: QMainWindow,
+    settings: QSettings,
+) -> bool:
+    screen_name = str(settings.value(_WINDOW_SCREEN_SETTING, ""))
+    screen = next(
+        (
+            candidate
+            for candidate in QGuiApplication.screens()
+            if candidate.name() == screen_name
+        ),
+        None,
+    )
+    width = settings.value(_WINDOW_WIDTH_SETTING)
+    height = settings.value(_WINDOW_HEIGHT_SETTING)
+    x_offset = settings.value(_WINDOW_X_OFFSET_SETTING)
+    y_offset = settings.value(_WINDOW_Y_OFFSET_SETTING)
+    if (
+        screen is not None
+        and isinstance(width, int)
+        and isinstance(height, int)
+        and isinstance(x_offset, int)
+        and isinstance(y_offset, int)
+        and width > 0
+        and height > 0
+    ):
+        available = screen.availableGeometry()
+        restored_width = min(width, available.width())
+        restored_height = min(height, available.height())
+        restored_x = available.x() + max(
+            0,
+            min(x_offset, available.width() - restored_width),
+        )
+        restored_y = available.y() + max(
+            0,
+            min(y_offset, available.height() - restored_height),
+        )
+        window.setGeometry(
+            restored_x,
+            restored_y,
+            restored_width,
+            restored_height,
+        )
+        if _stored_boolean(
+            settings.value(_WINDOW_MAXIMIZED_SETTING, False),
+            False,
+        ):
+            window.setWindowState(
+                window.windowState() | Qt.WindowState.WindowMaximized
+            )
+        return True
+    return _restore_window_geometry(
+        window,
+        settings.value(_WINDOW_GEOMETRY_SETTING),
+    )
 
 
 class CameraWindow(QMainWindow):
@@ -560,6 +673,11 @@ class CameraWindow(QMainWindow):
         self._lichess_submission_worker: (
             LichessMoveSubmissionWorker | None
         ) = None
+        self._lichess_game_action_thread: QThread | None = None
+        self._lichess_game_action_worker: LichessGameActionWorker | None = None
+        self._pending_lichess_game_action: LichessGameAction | None = None
+        self._draw_offer_game_id: str | None = None
+        self._resign_requested_game_id: str | None = None
         self._pending_lichess_local_move: (
             tuple[tuple[int, int], tuple[int, int]] | None
         ) = None
@@ -577,6 +695,7 @@ class CameraWindow(QMainWindow):
         self._last_projected_lichess_uci: str | None = None
         self._lichess_guidance_projection_active = False
         self._lichess_guidance_blackout_pending = False
+        self._lichess_guidance_reprojection_pending = False
         self._lichess_guidance_generation = 0
         self._latest_lichess_state: LichessGameState | None = None
         self._latest_lichess_game: LichessGameFull | None = None
@@ -709,11 +828,43 @@ class CameraWindow(QMainWindow):
         self._lichess_button.triggered.connect(
             self._toggle_lichess_connection
         )
-        self._start_new_lichess_game_action = QAction(
-            "Start new Lichess game",
-            self,
+        self._lichess_takeback_button = QToolButton(self)
+        _configure_lichess_control_button(
+            self._lichess_takeback_button,
+            "↶",
+            "Request takeback",
+            "Request takeback (not implemented)",
+            enabled=False,
         )
-        self._start_new_lichess_game_action.triggered.connect(
+        self._lichess_draw_button = QToolButton(self)
+        _configure_lichess_control_button(
+            self._lichess_draw_button,
+            "½",
+            "Offer draw",
+            "Offer draw",
+            enabled=False,
+        )
+        self._lichess_draw_button.clicked.connect(self._offer_lichess_draw)
+        self._lichess_resign_button = QToolButton(self)
+        _configure_lichess_control_button(
+            self._lichess_resign_button,
+            "⚑",
+            "Resign game",
+            "Resign game",
+            enabled=False,
+        )
+        self._lichess_resign_button.clicked.connect(
+            self._confirm_lichess_resignation
+        )
+        self._start_new_lichess_game_button = QToolButton(self)
+        _configure_lichess_control_button(
+            self._start_new_lichess_game_button,
+            "+",
+            "Start new Lichess game",
+            "Start new Lichess game",
+            enabled=True,
+        )
+        self._start_new_lichess_game_button.clicked.connect(
             self._start_new_lichess_game
         )
         self._lichess_game_selector = QComboBox()
@@ -933,6 +1084,15 @@ class CameraWindow(QMainWindow):
         white_information_layout.addWidget(self._lichess_white_player)
         white_information_layout.addStretch(1)
         white_information_layout.addWidget(self._lichess_white_clock)
+        lichess_controls_layout = QHBoxLayout()
+        lichess_controls_layout.addStretch(1)
+        lichess_controls_layout.addWidget(self._lichess_takeback_button)
+        lichess_controls_layout.addWidget(self._lichess_draw_button)
+        lichess_controls_layout.addWidget(self._lichess_resign_button)
+        lichess_controls_layout.addWidget(
+            self._start_new_lichess_game_button
+        )
+        lichess_controls_layout.addStretch(1)
 
         lichess_panel = QGroupBox("Lichess position")
         _set_readable_interaction_font(lichess_panel)
@@ -943,6 +1103,7 @@ class CameraWindow(QMainWindow):
         lichess_panel_layout.addWidget(
             self._lichess_game_information_status
         )
+        lichess_panel_layout.addLayout(lichess_controls_layout)
         lichess_panel.setLayout(lichess_panel_layout)
 
         interaction_content = QWidget()
@@ -989,10 +1150,7 @@ class CameraWindow(QMainWindow):
 
         self.setWindowTitle("Chessboard Camera Detection")
         self.resize(1500, 900)
-        _restore_window_geometry(
-            self,
-            self._settings.value(_WINDOW_GEOMETRY_SETTING),
-        )
+        _restore_window_placement(self, self._settings)
         self._projector_selector.currentIndexChanged.connect(
             self._projector_selection_changed
         )
@@ -1062,8 +1220,6 @@ class CameraWindow(QMainWindow):
         self._sync_game_mode_actions()
 
         lichess_menu = game_menu.addMenu("Lichess")
-        lichess_menu.addAction(self._start_new_lichess_game_action)
-        lichess_menu.addSeparator()
         lichess_menu.addAction(self._lichess_button)
         lichess_menu.addSeparator()
         self._lichess_games_menu = lichess_menu.addMenu("Active game")
@@ -2644,6 +2800,7 @@ class CameraWindow(QMainWindow):
                 tracker_update=update,
                 include_images=True,
             )
+        self._restore_pending_lichess_guidance_after_no_change(update)
         rejected_move = self._last_rejected_move
         correction_restored = (
             rejected_move is not None
@@ -3200,6 +3357,7 @@ class CameraWindow(QMainWindow):
         self._lichess_guidance_generation += 1
         self._lichess_guidance_projection_active = True
         self._lichess_guidance_blackout_pending = False
+        self._lichess_guidance_reprojection_pending = False
         self._guidance_activity_detector.reset()
         self._projector_status.setText(
             f"Projecting pending Lichess move {move_name} until hand "
@@ -3232,6 +3390,7 @@ class CameraWindow(QMainWindow):
         generation = self._lichess_guidance_generation
         self._lichess_guidance_projection_active = False
         self._lichess_guidance_blackout_pending = True
+        self._lichess_guidance_reprojection_pending = True
         self._guidance_activity_detector.reset()
         self._projector_window.show_black()
         self._alignment_monitor.set_black()
@@ -3261,7 +3420,27 @@ class CameraWindow(QMainWindow):
         self._lichess_guidance_generation += 1
         self._lichess_guidance_projection_active = False
         self._lichess_guidance_blackout_pending = False
+        self._lichess_guidance_reprojection_pending = False
         self._guidance_activity_detector.reset()
+
+    def _restore_pending_lichess_guidance_after_no_change(
+        self,
+        update: ReferenceTrackerUpdate,
+    ) -> None:
+        controller = self._lichess_game_controller
+        if (
+            update.state != "watching"
+            or not self._lichess_guidance_reprojection_pending
+            or controller is None
+            or controller.expected_signature is None
+        ):
+            return
+        self._update_lichess_synchronization_projection()
+        if self._lichess_guidance_projection_active:
+            self._occupancy_status.setText(
+                "No physical move detected; pending Lichess guidance "
+                "restored."
+            )
 
     def _reject_unconfirmed_lichess_move(
         self,
@@ -3826,6 +4005,8 @@ class CameraWindow(QMainWindow):
         self._lichess_opponent_name = ""
         self._lichess_game_controller = None
         self._last_projected_lichess_uci = None
+        self._draw_offer_game_id = None
+        self._resign_requested_game_id = None
         self._lichess_game_selector.blockSignals(True)
         self._lichess_game_selector.clear()
         self._lichess_game_selector.addItem(
@@ -3849,12 +4030,142 @@ class CameraWindow(QMainWindow):
                 "Lichess website opened. Start the game there; "
                 "this application is waiting for it."
             )
-        self._start_new_lichess_game_action.setEnabled(
+        self._start_new_lichess_game_button.setEnabled(
             not self._awaiting_new_lichess_game
         )
         self._record_runtime_diagnostic(
             "lichess-new-game-requested",
             "Opened the Lichess website and started waiting for a new game.",
+        )
+
+    def _offer_lichess_draw(self) -> None:
+        self._start_lichess_game_action("offer-draw")
+
+    def _confirm_lichess_resignation(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Resign Lichess game",
+            "Resign the current Lichess game?",
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._start_lichess_game_action("resign")
+
+    def _start_lichess_game_action(
+        self,
+        action: LichessGameAction,
+    ) -> None:
+        if (
+            self._lichess_client is None
+            or self._lichess_game_id is None
+            or _can_start_new_lichess_game(self._latest_lichess_state)
+            or self._lichess_game_action_thread is not None
+        ):
+            self._lichess_status.setText(
+                "The Lichess game control is not available."
+            )
+            return
+        thread = QThread(self)
+        worker = LichessGameActionWorker(
+            self._lichess_client,
+            self._lichess_game_id,
+            action,
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(self._lichess_game_action_succeeded)
+        worker.rejected.connect(self._lichess_game_action_rejected)
+        worker.uncertain.connect(self._lichess_game_action_uncertain)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._lichess_game_action_finished)
+        thread.finished.connect(thread.deleteLater)
+        self._lichess_game_action_thread = thread
+        self._lichess_game_action_worker = worker
+        self._pending_lichess_game_action = action
+        self._update_lichess_game_control_buttons()
+        description = "draw offer" if action == "offer-draw" else "resignation"
+        self._lichess_status.setText(
+            f"Submitting Lichess {description}..."
+        )
+        thread.start()
+
+    def _lichess_game_action_succeeded(
+        self,
+        game_id: str,
+        action: str,
+    ) -> None:
+        if action == "offer-draw":
+            self._draw_offer_game_id = game_id
+            message = "Lichess draw offer submitted."
+        else:
+            self._resign_requested_game_id = game_id
+            message = (
+                "Lichess resignation submitted; awaiting final game state."
+            )
+        self._pending_lichess_game_action = None
+        self._lichess_status.setText(message)
+        self._record_runtime_diagnostic(
+            "lichess-game-action-succeeded",
+            message,
+            details={"game_id": game_id, "action": action},
+        )
+        self._update_lichess_game_control_buttons()
+
+    def _lichess_game_action_rejected(
+        self,
+        game_id: str,
+        action: str,
+        message: str,
+    ) -> None:
+        self._pending_lichess_game_action = None
+        self._lichess_status.setText(message)
+        self._record_runtime_diagnostic(
+            "lichess-game-action-rejected",
+            message,
+            details={"game_id": game_id, "action": action},
+        )
+        self._update_lichess_game_control_buttons()
+
+    def _lichess_game_action_uncertain(
+        self,
+        game_id: str,
+        action: str,
+        message: str,
+    ) -> None:
+        self._pending_lichess_game_action = None
+        self._lichess_status.setText(
+            f"Lichess {action} outcome is uncertain. {message}"
+        )
+        self._record_runtime_diagnostic(
+            "lichess-game-action-uncertain",
+            message,
+            details={"game_id": game_id, "action": action},
+        )
+        self._update_lichess_game_control_buttons()
+
+    def _update_lichess_game_control_buttons(self) -> None:
+        active = (
+            self._lichess_client is not None
+            and self._lichess_game_id is not None
+            and self._latest_lichess_state is not None
+            and not _can_start_new_lichess_game(self._latest_lichess_state)
+        )
+        idle = (
+            self._lichess_game_action_thread is None
+            and self._pending_lichess_game_action is None
+        )
+        self._lichess_draw_button.setEnabled(
+            active
+            and idle
+            and self._draw_offer_game_id != self._lichess_game_id
+        )
+        self._lichess_resign_button.setEnabled(
+            active
+            and idle
+            and self._resign_requested_game_id != self._lichess_game_id
         )
 
     def _lichess_ongoing_games_received(self, value: object) -> None:
@@ -3885,7 +4196,7 @@ class CameraWindow(QMainWindow):
             selected: str | None = None
             if not self._awaiting_new_lichess_game:
                 self._clear_lichess_game_information()
-            self._start_new_lichess_game_action.setEnabled(
+            self._start_new_lichess_game_button.setEnabled(
                 not self._awaiting_new_lichess_game
             )
         elif len(games) == 1:
@@ -3996,19 +4307,23 @@ class CameraWindow(QMainWindow):
                 self._lichess_game_controller = None
                 self._latest_lichess_game = None
                 self._last_projected_lichess_uci = None
+                self._draw_offer_game_id = None
+                self._resign_requested_game_id = None
                 self._clear_lichess_game_information(
                     "Loading Lichess game information."
                 )
             self._lichess_game_id = event.game_id
             self._lichess_player_color = event.color
             self._lichess_opponent_name = event.opponent_name
-            self._start_new_lichess_game_action.setEnabled(False)
+            self._start_new_lichess_game_button.setEnabled(False)
+            self._update_lichess_game_control_buttons()
             self._lichess_status.setText(
                 f"Lichess game {event.game_id} started as "
                 f"{event.color} against {event.opponent_name}; loading state."
             )
         else:
-            self._start_new_lichess_game_action.setEnabled(True)
+            self._start_new_lichess_game_button.setEnabled(True)
+            self._update_lichess_game_control_buttons()
             self._lichess_status.setText(
                 f"Lichess game {event.game_id} finished."
             )
@@ -4027,9 +4342,10 @@ class CameraWindow(QMainWindow):
                 event.game,
                 clocks_available=event.clocks_available,
             )
-            self._start_new_lichess_game_action.setEnabled(
+            self._start_new_lichess_game_button.setEnabled(
                 _can_start_new_lichess_game(event.game.state)
             )
+            self._update_lichess_game_control_buttons()
             self._lichess_status.setText(
                 _lichess_polling_snapshot_message(event)
             )
@@ -4042,9 +4358,10 @@ class CameraWindow(QMainWindow):
                 event,
                 clocks_available=True,
             )
-            self._start_new_lichess_game_action.setEnabled(
+            self._start_new_lichess_game_button.setEnabled(
                 _can_start_new_lichess_game(event.state)
             )
+            self._update_lichess_game_control_buttons()
             self._lichess_status.setText(
                 f"Lichess game {event.game_id}: "
                 f"{event.white.name} (White) vs "
@@ -4059,9 +4376,10 @@ class CameraWindow(QMainWindow):
                     self._latest_lichess_game,
                     clocks_available=self._lichess_clocks_available,
                 )
-            self._start_new_lichess_game_action.setEnabled(
+            self._start_new_lichess_game_button.setEnabled(
                 _can_start_new_lichess_game(event)
             )
+            self._update_lichess_game_control_buttons()
             self._lichess_status.setText(
                 _lichess_game_state_message(event)
             )
@@ -4489,9 +4807,10 @@ class CameraWindow(QMainWindow):
         self._new_lichess_game_existing_ids = None
         self._lichess_button.setText("Connect to Lichess")
         self._lichess_button.setEnabled(True)
-        self._start_new_lichess_game_action.setEnabled(
+        self._start_new_lichess_game_button.setEnabled(
             _can_start_new_lichess_game(self._latest_lichess_state)
         )
+        self._update_lichess_game_control_buttons()
         if self._lichess_disconnect_requested:
             self._lichess_status.setText("Lichess disconnected.")
         self._lichess_disconnect_requested = False
@@ -4501,6 +4820,13 @@ class CameraWindow(QMainWindow):
     def _lichess_submission_finished(self) -> None:
         self._lichess_submission_thread = None
         self._lichess_submission_worker = None
+        if self._close_pending:
+            QTimer.singleShot(0, self.close)
+
+    def _lichess_game_action_finished(self) -> None:
+        self._lichess_game_action_thread = None
+        self._lichess_game_action_worker = None
+        self._update_lichess_game_control_buttons()
         if self._close_pending:
             QTimer.singleShot(0, self.close)
 
@@ -4959,6 +5285,16 @@ class CameraWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if (
+            self._lichess_game_action_thread is not None
+            and self._lichess_game_action_thread.isRunning()
+        ):
+            self._close_pending = True
+            self._lichess_status.setText(
+                "Waiting for the pending Lichess game control before closing."
+            )
+            event.ignore()
+            return
+        if (
             self._lichess_submission_thread is not None
             and self._lichess_submission_thread.isRunning()
         ):
@@ -4981,11 +5317,7 @@ class CameraWindow(QMainWindow):
             self._lichess_worker.request_stop()
             event.ignore()
             return
-        self._settings.setValue(
-            _WINDOW_GEOMETRY_SETTING,
-            self.saveGeometry(),
-        )
-        self._settings.sync()
+        _save_window_placement(self, self._settings)
         self._calibrator.cancel()
         self._alignment_monitor.clear()
         if self._camera is not None:

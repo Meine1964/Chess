@@ -156,6 +156,39 @@ def test_submit_move_requires_positive_confirmation() -> None:
         client.submit_move("p8Jy2ayw", "e2e4")
 
 
+@pytest.mark.parametrize(
+    ("method_name", "path"),
+    (
+        ("offer_draw", "/api/board/game/p8Jy2ayw/draw/yes"),
+        ("resign_game", "/api/board/game/p8Jy2ayw/resign"),
+    ),
+)
+def test_game_controls_use_board_api(
+    method_name: str,
+    path: str,
+) -> None:
+    transport = FakeTransport({})
+    transport.post_responses[path] = {"ok": True}
+    client = LichessReadOnlyClient(
+        "secret-token",
+        transport=transport,
+        user_agent="Chess test client",
+    )
+
+    getattr(client, method_name)("p8Jy2ayw")
+
+    assert transport.requests == [
+        (
+            path,
+            {
+                "Authorization": "Bearer secret-token",
+                "Accept": "application/json",
+                "User-Agent": "Chess test client",
+            },
+        )
+    ]
+
+
 def test_stream_open_callback_and_keepalive_cancellation() -> None:
     event = {
         "type": "gameStart",

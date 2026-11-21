@@ -76,6 +76,10 @@ both the physical-position UI board and the projector. Red is reserved for
 illegal correction and reconciliation discrepancies. The physical UI guidance
 shall remain visible while the projector is black for move verification and
 shall clear only when the move is confirmed, replaced, or enters correction.
+If projected guidance is blacked out after detected activity but the settled
+camera image still matches the accepted reference, the same pending guidance
+shall be projected again. Camera or board drift shall not permanently hide an
+unperformed opponent move.
 
 ### 2.6 Authoritative game information
 
@@ -892,10 +896,11 @@ promotion slices are implemented:
 - Underpromotion explicitly enters reconciliation until computer-based piece
   selection is implemented.
 
-The validated automated suite contains 266 passing tests. Live ordinary-move,
+The validated automated suite contains 273 passing tests. Live ordinary-move,
 polling, reconciliation, and guidance acceptance has been exercised on the
 target camera/projector setup. Lichess capture, castling, en passant, and
 auto-queen behavior is automated-test validated and awaits live acceptance.
 The dedicated player, clock, status, and result display is automated-test
-validated and awaits live acceptance. Underpromotion remains a staged
-limitation.
+validated and awaits live acceptance. Draw-offer and resignation controls are
+automated-test validated and await live acceptance. Underpromotion remains a
+staged limitation.

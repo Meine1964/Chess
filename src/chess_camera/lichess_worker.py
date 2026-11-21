@@ -1,5 +1,6 @@
 from collections.abc import Callable, Collection, Iterator
 from threading import Event, Lock
+from typing import Literal
 
 import chess
 from PySide6.QtCore import QObject, Signal, Slot
@@ -91,6 +92,61 @@ class LichessMoveSubmissionWorker(QObject):
             "Lichess history changed unexpectedly while resolving the "
             "submission outcome.",
         )
+
+
+LichessGameAction = Literal["offer-draw", "resign"]
+
+
+class LichessGameActionWorker(QObject):
+    succeeded = Signal(str, str)
+    rejected = Signal(str, str, str)
+    uncertain = Signal(str, str, str)
+    finished = Signal()
+
+    def __init__(
+        self,
+        client: LichessReadOnlyClient,
+        game_id: str,
+        action: LichessGameAction,
+    ) -> None:
+        super().__init__()
+        self._client = client
+        self._game_id = game_id
+        self._action = action
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            if self._action == "offer-draw":
+                self._client.offer_draw(self._game_id)
+            else:
+                self._client.resign_game(self._game_id)
+        except LichessHTTPError as error:
+            self.rejected.emit(
+                self._game_id,
+                self._action,
+                f"Lichess rejected the request with HTTP {error.status}.",
+            )
+        except (
+            LichessConnectionError,
+            LichessProtocolError,
+            OSError,
+        ) as error:
+            self.uncertain.emit(
+                self._game_id,
+                self._action,
+                f"{error} Refresh the game before repeating this request.",
+            )
+        except LichessError as error:
+            self.rejected.emit(
+                self._game_id,
+                self._action,
+                str(error),
+            )
+        else:
+            self.succeeded.emit(self._game_id, self._action)
+        finally:
+            self.finished.emit()
 
 
 class LichessConnectionWorker(QObject):

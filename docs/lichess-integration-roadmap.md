@@ -682,13 +682,20 @@ without clocks show unavailable clocks rather than zero. Incremental state
 updates retain player identity from the latest full snapshot.
 
 **Start-new-game slice:** Implemented and automated-test validated. The native
-menu action opens the Lichess website for game creation and then detects the
-game through the existing account connection. Native challenge creation is
-deferred until time-control, opponent, color, and rated/casual setup are
-designed. The action does not discard completed-game information before the
-replacement game is received. Existing ongoing-game IDs are excluded when
-identifying the newly created game so unrelated older games do not force an
-unnecessary manual selection.
+Lichess-panel button opens the Lichess website for game creation and then
+detects the game through the existing account connection. Native challenge
+creation is deferred until time-control, opponent, color, and rated/casual
+setup are designed. The button does not discard completed-game information
+before the replacement game is received. Existing ongoing-game IDs are
+excluded when identifying the newly created game so unrelated older games do
+not force an unnecessary manual selection.
+
+**Game-control bar slice:** Implemented and automated-test validated. The
+Lichess panel shows Lichess-style takeback, draw, resign, and new-game icon
+buttons. Takeback remains disabled and intentionally unsupported. Draw offers
+and confirmed resignations use asynchronous Board API operations with explicit
+pending, rejected, and uncertain states. The new-game button retains the
+implemented website-assisted behavior.
 
 For the first playable version, challenge creation may remain on the Lichess
 website. The application may initially detect and join an already active game.

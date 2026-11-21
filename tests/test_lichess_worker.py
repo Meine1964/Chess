@@ -15,8 +15,11 @@ from src.chess_camera.lichess_client import (
     LichessReadOnlyClient,
     OngoingGame,
 )
-from src.chess_camera.lichess_worker import LichessConnectionWorker
-from src.chess_camera.lichess_worker import LichessMoveSubmissionWorker
+from src.chess_camera.lichess_worker import (
+    LichessConnectionWorker,
+    LichessGameActionWorker,
+    LichessMoveSubmissionWorker,
+)
 
 
 class FakeClient:
@@ -220,6 +223,44 @@ class SubmissionClient:
             ),
             False,
         )
+
+
+class GameActionClient:
+    def __init__(self) -> None:
+        self.actions: list[tuple[str, str]] = []
+
+    def offer_draw(self, game_id: str) -> None:
+        self.actions.append(("offer-draw", game_id))
+
+    def resign_game(self, game_id: str) -> None:
+        self.actions.append(("resign", game_id))
+
+
+def test_game_action_worker_submits_draw_and_resignation() -> None:
+    client = GameActionClient()
+    succeeded: list[tuple[str, str]] = []
+
+    for action in ("offer-draw", "resign"):
+        worker = LichessGameActionWorker(
+            cast(LichessReadOnlyClient, client),
+            "game1234",
+            action,
+        )
+        worker.succeeded.connect(
+            lambda game_id, completed_action: succeeded.append(
+                (game_id, completed_action)
+            )
+        )
+        worker.run()
+
+    assert client.actions == [
+        ("offer-draw", "game1234"),
+        ("resign", "game1234"),
+    ]
+    assert succeeded == [
+        ("game1234", "offer-draw"),
+        ("game1234", "resign"),
+    ]
 
 
 def test_move_submission_worker_emits_acceptance() -> None:

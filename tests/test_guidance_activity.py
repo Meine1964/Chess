@@ -6,6 +6,7 @@ import numpy as np
 
 from src.chess_camera.camera_app import CameraWindow
 from src.chess_camera.guidance_activity import GuidanceActivityDetector
+from src.chess_camera.reference_move_tracker import ReferenceTrackerUpdate
 
 
 def _camera_grid() -> np.ndarray:
@@ -218,12 +219,45 @@ def test_hand_activity_blacks_projector_and_waits_for_settling() -> None:
 
     assert window._lichess_guidance_projection_active is False
     assert window._lichess_guidance_blackout_pending is True
+    assert window._lichess_guidance_reprojection_pending is True
     window._projector_window.show_black.assert_called_once_with()
     window._alignment_monitor.set_black.assert_called_once_with()
     window._reference_move_tracker.reset_activity.assert_called_once_with()
     assert single_shot.call_args.args[0] == 1000
     single_shot.call_args.args[1]()
     window._finish_lichess_guidance_blackout.assert_called_once_with(4)
+
+
+def test_unchanged_board_restores_pending_lichess_guidance() -> None:
+    window = SimpleNamespace(
+        _lichess_guidance_reprojection_pending=True,
+        _lichess_guidance_projection_active=False,
+        _lichess_game_controller=SimpleNamespace(
+            expected_signature=object()
+        ),
+        _occupancy_status=MagicMock(),
+    )
+
+    def restore_projection() -> None:
+        window._lichess_guidance_projection_active = True
+
+    window._update_lichess_synchronization_projection = MagicMock(
+        side_effect=restore_projection
+    )
+
+    CameraWindow._restore_pending_lichess_guidance_after_no_change(
+        window,
+        ReferenceTrackerUpdate(
+            "watching",
+            None,
+            "Board matches the accepted reference.",
+        ),
+    )
+
+    window._update_lichess_synchronization_projection.assert_called_once_with()
+    window._occupancy_status.setText.assert_called_once_with(
+        "No physical move detected; pending Lichess guidance restored."
+    )
 
 
 def test_guidance_activity_precedes_black_output_gate() -> None:

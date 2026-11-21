@@ -419,6 +419,36 @@ class LichessReadOnlyClient:
                 "Lichess did not confirm the submitted move."
             )
 
+    def offer_draw(self, game_id: str) -> None:
+        self._submit_game_action(
+            game_id,
+            "draw/yes",
+            "draw offer",
+        )
+
+    def resign_game(self, game_id: str) -> None:
+        self._submit_game_action(
+            game_id,
+            "resign",
+            "resignation",
+        )
+
+    def _submit_game_action(
+        self,
+        game_id: str,
+        path_suffix: str,
+        description: str,
+    ) -> None:
+        normalized_game_id = _normalize_game_id(game_id)
+        payload = self._transport.post_json(
+            f"/api/board/game/{normalized_game_id}/{path_suffix}",
+            {**self._headers, "Accept": "application/json"},
+        )
+        if payload.get("ok") is not True:
+            raise LichessProtocolError(
+                f"Lichess did not confirm the {description}."
+            )
+
 
 def reconnect_delays(
     attempts: int,

@@ -86,11 +86,13 @@ def test_normal_close_persists_main_window_geometry() -> None:
     settings = MagicMock()
     geometry = QByteArray(b"saved-geometry")
     window = SimpleNamespace(
+        _lichess_game_action_thread=None,
         _lichess_submission_thread=None,
         _lichess_worker=None,
         _lichess_thread=None,
         _settings=settings,
         saveGeometry=MagicMock(return_value=geometry),
+        screen=MagicMock(return_value=None),
         _calibrator=MagicMock(),
         _alignment_monitor=MagicMock(),
         _camera=None,
@@ -171,6 +173,42 @@ def test_new_lichess_game_is_disabled_during_active_play() -> None:
 
     assert not _can_start_new_lichess_game(state)
     assert _can_start_new_lichess_game(None)
+
+
+def test_draw_and_resign_controls_enable_for_active_game() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    state = LichessGameState(
+        (),
+        "unused",
+        "white",
+        60000,
+        60000,
+        0,
+        0,
+        "started",
+        None,
+        "*",
+    )
+    draw_button = MagicMock()
+    resign_button = MagicMock()
+    window = SimpleNamespace(
+        _lichess_client=object(),
+        _lichess_game_id="game1234",
+        _latest_lichess_state=state,
+        _lichess_game_action_thread=None,
+        _pending_lichess_game_action=None,
+        _draw_offer_game_id=None,
+        _resign_requested_game_id=None,
+        _lichess_draw_button=draw_button,
+        _lichess_resign_button=resign_button,
+    )
+
+    CameraWindow._update_lichess_game_control_buttons(window)
+
+    draw_button.setEnabled.assert_called_once_with(True)
+    resign_button.setEnabled.assert_called_once_with(True)
 
 
 def test_polling_message_reports_unavailable_correspondence_clocks() -> None:

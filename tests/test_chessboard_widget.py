@@ -1,10 +1,11 @@
 import os
+from pathlib import Path
 from typing import cast
 
 import pytest
-from PySide6.QtCore import QPointF, QUrl
+from PySide6.QtCore import QPointF, QSettings, QUrl
 from PySide6.QtGui import QAction, QColor
-from PySide6.QtWidgets import QApplication, QComboBox, QMainWindow
+from PySide6.QtWidgets import QApplication, QComboBox, QMainWindow, QToolButton
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -414,10 +415,6 @@ def test_main_commands_are_available_from_menus(
             )
             for name in action_names:
                 setattr(self, name, QAction(name, self))
-            self._start_new_lichess_game_action = QAction(
-                "Start new Lichess game",
-                self,
-            )
             self._game_mode_selector = QComboBox()
             self._game_mode_selector.addItem(
                 "Diagnostic movement",
@@ -462,10 +459,35 @@ def test_main_commands_are_available_from_menus(
         and action.menu().title() == "Lichess"
     )
     assert lichess_menu is not None
-    assert "Start new Lichess game" in {
+    assert "Start new Lichess game" not in {
         action.text() for action in lichess_menu.actions()
     }
     window.deleteLater()
+
+
+def test_lichess_control_button_has_icon_accessibility_and_placeholder_state(
+    application: QApplication,
+) -> None:
+    from src.chess_camera.camera_app import (
+        _configure_lichess_control_button,
+    )
+
+    button = QToolButton()
+
+    _configure_lichess_control_button(
+        button,
+        "↶",
+        "Request takeback",
+        "Request takeback (not implemented)",
+        enabled=False,
+    )
+
+    assert button.text() == "↶"
+    assert button.accessibleName() == "Request takeback"
+    assert button.toolTip() == "Request takeback (not implemented)"
+    assert not button.isEnabled()
+    assert button.autoRaise()
+    button.close()
 
 
 def test_start_new_lichess_game_opens_browser_and_waits_for_game(
@@ -521,7 +543,7 @@ def test_start_new_lichess_game_opens_browser_and_waits_for_game(
             _rebuild_lichess_games_menu=MagicMock(),
             _lichess_worker=worker,
             _toggle_lichess_connection=MagicMock(),
-            _start_new_lichess_game_action=MagicMock(),
+            _start_new_lichess_game_button=MagicMock(),
         ),
     )
 
@@ -533,7 +555,7 @@ def test_start_new_lichess_game_opens_browser_and_waits_for_game(
     assert window._awaiting_new_lichess_game
     assert window._lichess_game_id is None
     assert selector.currentText() == "Waiting for a new Lichess game..."
-    window._start_new_lichess_game_action.setEnabled.assert_called_with(False)
+    window._start_new_lichess_game_button.setEnabled.assert_called_with(False)
     selector.close()
 
 
@@ -615,6 +637,50 @@ def test_main_window_geometry_restores_previous_size(
 
     assert _restore_window_geometry(restored, stored)
     assert restored.size() == previous.size()
+
+    previous.close()
+    restored.close()
+
+
+def test_main_window_placement_restores_screen_position_and_size(
+    application: QApplication,
+    tmp_path: Path,
+) -> None:
+    from src.chess_camera.camera_app import (
+        _restore_window_placement,
+        _save_window_placement,
+    )
+
+    settings = QSettings(
+        str(tmp_path / "window-placement.ini"),
+        QSettings.Format.IniFormat,
+    )
+    screen = application.primaryScreen()
+    assert screen is not None
+    available = screen.availableGeometry()
+    expected_x = available.x() + 80
+    expected_y = available.y() + 90
+    expected_width = min(700, available.width() - 80)
+    expected_height = min(500, available.height() - 90)
+    previous = QMainWindow()
+    previous.setGeometry(
+        expected_x,
+        expected_y,
+        expected_width,
+        expected_height,
+    )
+
+    _save_window_placement(previous, settings)
+
+    restored = QMainWindow()
+    restored.resize(320, 240)
+    assert _restore_window_placement(restored, settings)
+    assert restored.geometry().getRect() == (
+        expected_x,
+        expected_y,
+        expected_width,
+        expected_height,
+    )
 
     previous.close()
     restored.close()
