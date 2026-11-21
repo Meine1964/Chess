@@ -16,7 +16,11 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QWidget
 
-from .projector_calibration import board_circle_polygon, square_polygons
+from .projector_calibration import (
+    board_circle_polygon,
+    board_quadrilateral_polygon,
+    square_polygons,
+)
 from .legal_game import PromotionPiece
 from .promotion_selection import (
     PROMOTION_CHOICES,
@@ -55,6 +59,7 @@ PROMOTION_GLYPHS: dict[PromotionPiece, str] = {
     "q": "♛",
 }
 _SEVEN_SEGMENT_DIGITS: dict[str, frozenset[str]] = {
+    "-": frozenset("g"),
     "0": frozenset("abcdef"),
     "1": frozenset("bc"),
     "2": frozenset("abdeg"),
@@ -127,6 +132,8 @@ class ProjectorWindow(QWidget):
         self._turn_indicator_corner: TurnIndicatorCorner | None = None
         self._white_clock_text: str | None = None
         self._black_clock_text: str | None = None
+        self._result_text: str | None = None
+        self._expired_player: Literal["white", "black"] | None = None
         self._clock_board_quarter_turns = 0
         self.setWindowTitle("Chess Projector Output")
         self.setCursor(Qt.CursorShape.BlankCursor)
@@ -171,6 +178,8 @@ class ProjectorWindow(QWidget):
         black_clock: str | None,
         *,
         board_quarter_turns: int,
+        result: Literal["1-0", "0-1"] | None = None,
+        expired_player: Literal["white", "black"] | None = None,
     ) -> None:
         if (white_clock is None) != (black_clock is None):
             raise ValueError("Both projected clocks must be set or cleared.")
@@ -180,8 +189,16 @@ class ProjectorWindow(QWidget):
                 or any(character not in "0123456789:" for character in clock)
             ):
                 raise ValueError("Projected clocks must use digits and a colon.")
+        if result not in (None, "1-0", "0-1"):
+            raise ValueError("The projected result must be 1-0 or 0-1.")
+        if white_clock is None and result is not None:
+            raise ValueError("Projected results require projected clocks.")
+        if expired_player is not None and result is None:
+            raise ValueError("An expiration flag requires projected results.")
         self._white_clock_text = white_clock
         self._black_clock_text = black_clock
+        self._result_text = result
+        self._expired_player = expired_player
         self._clock_board_quarter_turns = board_quarter_turns % 4
         self.update()
 
@@ -546,6 +563,32 @@ class ProjectorWindow(QWidget):
                 ),
                 self._black_clock_text,
             )
+            if self._result_text is not None:
+                self._draw_edge_clock(
+                    painter,
+                    self._edge_result_polygon(
+                        self._projector_grid,
+                        board_quarter_turns=self._clock_board_quarter_turns,
+                    ),
+                    self._result_text,
+                )
+                if self._expired_player is not None:
+                    start_row, end_row = (
+                        (5, 6)
+                        if self._expired_player == "white"
+                        else (2, 3)
+                    )
+                    self._draw_expiration_flag(
+                        painter,
+                        self._edge_clock_polygon(
+                            self._projector_grid,
+                            start_row,
+                            end_row,
+                            board_quarter_turns=(
+                                self._clock_board_quarter_turns
+                            ),
+                        ),
+                    )
         if (
             (
                 self._display_mode == "black"
@@ -556,6 +599,7 @@ class ProjectorWindow(QWidget):
             )
             and self._projector_grid is not None
             and self._turn_indicator_corner is not None
+            and self._result_text is None
         ):
             polygon = self._turn_indicator_polygon(
                 self._projector_grid,
@@ -639,6 +683,33 @@ class ProjectorWindow(QWidget):
         )
 
     @staticmethod
+    def _edge_result_polygon(
+        grid: NDArray[np.float32],
+        *,
+        board_quarter_turns: int,
+    ) -> NDArray[np.float32]:
+        logical_points = (
+            (3.4, 0.0),
+            (4.6, 0.0),
+            (4.6, -1.0),
+            (3.4, -1.0),
+        )
+        rotated_points: list[tuple[float, float]] = []
+        for row, column in logical_points:
+            for _ in range(board_quarter_turns % 4):
+                row, column = column, 8.0 - row
+            rotated_points.append((column, row))
+        return board_quadrilateral_polygon(
+            grid,
+            (
+                rotated_points[0],
+                rotated_points[1],
+                rotated_points[2],
+                rotated_points[3],
+            ),
+        )
+
+    @staticmethod
     def _draw_edge_clock(
         painter: QPainter,
         polygon: NDArray[np.float32],
@@ -680,6 +751,34 @@ class ProjectorWindow(QWidget):
                 ),
                 character,
             )
+        painter.restore()
+
+    @staticmethod
+    def _draw_expiration_flag(
+        painter: QPainter,
+        polygon: NDArray[np.float32],
+    ) -> None:
+        canonical_size = 128.0
+        transform = ProjectorWindow._edge_clock_paint_transform(
+            polygon,
+            canonical_size,
+            canonical_size,
+        )
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(PROJECTED_LEGAL_MOVE)
+        painter.setWorldTransform(transform, combine=True)
+        painter.drawRect(QRectF(30.0, 18.0, 10.0, 92.0))
+        painter.drawPolygon(
+            QPolygonF(
+                [
+                    QPointF(40.0, 18.0),
+                    QPointF(102.0, 38.0),
+                    QPointF(40.0, 60.0),
+                ]
+            )
+        )
         painter.restore()
 
     @staticmethod

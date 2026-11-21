@@ -294,6 +294,19 @@ def _format_projected_lichess_clock(milliseconds: int) -> str:
     return f"{minutes.zfill(2)}{separator}{seconds}"
 
 
+def _lichess_display_clock_times(
+    state: LichessGameState,
+) -> tuple[int, int]:
+    white_time_ms = state.white_time_ms
+    black_time_ms = state.black_time_ms
+    if state.status == "outoftime":
+        if state.winner == "white":
+            black_time_ms = 0
+        elif state.winner == "black":
+            white_time_ms = 0
+    return white_time_ms, black_time_ms
+
+
 def _displayed_lichess_clock_state(
     state: LichessGameState,
     *,
@@ -339,13 +352,14 @@ def _lichess_game_information(
         return f"{color}: {player.name}{rating}"
 
     state = game.state
+    white_time_ms, black_time_ms = _lichess_display_clock_times(state)
     white_clock = (
-        _format_lichess_clock(state.white_time_ms)
+        _format_lichess_clock(white_time_ms)
         if clocks_available
         else "--:--"
     )
     black_clock = (
-        _format_lichess_clock(state.black_time_ms)
+        _format_lichess_clock(black_time_ms)
         if clocks_available
         else "--:--"
     )
@@ -6573,10 +6587,18 @@ class CameraWindow(QMainWindow):
         self,
         game: LichessGameFull | None,
     ) -> None:
+        timeout_result = (
+            game is not None
+            and game.state.status == "outoftime"
+            and game.state.winner in ("white", "black")
+        )
         clocks_visible = (
             game is not None
             and self._lichess_clocks_available
-            and self._lichess_clock_snapshot_monotonic is not None
+            and (
+                self._lichess_clock_snapshot_monotonic is not None
+                or timeout_result
+            )
             and self._calibration_result is not None
             and not self._board_orientation_needs_detection
             and not self._piece_side_orientation_needs_detection
@@ -6588,10 +6610,22 @@ class CameraWindow(QMainWindow):
                 board_quarter_turns=self._board_quarter_turns,
             )
             return
+        white_time_ms, black_time_ms = _lichess_display_clock_times(
+            game.state
+        )
+        result: Literal["1-0", "0-1"] | None = None
+        expired_player: PlayerColor | None = None
+        if timeout_result:
+            result = "1-0" if game.state.winner == "white" else "0-1"
+            expired_player = (
+                "black" if game.state.winner == "white" else "white"
+            )
         self._projector_window.set_edge_clocks(
-            _format_projected_lichess_clock(game.state.white_time_ms),
-            _format_projected_lichess_clock(game.state.black_time_ms),
+            _format_projected_lichess_clock(white_time_ms),
+            _format_projected_lichess_clock(black_time_ms),
             board_quarter_turns=self._board_quarter_turns,
+            result=result,
+            expired_player=expired_player,
         )
 
     def _update_lichess_synchronization(

@@ -174,9 +174,26 @@ display values as the on-screen clocks.
 
 Projected clocks shall remain hidden until a complete White-side orientation
 and a calibrated projector grid are available. They shall also remain hidden
-when clocks are unavailable, the Lichess game is terminal, or calibration and
-diagnostic patterns own the projector output. Locally displayed zero shall not
-project or imply an authoritative timeout result.
+when clocks are unavailable, the Lichess game is terminal for a reason other
+than time forfeit, or calibration and diagnostic patterns own the projector
+output. Locally displayed zero shall not project or imply an authoritative
+timeout result.
+
+For an authoritative `outoftime` result, both on-screen and projected clocks
+shall remain visible and stop advancing. The losing player's clock shall be
+shown as `0:00`, while the winner's last reported time shall remain unchanged.
+The projected losing clock shall also show a geometric expiration flag
+immediately beside it on the side toward the middle of the board. The flag
+shall use the same player-relative perspective and rotation as the clock.
+The projected turn dot shall disappear. The result shall instead be shown as
+an unspaced seven-segment score in the edge gap between the two clocks, with
+`1` beside the winner's clock, `0` beside the losing `0:00` clock, and the dash
+directly between them. Read from winner to loser, the displayed score is
+exactly `1-0`. Its glyphs shall have the same physical size and orientation as
+the clock glyphs. Its quadrilateral shall be derived from the calibrated board
+plane, including fractional board coordinates and the extrapolated outer edge,
+so the projected result retains the board's perspective and parallax
+correction.
 
 ## 3. Scope
 

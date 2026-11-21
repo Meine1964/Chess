@@ -237,6 +237,57 @@ def test_projector_renders_seven_segment_clocks_outside_board(
     assert image.pixelColor(100, 90).red() == 0
 
 
+def test_projector_places_timeout_result_between_clocks(
+    application: QApplication,
+) -> None:
+    window = ProjectorWindow()
+    window.resize(360, 180)
+    x_values = np.linspace(100, 260, 9, dtype=np.float32)
+    y_values = np.linspace(30, 150, 9, dtype=np.float32)
+    x_grid, y_grid = np.meshgrid(x_values, y_values)
+    grid = np.stack((x_grid, y_grid), axis=2).astype(np.float32)
+    window.set_projector_grid(grid)
+    window.set_turn_indicator("bottom-left")
+    window.set_edge_clocks(
+        "00:00",
+        "09:58",
+        board_quarter_turns=1,
+        result="0-1",
+        expired_player="white",
+    )
+    window.show_black()
+    window.show()
+    application.processEvents()
+
+    image = window.grab().toImage()
+    result_pixels = sum(
+        image.pixelColor(x, y).red() > 150
+        for x in range(166, 195)
+        for y in range(10, 36)
+    )
+
+    assert result_pixels > 20
+    winner_digit_pixels = sum(
+        image.pixelColor(x, y).red() > 150
+        for x in range(184, 193)
+        for y in range(10, 36)
+    )
+    loser_digit_pixels = sum(
+        image.pixelColor(x, y).red() > 150
+        for x in range(168, 177)
+        for y in range(10, 36)
+    )
+    assert winner_digit_pixels < loser_digit_pixels
+    assert image.pixelColor(180, 90).red() == 0
+    assert image.pixelColor(90, 158).red() == 0
+    expiration_flag_pixels = sum(
+        image.pixelColor(x, y).red() > 150
+        for x in range(135, 166)
+        for y in range(10, 41)
+    )
+    assert expiration_flag_pixels > 10
+
+
 def test_projector_renders_patterns_and_calibrated_squares(
     application: QApplication,
 ) -> None:

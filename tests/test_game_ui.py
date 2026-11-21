@@ -33,6 +33,7 @@ from src.chess_camera.lichess_client import (
     LichessPlayer,
     LichessPollingSnapshot,
     OngoingGame,
+    PlayerColor,
 )
 from src.chess_camera.reference_move_tracker import (
     ReferenceTrackerState,
@@ -1294,6 +1295,70 @@ def test_lichess_clock_refresh_updates_labels_from_monotonic_elapsed_time(
     assert projected_game.state.white_time_ms == 62500
     assert projected_game.state.black_time_ms == 9000
     assert window._latest_lichess_game.state is state
+
+
+@pytest.mark.parametrize(
+    (
+        "winner",
+        "result",
+        "white_clock",
+        "black_clock",
+        "projected_result",
+        "expired_player",
+    ),
+    (
+        ("black", "0-1", "00:00", "10:10", "0-1", "white"),
+        ("white", "1-0", "02:05", "00:00", "1-0", "black"),
+    ),
+)
+def test_time_forfeit_keeps_projected_clocks_and_replaces_turn_dots(
+    winner: PlayerColor,
+    result: str,
+    white_clock: str,
+    black_clock: str,
+    projected_result: str,
+    expired_player: PlayerColor,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    game = LichessGameFull(
+        "timeout1",
+        "unused",
+        LichessPlayer("white", "Local", 1510),
+        LichessPlayer("black", "Remote", 1490),
+        LichessGameState(
+            (),
+            "unused",
+            "white",
+            125000,
+            610000,
+            5000,
+            5000,
+            "outoftime",
+            winner,
+            result,
+        ),
+    )
+    window = SimpleNamespace(
+        _lichess_clocks_available=True,
+        _lichess_clock_snapshot_monotonic=None,
+        _calibration_result=object(),
+        _board_orientation_needs_detection=False,
+        _piece_side_orientation_needs_detection=False,
+        _projector_window=MagicMock(),
+        _board_quarter_turns=2,
+    )
+
+    CameraWindow._update_projected_lichess_clocks(window, game)
+
+    window._projector_window.set_edge_clocks.assert_called_once_with(
+        white_clock,
+        black_clock,
+        board_quarter_turns=2,
+        result=projected_result,
+        expired_player=expired_player,
+    )
 
 
 def test_lichess_turn_indicator_reports_completed_game() -> None:

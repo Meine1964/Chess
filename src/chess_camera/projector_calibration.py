@@ -1375,6 +1375,26 @@ def board_circle_polygon(
     )
 
 
+def board_quadrilateral_polygon(
+    grid: FloatArray,
+    points: tuple[
+        tuple[float, float],
+        tuple[float, float],
+        tuple[float, float],
+        tuple[float, float],
+    ],
+) -> FloatArray:
+    if grid.shape != (9, 9, 2):
+        raise ValueError("Grid must have shape (9, 9, 2).")
+    return np.asarray(
+        [
+            _interpolate_grid_point_extrapolated(grid, x, y)
+            for x, y in points
+        ],
+        dtype=np.float32,
+    )
+
+
 def _interpolate_grid_point_extrapolated(
     grid: FloatArray,
     x: float,
