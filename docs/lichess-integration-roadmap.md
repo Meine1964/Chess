@@ -591,8 +591,10 @@ white guidance and captured-pawn-first confirmation, and awaits live
 acceptance.
 Incoming and locally submitted queen promotion and capture-promotion are
 implemented in persistent Auto-queen mode. Capture-promotion supports
-captured-piece-first evidence. Underpromotion remains reconciliation-only
-until computer-based piece selection is implemented.
+captured-piece-first evidence. Local underpromotion selection is implemented
+through four square-spaced icons on a projected virtual rank, settled
+black-frame choice detection, visible selected-pawn and destination-piece
+feedback, and exact promotion-suffix submission.
 The synchronization flow maintains separate server and physical legal cursors,
 validates streamed history prefixes and verified polling transitions,
 queues one or more reported moves in server order, shows one pending move at a
@@ -601,8 +603,9 @@ position and camera reference only after exact expected evidence. It also
 supports explicit game selection, automatic current-position reconciliation,
 manual trusted acceptance through **Stop reconciliation** when the visible
 board already matches Lichess, and
-ordinary/capture/castling/en-passant/auto-queen local move submission.
-Underpromotion selection remains staged work.
+ordinary/capture/castling/en-passant/promotion local move submission.
+Dedicated incoming underpromotion replacement-piece projection remains staged
+work; local physical selection is implemented and automated-test validated.
 
 When Lichess reports an opponent move:
 

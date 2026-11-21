@@ -186,7 +186,7 @@ def test_controller_queues_and_confirms_incoming_auto_queen() -> None:
     ).state == "synchronized"
 
 
-def test_controller_keeps_underpromotion_in_reconciliation() -> None:
+def test_controller_guides_incoming_underpromotion() -> None:
     controller = LichessGameController(
         "game1234",
         "4k3/P7/8/8/8/8/8/4K3 w - - 0 1",
@@ -196,8 +196,11 @@ def test_controller_keeps_underpromotion_in_reconciliation() -> None:
 
     update = controller.accept_server_history(("a7a8n",))
 
-    assert update.state == "reconciliation-required"
-    assert controller.expected_signature is None
+    assert update.state == "guidance"
+    signature = controller.expected_signature
+    assert signature is not None
+    assert signature.uci == "a7a8n"
+    assert signature.promotion == "n"
 
 
 def test_controller_prepares_and_commits_local_auto_queen() -> None:
@@ -216,6 +219,30 @@ def test_controller_prepares_and_commits_local_auto_queen() -> None:
     committed = controller.commit_local_move(((1, 0), (0, 0)))
     assert committed.fen == preview.fen
     assert controller.server_moves == ("a7a8q",)
+
+
+def test_controller_prepares_and_commits_selected_underpromotion() -> None:
+    controller = LichessGameController(
+        "game1234",
+        "4k3/P7/8/8/8/8/8/4K3 w - - 0 1",
+        "white",
+        "Remote",
+    )
+    controller.accept_server_history(())
+
+    uci, preview = controller.prepare_local_move(
+        ((1, 0), (0, 0)),
+        "n",
+    )
+
+    assert uci == "a7a8n"
+    assert preview.position[(0, 0)] == "N"
+    committed = controller.commit_local_move(
+        ((1, 0), (0, 0)),
+        "n",
+    )
+    assert committed.fen == preview.fen
+    assert controller.server_moves == ("a7a8n",)
 
 
 def test_controller_prepares_local_capture_promotion() -> None:

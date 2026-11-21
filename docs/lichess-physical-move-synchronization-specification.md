@@ -30,8 +30,8 @@ When Lichess advances the remote game, the application shall:
 
 Outgoing ordinary moves, non-promotion captures, castling, en passant,
 auto-queen promotion, and auto-queen capture-promotion are supported.
-Underpromotion remains reconciliation-only until its computer-selection
-workflow is implemented.
+Local physical underpromotion selection is supported through the projected
+virtual-rank workflow specified below.
 
 ## 2. Design Principles
 
@@ -502,24 +502,114 @@ Later slices shall derive involved squares from the expected signature:
 
 - Promotion: source and destination.
 
-### 10.4 Auto-queen promotion
+### 10.4 Promotion modes
 
-**Auto-queen** is the only implemented promotion mode. A pawn reaching the
-last rank shall be interpreted and submitted as a queen promotion. The camera
-shall require the promotion source to become empty and the destination to
-contain a piece of the moving color. Because occupancy and color evidence
-cannot distinguish a pawn from a same-color queen, that evidence shall commit
-the authoritative queen without claiming optical piece-type verification.
+The persistent promotion mode shall be either **Auto-queen** or
+**Select promoted piece**. Auto-queen shall remain the default.
+
+#### 10.4.1 Auto-queen
+
+A pawn reaching the last rank shall be interpreted and submitted as a queen
+promotion. The camera shall require the promotion source to become empty and
+the destination to contain a piece of the moving color. Because occupancy and
+color evidence cannot distinguish a pawn from a same-color queen, that evidence
+shall commit the authoritative queen without claiming optical piece-type
+verification.
 
 Capture-promotion shall support complete final-position evidence and the
 existing captured-piece-first workflow. Removing the destination piece alone
 shall preserve the original authoritative state and reference until the
 attacking pawn reaches the promotion destination.
 
-Incoming underpromotion shall enter reconciliation-required rather than being
-interpreted as queen promotion. Local underpromotion shall remain unavailable
-until a future computer interaction allows the user to select rook, bishop, or
-knight.
+#### 10.4.2 Select promoted piece
+
+For a local legal promotion or capture-promotion, source-empty and
+promotion-destination-occupied evidence shall begin promotion selection rather
+than commit or submit a queen. The authoritative game position, accepted
+physical position, and accepted camera reference shall remain unchanged until
+selection and physical replacement are complete.
+
+The projector shall display icons for queen, rook, bishop, and knight in four
+virtual squares outside the promotion edge. These virtual squares shall:
+
+- Form one extra rank immediately beyond the calibrated playing grid.
+- Use the calibrated square width and height at that edge.
+- Have adjacent centers separated by exactly one square pitch.
+- Bind each occupancy region to the piece shown in that region; icon order is
+  therefore not independently significant.
+- Scale each icon to fit completely inside its virtual square without crossing
+  an edge.
+- Orient every icon toward the physical player's viewing side, independently
+  of which promotion edge contains the virtual rank. In Offline legal game
+  mode, the viewing side is White's calibrated starting side. In a Lichess
+  game, the viewing side is the configured local player's calibrated starting
+  side. An icon projected on the opposite edge shall therefore have the same
+  player-facing orientation as an icon projected on the player's own edge,
+  rather than being rotated toward the edge that contains it.
+- Render the piece as a bright white filled silhouette. The glyph shall use
+  substantially more illuminated area than a thin outlined chess symbol while
+  remaining fully inside its virtual square.
+- Projectively warp each icon into all four corners of its calibrated
+  quadrilateral rather than drawing it in an axis-aligned bounding rectangle.
+  The icon shall therefore inherit the board's rotation, perspective, skew,
+  and local square size. Each icon uses its own quadrilateral so calibration
+  may legitimately make squares on the far side larger than squares on the
+  near side.
+- Remain inside both the projector output and camera image. If all four regions
+  cannot be mapped safely, selection shall stop with an explicit calibration
+  or visibility error rather than defaulting to queen.
+
+The icons shall remain projected while the player moves the pawn, including
+while a hand is visible or board activity continues. When the scene becomes
+unobstructed and settled, the projector shall turn black and the camera shall
+evaluate the four virtual squares:
+
+The choice icons and the selected-piece icon on the promotion destination shall
+remain steady during their respective manipulation phases. Projection startup,
+projector refresh variation, and camera sampling of projected pixels shall not
+be treated as hand activity and shall not cause repeated black/reproject
+flashing. Black output is permitted only for the deliberate settled evidence
+measurement.
+
+- Exactly one occupied virtual square selects its displayed promotion piece.
+- No occupied virtual square shall select nothing; the icons shall reappear and
+  selection shall continue.
+- Multiple occupied or otherwise ambiguous virtual squares shall select
+  nothing, report the ambiguity, and reproject the icons for another attempt.
+- Projector-induced icon pixels shall never be accepted as occupancy evidence;
+  every choice measurement shall use a black-projector frame.
+
+After a choice is detected, the application shall retain the selected piece
+and provide immediate visible confirmation:
+
+- The occupied virtual square containing the detected pawn shall be illuminated
+  as a solid white square.
+- The promotion destination on the playing grid shall display the icon of the
+  selected piece.
+- The other three choice icons shall no longer be projected.
+
+This confirmation projection shall remain visible while the player removes the
+pawn from the virtual square and places the corresponding physical piece on the
+promotion destination. When the hand is gone and the scene is settled, the
+projector shall turn black before completion evidence is measured. If
+completion evidence is not yet present, the same white pawn highlight and
+selected-piece destination icon shall reappear.
+
+Completion shall require the selected virtual square to be empty, the promotion
+source to remain empty, and the destination to be occupied by the moving color.
+The camera cannot prove physical piece type, so the selected virtual square is
+authoritative for the UCI promotion suffix; the destination icon is instruction
+and confirmation feedback, not optical proof. Only then shall the exact move be
+submitted to Lichess and, after server acceptance, committed to the physical
+position and camera reference.
+
+Cancellation, loss of calibration, an uncertain network result, or failure to
+complete replacement shall not silently apply a queen. The existing authority,
+failure, retry, and reconciliation rules shall apply without weakening.
+
+For an incoming Lichess promotion, the server-specified promotion piece is
+already authoritative. The application shall guide replacement with that
+specific piece and shall not present four selectable choices.
 
 ## 11. Camera Confirmation
 
@@ -893,14 +983,23 @@ promotion slices are implemented:
   commit the authoritative queen from exact occupancy/color evidence.
 - Queen capture-promotion accepts complete evidence or captured-piece-first
   physical handling.
-- Underpromotion explicitly enters reconciliation until computer-based piece
-  selection is implemented.
+- Auto-queen remains the implemented default. Select-promoted-piece behavior
+  shall satisfy the virtual-rank projection, settled black-frame choice,
+  physical replacement, and exact UCI suffix requirements in section 10.4
+  before underpromotion is considered implemented.
 
-The validated automated suite contains 285 passing tests. Live ordinary-move,
+The validated automated suite contains 303 passing tests. Live ordinary-move,
 polling, reconciliation, and guidance acceptance has been exercised on the
 target camera/projector setup. Lichess capture, castling, en passant, and
 auto-queen behavior is automated-test validated and awaits live acceptance.
 The dedicated player, clock, status, and result display is automated-test
 validated and awaits live acceptance. Draw-offer, draw-response, and
 resignation and abort controls are automated-test validated and await live
-acceptance. Underpromotion remains a staged limitation.
+acceptance. Local select-promoted-piece geometry on all four physical edges,
+viewer-side-oriented bright fitted icons, steady manipulation projection, settled
+black-frame choice, projection feedback, exact UCI suffix handling, and
+offline/Lichess commit paths are automated-test validated and await live
+acceptance. Incoming
+server-directed underpromotion uses the exact authoritative suffix and ordinary
+source/destination physical guidance; dedicated projected replacement-piece
+guidance remains staged.

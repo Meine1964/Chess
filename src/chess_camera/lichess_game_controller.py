@@ -99,23 +99,22 @@ class LichessGameController:
         if not self._pending_moves:
             return None
         expected_uci = self._pending_moves[0]
-        return next(
-            (
-                signature
-                for signature in self._physical_game.legal_move_signatures
-                if signature.uci == expected_uci
-                and signature.kind
-                in (
-                    "ordinary",
-                    "capture",
-                    "castling",
-                    "en-passant",
-                    "promotion",
-                    "capture-promotion",
-                )
-            ),
-            None,
-        )
+        try:
+            signature = self._physical_game.legal_move_signature(
+                expected_uci
+            )
+        except ValueError:
+            return None
+        if signature.kind not in (
+            "ordinary",
+            "capture",
+            "castling",
+            "en-passant",
+            "promotion",
+            "capture-promotion",
+        ):
+            return None
+        return signature
 
     @property
     def pending_result(self) -> LegalMoveResult | None:
@@ -154,6 +153,7 @@ class LichessGameController:
     def prepare_local_move(
         self,
         move: tuple[Square, Square],
+        promotion: PromotionPiece | None = None,
     ) -> tuple[str, LegalMoveResult]:
         signature = next(
             (
@@ -168,20 +168,19 @@ class LichessGameController:
                 "The physical move is not a supported local Lichess move."
             )
         preview = LegalGame(self._physical_game.fen)
-        return (
-            signature.uci,
-            preview.apply_move(
-                signature.source,
-                signature.destination,
-                signature.promotion,
-            ),
+        result = preview.apply_move(
+            signature.source,
+            signature.destination,
+            promotion,
         )
+        return result.uci, result
 
     def commit_local_move(
         self,
         move: tuple[Square, Square],
+        promotion: PromotionPiece | None = None,
     ) -> LegalMoveResult:
-        uci, _preview = self.prepare_local_move(move)
+        uci, _preview = self.prepare_local_move(move, promotion)
         server_result = _apply_uci(self._server_game, uci)
         physical_result = _apply_uci(self._physical_game, uci)
         if server_result.fen != physical_result.fen:

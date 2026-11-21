@@ -2,19 +2,28 @@ from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
-from PySide6.QtCore import QPointF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import (
     QColor,
+    QFont,
     QImage,
     QPaintEvent,
     QPainter,
     QPen,
     QPolygonF,
     QScreen,
+    QTransform,
 )
 from PySide6.QtWidgets import QWidget
 
 from .projector_calibration import square_polygons
+from .legal_game import PromotionPiece
+from .promotion_selection import (
+    PROMOTION_CHOICES,
+    PromotionEdge,
+    promotion_choice_polygons,
+    validate_promotion_polygons,
+)
 
 DisplayMode = Literal[
     "black",
@@ -26,11 +35,19 @@ DisplayMode = Literal[
     "illegal",
     "correction",
     "reconciliation",
+    "promotion_choices",
+    "promotion_confirmation",
 ]
 PROJECTED_ON_LIGHT_SQUARE = QColor("#007fff")
 PROJECTED_ON_DARK_SQUARE = QColor("#00ffff")
 PROJECTED_LEGAL_MOVE = QColor("#ffffff")
 PROJECTED_ILLEGAL_MOVE = QColor("#ff0000")
+PROMOTION_GLYPHS: dict[PromotionPiece, str] = {
+    "n": "♞",
+    "b": "♝",
+    "r": "♜",
+    "q": "♛",
+}
 
 
 def focus_pattern(
@@ -84,6 +101,10 @@ class ProjectorWindow(QWidget):
         ] | None = None
         self._reconciliation_squares: tuple[tuple[int, int], ...] = ()
         self._move_squares: tuple[tuple[int, int, bool], ...] = ()
+        self._promotion_edge: PromotionEdge | None = None
+        self._promotion_viewer_edge: PromotionEdge | None = None
+        self._promotion_piece: PromotionPiece | None = None
+        self._promotion_destination: tuple[int, int] | None = None
         self.setWindowTitle("Chess Projector Output")
         self.setCursor(Qt.CursorShape.BlankCursor)
 
@@ -245,6 +266,47 @@ class ProjectorWindow(QWidget):
         self._display_mode = "reconciliation"
         self.update()
 
+    def show_promotion_choices(
+        self,
+        edge: PromotionEdge,
+        viewer_edge: PromotionEdge,
+    ) -> None:
+        polygons = self._promotion_polygons(edge)
+        validate_promotion_polygons(
+            polygons,
+            max(1, self.width()),
+            max(1, self.height()),
+        )
+        self._promotion_edge = edge
+        self._promotion_viewer_edge = viewer_edge
+        self._promotion_piece = None
+        self._promotion_destination = None
+        self._display_mode = "promotion_choices"
+        self.update()
+
+    def show_promotion_confirmation(
+        self,
+        edge: PromotionEdge,
+        viewer_edge: PromotionEdge,
+        piece: PromotionPiece,
+        destination: tuple[int, int],
+    ) -> None:
+        polygons = self._promotion_polygons(edge)
+        validate_promotion_polygons(
+            polygons,
+            max(1, self.width()),
+            max(1, self.height()),
+        )
+        row, column = destination
+        if not 0 <= row < 8 or not 0 <= column < 8:
+            raise ValueError("Promotion destination must be on the board.")
+        self._promotion_edge = edge
+        self._promotion_viewer_edge = viewer_edge
+        self._promotion_piece = piece
+        self._promotion_destination = destination
+        self._display_mode = "promotion_confirmation"
+        self.update()
+
     def paintEvent(self, event: QPaintEvent) -> None:
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor(0, 0, 0))
@@ -340,6 +402,54 @@ class ProjectorWindow(QWidget):
                 painter.drawPolygon(
                     self._polygon(polygons[row * 8 + column])
                 )
+        elif (
+            self._display_mode
+            in ("promotion_choices", "promotion_confirmation")
+            and self._projector_grid is not None
+            and self._promotion_edge is not None
+            and self._promotion_viewer_edge is not None
+        ):
+            choice_polygons = promotion_choice_polygons(
+                self._projector_grid,
+                self._promotion_edge,
+            )
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            if self._display_mode == "promotion_choices":
+                for piece, polygon in zip(
+                    PROMOTION_CHOICES,
+                    choice_polygons,
+                    strict=True,
+                ):
+                    self._draw_promotion_glyph(
+                        painter,
+                        polygon,
+                        piece,
+                        self._promotion_edge,
+                        self._promotion_viewer_edge,
+                    )
+            elif (
+                self._promotion_piece is not None
+                and self._promotion_destination is not None
+            ):
+                selected_index = PROMOTION_CHOICES.index(
+                    self._promotion_piece
+                )
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(PROJECTED_LEGAL_MOVE)
+                painter.drawPolygon(
+                    self._polygon(choice_polygons[selected_index])
+                )
+                row, column = self._promotion_destination
+                destination = square_polygons(self._projector_grid)[
+                    row * 8 + column
+                ]
+                self._draw_promotion_glyph(
+                    painter,
+                    destination,
+                    self._promotion_piece,
+                    self._promotion_edge,
+                    self._promotion_viewer_edge,
+                )
         painter.end()
         event.accept()
 
@@ -350,4 +460,80 @@ class ProjectorWindow(QWidget):
                 QPointF(float(point[0]), float(point[1]))
                 for point in points
             ]
+        )
+
+    def _promotion_polygons(
+        self,
+        edge: PromotionEdge,
+    ) -> NDArray[np.float32]:
+        if self._projector_grid is None:
+            raise RuntimeError("No calibrated projector grid is available.")
+        return promotion_choice_polygons(self._projector_grid, edge)
+
+    @staticmethod
+    def _promotion_rotation(viewer_edge: PromotionEdge) -> float:
+        return {
+            "top": 180.0,
+            "right": -90.0,
+            "bottom": 0.0,
+            "left": 90.0,
+        }[viewer_edge]
+
+    @staticmethod
+    def _draw_promotion_glyph(
+        painter: QPainter,
+        polygon: NDArray[np.float32],
+        piece: PromotionPiece,
+        edge: PromotionEdge,
+        viewer_edge: PromotionEdge,
+    ) -> None:
+        canonical_size = 256.0
+        transform = ProjectorWindow._promotion_glyph_transform(
+            polygon,
+            edge,
+            canonical_size,
+        )
+        font = QFont(painter.font())
+        font.setBold(True)
+        font.setPixelSize(round(canonical_size * 0.68))
+        painter.save()
+        painter.setPen(PROJECTED_LEGAL_MOVE)
+        painter.setFont(font)
+        painter.setWorldTransform(transform, combine=True)
+        painter.translate(canonical_size / 2, canonical_size / 2)
+        painter.rotate(ProjectorWindow._promotion_rotation(viewer_edge))
+        painter.drawText(
+            QRectF(
+                -canonical_size / 2,
+                -canonical_size / 2,
+                canonical_size,
+                canonical_size,
+            ),
+            Qt.AlignmentFlag.AlignCenter,
+            PROMOTION_GLYPHS[piece],
+        )
+        painter.restore()
+
+    @staticmethod
+    def _promotion_glyph_transform(
+        polygon: NDArray[np.float32],
+        edge: PromotionEdge,
+        canonical_size: float = 256.0,
+    ) -> QTransform:
+        source = QPolygonF(
+            [
+                QPointF(0.0, 0.0),
+                QPointF(canonical_size, 0.0),
+                QPointF(canonical_size, canonical_size),
+                QPointF(0.0, canonical_size),
+            ]
+        )
+        ordered_polygon = (
+            polygon[[0, 3, 2, 1]]
+            if edge in ("left", "right")
+            else polygon
+        )
+        return QTransform.quadToQuad(
+            source,
+            ProjectorWindow._polygon(ordered_polygon),
         )

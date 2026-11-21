@@ -2,7 +2,7 @@ import os
 
 import numpy as np
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPointF, Qt
 from PySide6.QtWidgets import QApplication
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -12,6 +12,7 @@ from src.chess_camera.projector import (
     PROJECTED_ON_DARK_SQUARE,
     PROJECTED_ILLEGAL_MOVE,
     PROJECTED_ON_LIGHT_SQUARE,
+    PROMOTION_GLYPHS,
     ProjectorWindow,
     focus_pattern,
 )
@@ -47,6 +48,45 @@ def test_projector_window_stays_above_screen_savers(
         window.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
         == Qt.WindowType.WindowStaysOnTopHint
     )
+
+
+def test_promotion_icons_rotate_toward_physical_viewer_edge() -> None:
+    assert ProjectorWindow._promotion_rotation("top") == 180.0
+    assert ProjectorWindow._promotion_rotation("right") == -90.0
+    assert ProjectorWindow._promotion_rotation("bottom") == 0.0
+    assert ProjectorWindow._promotion_rotation("left") == 90.0
+
+
+def test_promotion_icons_use_bright_filled_silhouettes() -> None:
+    assert PROMOTION_GLYPHS == {
+        "n": "♞",
+        "b": "♝",
+        "r": "♜",
+        "q": "♛",
+    }
+
+
+def test_promotion_icon_transform_maps_canonical_square_to_perspective() -> None:
+    polygon = np.asarray(
+        ((20, 10), (90, 5), (110, 80), (10, 70)),
+        dtype=np.float32,
+    )
+
+    transform = ProjectorWindow._promotion_glyph_transform(
+        polygon,
+        "top",
+        100.0,
+    )
+
+    mapped = (
+        transform.map(QPointF(0, 0)),
+        transform.map(QPointF(100, 0)),
+        transform.map(QPointF(100, 100)),
+        transform.map(QPointF(0, 100)),
+    )
+    for actual, expected in zip(mapped, polygon, strict=True):
+        assert actual.x() == pytest.approx(float(expected[0]))
+        assert actual.y() == pytest.approx(float(expected[1]))
 
 
 def test_projector_renders_patterns_and_calibrated_squares(
@@ -149,4 +189,14 @@ def test_projector_renders_patterns_and_calibrated_squares(
     assert reconciliation_image.pixelColor(145, 64) == PROJECTED_ILLEGAL_MOVE
     assert reconciliation_image.pixelColor(205, 99) == PROJECTED_ILLEGAL_MOVE
     assert reconciliation_image.pixelColor(175, 64).red() == 0
+
+    window.show_promotion_choices("top", "bottom")
+    application.processEvents()
+    assert window.output_mode == "promotion_choices"
+
+    window.show_promotion_confirmation("top", "bottom", "n", (0, 0))
+    application.processEvents()
+    promotion_image = window.grab().toImage()
+    assert window.output_mode == "promotion_confirmation"
+    assert promotion_image.pixelColor(115, 11) == PROJECTED_LEGAL_MOVE
     window.close()

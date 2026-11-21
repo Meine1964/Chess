@@ -14,6 +14,8 @@ from src.chess_camera.camera_app import (
     _lichess_turn_indicator_state,
     _lichess_token_configuration_message,
     _ongoing_game_label,
+    _physical_player_edge,
+    _physical_promotion_edge,
     _reference_tracking_status_message,
     _turn_indicator_state,
 )
@@ -52,6 +54,22 @@ def test_lichess_token_status_reports_environment_without_revealing_value(
     )
 
 
+def test_promotion_edge_follows_physical_board_orientation() -> None:
+    move = ((1, 4), (0, 4))
+
+    assert _physical_promotion_edge(move, 0) == "top"
+    assert _physical_promotion_edge(move, 1) == "right"
+    assert _physical_promotion_edge(move, 2) == "bottom"
+    assert _physical_promotion_edge(move, 3) == "left"
+
+
+def test_promotion_icons_face_local_player_from_either_promotion_edge() -> None:
+    assert _physical_player_edge("white", 0) == "bottom"
+    assert _physical_player_edge("black", 0) == "top"
+    assert _physical_player_edge("white", 1) == "left"
+    assert _physical_player_edge("black", 1) == "right"
+
+
 def test_stable_menu_preferences_are_persisted() -> None:
     from types import SimpleNamespace
     from unittest.mock import MagicMock, call
@@ -65,16 +83,16 @@ def test_stable_menu_preferences_are_persisted() -> None:
 
     CameraWindow._save_diagnostics_preference_changed(window, False)
     CameraWindow._remember_lichess_game_selection(window, "game1234")
-    CameraWindow._set_promotion_mode(window, "auto-queen")
+    CameraWindow._set_promotion_mode(window, "select-promoted-piece")
 
     assert settings.setValue.call_args_list == [
         call("diagnostics/save_snapshots", False),
         call("lichess/selected_game_id", "game1234"),
-        call("chess/promotion_mode", "auto-queen"),
+        call("chess/promotion_mode", "select-promoted-piece"),
     ]
     assert settings.sync.call_count == 3
     assert window._preferred_lichess_game_id == "game1234"
-    assert window._promotion_mode == "auto-queen"
+    assert window._promotion_mode == "select-promoted-piece"
 
 
 def test_created_ai_game_follows_exact_returned_id() -> None:
@@ -220,6 +238,284 @@ def test_polling_result_establishes_connected_button_state() -> None:
     CameraWindow._lichess_ongoing_games_received(window, ())
 
     window._show_lichess_connected.assert_called_once_with()
+
+
+def test_promotion_blackout_detects_choice_and_shows_confirmation() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    import cv2
+    import numpy as np
+
+    from src.chess_camera.camera_app import _PendingPromotionSelection
+    from src.chess_camera.promotion_selection import (
+        promotion_choice_polygons,
+    )
+
+    grid = np.asarray(
+        [
+            [[100 + column * 50, 100 + row * 50] for column in range(9)]
+            for row in range(9)
+        ],
+        dtype=np.float32,
+    )
+    polygons = promotion_choice_polygons(grid, "top")
+    reference = np.full((600, 600, 3), 120, dtype=np.uint8)
+    current = reference.copy()
+    cv2.circle(current, (325, 75), 14, (20, 20, 20), -1)
+    selection = _PendingPromotionSelection(
+        ((1, 4), (0, 4)),
+        "top",
+        polygons,
+        reference,
+        stage="choices-blackout",
+        generation=3,
+    )
+    window = SimpleNamespace(
+        _pending_promotion_selection=selection,
+        _latest_frame=current,
+        _show_promotion_confirmation=MagicMock(),
+        _show_promotion_choices=MagicMock(),
+        _fail_promotion_selection=MagicMock(),
+    )
+
+    CameraWindow._finish_promotion_blackout(window, 3)
+
+    assert selection.piece == "r"
+    window._show_promotion_confirmation.assert_called_once_with()
+
+
+def test_verified_replacement_submits_selected_promotion() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    import numpy as np
+
+    from src.chess_camera.camera_app import _PendingPromotionSelection
+    from src.chess_camera.reference_move_tracker import (
+        ReferenceTrackerUpdate,
+    )
+
+    move = ((1, 4), (0, 4))
+    selection = _PendingPromotionSelection(
+        move,
+        "top",
+        np.zeros((4, 4, 2), dtype=np.float32),
+        np.zeros((20, 20, 3), dtype=np.uint8),
+        stage="verifying",
+        piece="n",
+    )
+    result = MagicMock()
+    controller = MagicMock()
+    controller.prepare_local_move.return_value = ("e7e8n", result)
+    tracker = MagicMock()
+    tracker.observe.return_value = ReferenceTrackerUpdate(
+        "accepted",
+        move,
+        "Promotion replacement accepted.",
+    )
+    begin_submission = MagicMock()
+    window = SimpleNamespace(
+        _pending_promotion_selection=selection,
+        _lichess_game_controller=controller,
+        _latest_frame=np.zeros((20, 20, 3), dtype=np.uint8),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(
+                camera_grid=np.zeros((9, 9, 2), dtype=np.float32)
+            )
+        ),
+        _reference_move_tracker=tracker,
+        _board_quarter_turns=0,
+        _fail_promotion_selection=MagicMock(),
+        _begin_lichess_local_move_submission=begin_submission,
+        _show_promotion_confirmation=MagicMock(),
+    )
+
+    CameraWindow._verify_promotion_replacement(window)
+
+    controller.prepare_local_move.assert_called_once_with(move, "n")
+    begin_submission.assert_called_once_with(move, "e7e8n", result)
+    assert window._pending_promotion_selection is None
+
+
+def test_offline_selected_promotion_commits_selected_piece() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.chess_position import PiecePositionSynchronizer
+
+    game = LegalGame("4k3/P7/8/8/8/8/8/4K3 w - - 0 1")
+    synchronizer = PiecePositionSynchronizer()
+    synchronizer.restore(game.position)
+    window = SimpleNamespace(
+        _piece_synchronizer=synchronizer,
+        _legal_game=game,
+        _reference_move_tracker=MagicMock(),
+        _pending_promotion_selection=object(),
+        _board_widget=MagicMock(),
+        _last_rejected_move=None,
+        _persist_piece_position=MagicMock(),
+        _persist_move_reference=MagicMock(),
+        _persist_game_state=MagicMock(),
+        _update_turn_indicator=MagicMock(),
+        _piece_status=MagicMock(),
+        _project_accepted_move=MagicMock(),
+        _fail_promotion_selection=MagicMock(),
+    )
+
+    CameraWindow._accept_offline_promotion(
+        window,
+        ((1, 0), (0, 0)),
+        "n",
+    )
+
+    assert game.position[(0, 0)] == "N"
+    assert synchronizer.position[(0, 0)] == "N"
+    assert window._pending_promotion_selection is None
+
+
+def test_offline_mode_mismatch_is_preserved_for_explicit_recovery() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.chess_position import PiecePositionSynchronizer
+
+    saved = LegalGame()
+    physical = LegalGame()
+    physical.apply_move((6, 4), (4, 4))
+    synchronizer = PiecePositionSynchronizer()
+    synchronizer.restore(physical.position)
+    settings = MagicMock()
+    settings.value.side_effect = lambda key, default="": {
+        "game/mode": "offline-game",
+        "game/offline_fen": saved.fen,
+    }.get(key, default)
+    window = SimpleNamespace(
+        _settings=settings,
+        _piece_synchronizer=synchronizer,
+        _legal_game=LegalGame(),
+        _game_mode="diagnostic",
+        _pending_offline_restore_game=None,
+        _offline_mode_recovery_error=None,
+    )
+
+    CameraWindow._restore_game_mode(window)
+
+    assert window._pending_offline_restore_game is not None
+    assert window._pending_offline_restore_game.fen == saved.fen
+    assert window._game_mode == "diagnostic"
+    settings.setValue.assert_not_called()
+    settings.remove.assert_not_called()
+    settings.sync.assert_not_called()
+
+
+def test_matching_offline_mode_is_restored() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.chess_position import PiecePositionSynchronizer
+
+    saved = LegalGame()
+    saved.apply_move((6, 4), (4, 4))
+    synchronizer = PiecePositionSynchronizer()
+    synchronizer.restore(saved.position)
+    settings = MagicMock()
+    settings.value.side_effect = lambda key, default="": {
+        "game/mode": "offline-game",
+        "game/offline_fen": saved.fen,
+    }.get(key, default)
+    window = SimpleNamespace(
+        _settings=settings,
+        _piece_synchronizer=synchronizer,
+        _legal_game=LegalGame(),
+        _game_mode="diagnostic",
+        _pending_offline_restore_game=None,
+        _offline_mode_recovery_error=None,
+    )
+
+    CameraWindow._restore_game_mode(window)
+
+    assert window._game_mode == "offline-game"
+    assert window._legal_game.fen == saved.fen
+    assert window._pending_offline_restore_game is None
+    settings.setValue.assert_not_called()
+
+
+def test_board_setup_choice_preserves_saved_offline_fen() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, call
+
+    settings = MagicMock()
+    selector = MagicMock()
+    window = SimpleNamespace(
+        _pending_offline_restore_game=LegalGame(),
+        _offline_mode_recovery_error="mismatch",
+        _offline_restore_requested=True,
+        _activate_offline_after_reset=True,
+        _game_mode="offline-game",
+        _game_mode_selector=selector,
+        _sync_game_mode_actions=MagicMock(),
+        _board_widget=MagicMock(),
+        _last_rejected_move=((6, 4), (4, 4)),
+        _settings=settings,
+        _update_turn_indicator=MagicMock(),
+        _piece_status=MagicMock(),
+    )
+
+    CameraWindow._activate_board_setup_mode(window)
+
+    assert window._game_mode == "diagnostic"
+    assert settings.setValue.call_args_list == [
+        call("game/mode", "diagnostic")
+    ]
+    settings.remove.assert_not_called()
+    settings.sync.assert_called_once_with()
+    assert window._pending_offline_restore_game is None
+
+
+def test_saved_offline_position_restore_commits_after_occupancy_match() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    import numpy as np
+
+    from src.chess_camera.chess_position import (
+        PiecePositionSynchronizer,
+        starting_occupied_squares,
+    )
+
+    game = LegalGame()
+    synchronizer = PiecePositionSynchronizer()
+    tracker = MagicMock()
+    window = SimpleNamespace(
+        _legal_game=game,
+        _latest_frame=np.zeros((20, 20, 3), dtype=np.uint8),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(
+                camera_grid=np.zeros((9, 9, 2), dtype=np.float32)
+            )
+        ),
+        _piece_synchronizer=synchronizer,
+        _reference_move_tracker=tracker,
+        _board_quarter_turns=0,
+        _offline_restore_requested=True,
+        _board_widget=MagicMock(),
+        _persist_piece_position=MagicMock(),
+        _persist_move_reference=MagicMock(),
+        _persist_game_state=MagicMock(),
+        _piece_status=MagicMock(),
+        _occupancy_status=MagicMock(),
+    )
+
+    CameraWindow._update_offline_position_restore(
+        window,
+        starting_occupied_squares(),
+    )
+
+    assert not window._offline_restore_requested
+    assert synchronizer.position == game.position
+    tracker.set_reference.assert_called_once()
+    window._persist_game_state.assert_called_once_with()
 
 
 def test_normal_close_persists_main_window_geometry() -> None:

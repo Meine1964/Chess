@@ -111,6 +111,23 @@ class LegalGame:
             )
         )
 
+    def legal_move_signature(self, uci: str) -> LegalMoveSignature:
+        try:
+            requested = chess.Move.from_uci(uci)
+        except ValueError as error:
+            raise ValueError(f"Invalid UCI move '{uci}'.") from error
+        move = next(
+            (
+                candidate
+                for candidate in self._board.legal_moves
+                if candidate == requested
+            ),
+            None,
+        )
+        if move is None:
+            raise ValueError(f"Move '{uci}' is not legal in this position.")
+        return self._physical_signature(move)
+
     @property
     def status(self) -> GameStatus:
         outcome = self._board.outcome(claim_draw=True)

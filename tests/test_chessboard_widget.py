@@ -588,6 +588,7 @@ def test_lichess_ai_defaults_apply_and_cancel_transactionally(
             self._projector_selector = QComboBox()
             self._save_diagnostics = QCheckBox()
             self._lichess_status = QLabel("Disconnected")
+            self._promotion_mode = "auto-queen"
 
         def _refresh_projector_screens(
             self,

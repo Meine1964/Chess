@@ -26,8 +26,11 @@ main window.
 
 ### 2.3 Game
 
-- **Mode** contains mutually exclusive **Diagnostic movement** and
-  **Offline legal game** actions.
+- **Mode** contains mutually exclusive **Board setup / diagnostic** and
+  **Offline legal game** actions. Offline legal game is the normal mode for
+  playing chess. Board setup / diagnostic is reserved for arbitrary position
+  setup, camera diagnosis, and recovery when no legal history is active; it
+  shall not be presented as an equivalent gameplay mode.
 - **Lichess** contains an **Active game** submenu populated from the current
   ongoing games.
 
@@ -123,7 +126,8 @@ menu actions. Moving a command shall not change its operational behavior.
 **File > Settings...** shall open a modal settings dialog with:
 
 - **Devices:** camera and projector display selectors.
-- **Chess:** promotion mode. **Auto-queen** is the only current choice.
+- **Chess:** promotion mode with **Auto-queen** and
+  **Select promoted piece** choices. Auto-queen remains the default.
 - **Diagnostics:** the **Save diagnostic snapshots** setting.
 - **Lichess:** current connection status, persistent AI-game defaults for AI
   level, player color, and clock, plus a fresh configured/not-configured check
@@ -135,6 +139,13 @@ menu actions. Moving a command shall not change its operational behavior.
 **Apply** shall apply the selected values while leaving the dialog open.
 **OK** shall apply them and close the dialog. **Cancel** shall close the dialog
 without applying changes made since the most recent Apply.
+
+The promotion mode shall persist. **Auto-queen** shall immediately interpret a
+local promotion as queen promotion once its physical evidence is complete.
+**Select promoted piece** shall start the projected virtual-rank selection
+workflow defined by the Lichess physical-move synchronization specification.
+Changing the setting while a promotion workflow is already pending shall not
+change that workflow; the new mode shall apply to the next promotion.
 
 The dialog shall be populated from the current live selectors each time it is
 opened so camera and screen hot-plug changes remain authoritative.
@@ -212,6 +223,21 @@ interaction rows.
 
 - Invalid or unavailable settings selections shall preserve the persisted
   device identity and shall not select a substitute.
+- A successfully activated game mode shall persist across normal restart.
+  Startup shall not silently replace a persisted Offline legal game choice
+  with Board setup / diagnostic.
+- If the saved offline legal position and restored accepted physical position
+  differ, startup or an attempt to activate Offline legal game shall show an
+  explicit modal explanation and offer:
+  - **Restore saved offline position:** retain the saved legal game and enter
+    correction guidance until the physical board matches it.
+  - **Reset to starting position:** verify the standard physical setup, reset
+    both logical and physical game state, and then activate Offline legal game.
+  - **Remain in board setup:** activate Board setup / diagnostic and persist
+    that explicit choice.
+- Closing or cancelling the mismatch dialog shall make no mode or persisted
+  state change. Merely detecting a mismatch shall never rewrite the persisted
+  mode.
 - Existing command-level warnings and errors shall remain authoritative.
 - A disabled command shall remain visible but unavailable in its menu.
 - Lichess credentials shall continue to come from the existing environment
@@ -233,17 +259,21 @@ interaction rows.
    12 points.
 8. Camera, projector, game mode, diagnostic snapshots, and exact Lichess game
    selection persist; unavailable identities are retained without substitution.
-   The promotion mode also persists and currently resolves to **Auto-queen**.
+   The promotion mode also persists and offers **Auto-queen** and
+   **Select promoted piece**, with Auto-queen as the default.
 9. Connection and in-progress hardware operation state does not persist.
 10. Remembered unavailable camera and projector identities remain visible and
     selected in the Devices tab.
 11. A normally closed main window reopens with its previous screen, position,
     size, and maximized state.
+12. A compatible saved Offline legal game reopens in Offline legal mode.
+13. An incompatible saved Offline legal game produces the explicit recovery
+    dialog and is never silently converted to Board setup / diagnostic.
 
 ## 7. Validation Status
 
 The implemented menu bar exposes File, Camera, Game, Projector, and
-Calibration menus. The complete automated suite contains 285 passing tests,
+Calibration menus. The complete automated suite contains 303 passing tests,
 including menu structure, transactional selector-copy behavior, existing UI
 state transitions, reconciliation controls, and the readable interaction-font
 minimum. Token-status coverage confirms configured and missing environment
@@ -256,4 +286,10 @@ the expected menu bar and File > Settings action. Projector-refresh coverage
 confirms that current Qt display enumeration replaces stale cached availability
 without changing the remembered selection. Window-state coverage confirms that
 placement is written only on an accepted close and restored through the named
-screen when it remains available.
+screen when it remains available. Auto-queen and Select promoted piece are
+implemented persistent promotion settings. The local projected virtual-rank
+workflow is automated-test validated and awaits live camera/projector
+acceptance. The setup-mode rename, explicit offline-position recovery dialog,
+camera-confirmed saved-position restoration, verified starting-position reset,
+and no-silent-downgrade behavior are implemented and automated-test validated;
+live recovery acceptance remains pending.

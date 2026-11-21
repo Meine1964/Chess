@@ -295,8 +295,8 @@ similar-colored square. The source shall use a lower evidence floor while every
 other expected changed square retains the normal movement threshold. The
 signature must remain unique, and the existing unexpected-change, obstruction,
 released-piece, and consecutive-observation safeguards shall still pass.
-Diagnostic movement mode shall continue to require the normal threshold for
-both its source and destination.
+Board setup / diagnostic mode shall continue to require the normal threshold
+for both its source and destination.
 
 For a capture, destination occupancy remains occupied. The visual transition
 is the destination changing from the captured piece's color appearance to the
@@ -321,14 +321,14 @@ restoring the piece. A side-to-move piece lifted without being placed on a
 destination after the hand is withdrawn uses the same illegal-removal
 correction.
 
-Diagnostic movement mode shall retain its one-source/one-empty-destination
+Board setup / diagnostic mode shall retain its one-source/one-empty-destination
 contract; an occupied destination without legal-game authority remains
 ambiguous.
 
 The application provides two local movement policies:
 
-- `Diagnostic movement` retains legality-independent one-piece relocation for
-  camera testing.
+- `Board setup / diagnostic` retains legality-independent one-piece relocation
+  for position setup and camera testing.
 - `Offline legal game` validates a visual candidate against an authoritative
   `python-chess` position before changing the logical position or reference.
 
@@ -381,10 +381,34 @@ actionable message. Pending captures, obstructions, ambiguous board changes,
 illegal corrections, accepted moves, and restored-board confirmation shall
 remain visible until another durable or actionable state replaces them.
 
-The complete offline FEN is persisted. Offline legal mode is restored only
-when its piece map matches the persisted logical position. Visual signatures
-for captures and special moves are specified as later milestones in the
+The complete offline FEN and the last successfully activated mode are
+persisted. A matching accepted physical position shall restore Offline legal
+mode automatically. A mismatch shall preserve the saved offline FEN and mode
+until the user explicitly chooses one of the recovery outcomes below; mismatch
+detection alone shall not write setup/diagnostic mode into persistent settings.
+Visual signatures for captures and special moves are specified as later
+milestones in the
 [Lichess physical-board integration roadmap](./lichess-integration-roadmap.md).
+
+Offline legal mode is the normal local gameplay mode. Board setup / diagnostic
+mode exists for arbitrary position setup, camera diagnosis, and recovery
+without legal turn enforcement. It shall not silently replace an active or
+persisted offline game.
+
+When the saved legal and accepted physical piece maps differ, the application
+shall show a modal recovery choice:
+
+- **Restore saved offline position** keeps the saved FEN authoritative and
+  enters persistent correction guidance until the camera confirms that
+  position.
+- **Reset to starting position** verifies the standard physical setup, resets
+  the legal game and accepted physical/reference state together, activates
+  Offline legal mode, and persists the resulting state.
+- **Remain in board setup** explicitly activates and persists Board setup /
+  diagnostic mode without altering the saved physical position.
+
+Cancelling this choice shall preserve both the current active mode and all
+persisted mode, FEN, physical-position, and reference data.
 
 Offline legal mode shall display a persistent turn indicator beside the move
 rules selector:
@@ -392,7 +416,7 @@ rules selector:
 - White fill with a dark border means White to move.
 - Black fill with a dark border means Black to move.
 - Gray means the authoritative legal game is complete.
-- The indicator is hidden in diagnostic mode.
+- The indicator is hidden in Board setup / diagnostic mode.
 
 The indicator is driven only by the authoritative legal position. Camera,
 alignment, occupancy, and correction messages shall not change it. Its tooltip

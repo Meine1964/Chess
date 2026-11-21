@@ -3,7 +3,7 @@ import json
 import os
 import sys
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
 
@@ -70,7 +70,12 @@ from .chess_position import (
 from .chessboard_widget import ChessboardWidget, rotate_square
 from .diagnostics import DiagnosticStore, RuntimeDiagnosticLog
 from .guidance_activity import GuidanceActivityDetector
-from .legal_game import GameMode, LegalGame, LegalMoveResult
+from .legal_game import (
+    GameMode,
+    LegalGame,
+    LegalMoveResult,
+    PromotionPiece,
+)
 from .lichess_client import (
     AccountGameEvent,
     AiChallengeColor,
@@ -97,11 +102,20 @@ from .occupancy import (
 )
 from .piece_color_classifier import PieceColorLabel, classify_piece_colors
 from .projector import ProjectorWindow, focus_pattern
+from .promotion_selection import (
+    ManipulationSettlingDetector,
+    PromotionEdge,
+    PromotionPolygons,
+    observe_promotion_choices,
+    promotion_choice_polygons,
+    validate_promotion_polygons,
+)
 from .projector_calibration import (
     CalibrationError,
     MappingResult,
     bgr_to_gray,
     detect_board_orientation,
+    square_polygons,
 )
 from .reconciliation import compare_physical_occupancy
 from .reference_move_tracker import (
@@ -126,6 +140,18 @@ _WINDOW_Y_OFFSET_SETTING = "window/main_y_offset"
 _WINDOW_WIDTH_SETTING = "window/main_width"
 _WINDOW_HEIGHT_SETTING = "window/main_height"
 _WINDOW_MAXIMIZED_SETTING = "window/main_maximized"
+
+
+@dataclass
+class _PendingPromotionSelection:
+    move: tuple[tuple[int, int], tuple[int, int]]
+    edge: PromotionEdge
+    camera_polygons: PromotionPolygons
+    reference_frame: ImageArray
+    viewer_edge: PromotionEdge = "bottom"
+    stage: str = "choices"
+    piece: PromotionPiece | None = None
+    generation: int = 0
 _LICHESS_AI_LEVEL_SETTING = "lichess/ai_level"
 _LICHESS_AI_COLOR_SETTING = "lichess/ai_color"
 _LICHESS_AI_CLOCK_SETTING = "lichess/ai_clock"
@@ -291,6 +317,45 @@ def _can_abort_lichess_game(game: LichessGameFull | None) -> bool:
         and len(game.state.moves) < 2
         and not _can_start_new_lichess_game(game.state)
     )
+
+
+def _physical_promotion_edge(
+    move: tuple[tuple[int, int], tuple[int, int]],
+    board_quarter_turns: int,
+) -> PromotionEdge:
+    straight_destination = rotate_square(
+        move[1][0],
+        move[0][1],
+        board_quarter_turns,
+    )
+    if straight_destination[0] == 0:
+        return "top"
+    if straight_destination[0] == 7:
+        return "bottom"
+    if straight_destination[1] == 0:
+        return "left"
+    if straight_destination[1] == 7:
+        return "right"
+    raise ValueError("Promotion destination is not on a physical board edge.")
+
+
+def _physical_player_edge(
+    player_color: PlayerColor,
+    board_quarter_turns: int,
+) -> PromotionEdge:
+    player_row = 7 if player_color == "white" else 0
+    physical_row, physical_column = rotate_square(
+        player_row,
+        4,
+        board_quarter_turns,
+    )
+    if physical_row == 0:
+        return "top"
+    if physical_row == 7:
+        return "bottom"
+    if physical_column == 0:
+        return "left"
+    return "right"
 
 
 def _lichess_game_state_message(state: LichessGameState) -> str:
@@ -836,18 +901,29 @@ class CameraWindow(QMainWindow):
         )
         self._occupancy_detector = SquareOccupancyDetector()
         self._guidance_activity_detector = GuidanceActivityDetector()
+        self._promotion_activity_detector = (
+            ManipulationSettlingDetector()
+        )
         self._reference_move_tracker = ReferenceMoveTracker()
         self._piece_synchronizer = PiecePositionSynchronizer()
         self._legal_game = LegalGame()
         self._game_mode: GameMode = "diagnostic"
+        self._pending_offline_restore_game: LegalGame | None = None
+        self._offline_mode_recovery_error: str | None = None
+        self._offline_restore_requested = False
+        self._activate_offline_after_reset = False
         stored_promotion_mode = str(
             self._settings.value(_PROMOTION_MODE_SETTING, "auto-queen")
         )
         self._promotion_mode = (
             stored_promotion_mode
-            if stored_promotion_mode == "auto-queen"
+            if stored_promotion_mode
+            in ("auto-queen", "select-promoted-piece")
             else "auto-queen"
         )
+        self._pending_promotion_selection: (
+            _PendingPromotionSelection | None
+        ) = None
         self._lichess_thread: QThread | None = None
         self._lichess_worker: LichessConnectionWorker | None = None
         self._lichess_client: LichessReadOnlyClient | None = None
@@ -951,7 +1027,10 @@ class CameraWindow(QMainWindow):
         self._camera_selector.setEnabled(bool(self._devices))
         self._game_mode_selector = QComboBox()
         self._game_mode_selector.setMaximumWidth(260)
-        self._game_mode_selector.addItem("Diagnostic movement", "diagnostic")
+        self._game_mode_selector.addItem(
+            "Board setup / diagnostic",
+            "diagnostic",
+        )
         self._game_mode_selector.addItem("Offline legal game", "offline-game")
         self._game_mode_selector.setCurrentIndex(
             1 if self._game_mode == "offline-game" else 0
@@ -1419,6 +1498,11 @@ class CameraWindow(QMainWindow):
             "application-started",
             "Chessboard camera application started.",
         )
+        if (
+            self._pending_offline_restore_game is not None
+            or self._offline_mode_recovery_error is not None
+        ):
+            QTimer.singleShot(0, self._show_offline_mode_recovery_dialog)
 
     def _create_application_menus(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
@@ -1440,7 +1524,7 @@ class CameraWindow(QMainWindow):
         self._game_mode_action_group = QActionGroup(self)
         self._game_mode_action_group.setExclusive(True)
         self._diagnostic_mode_action = mode_menu.addAction(
-            "Diagnostic movement"
+            "Board setup / diagnostic"
         )
         self._diagnostic_mode_action.setCheckable(True)
         self._diagnostic_mode_action.triggered.connect(
@@ -1605,7 +1689,12 @@ class CameraWindow(QMainWindow):
         chess_layout = QFormLayout()
         promotion_mode = QComboBox()
         promotion_mode.addItem("Auto-queen", "auto-queen")
-        promotion_mode.setCurrentIndex(0)
+        promotion_mode.addItem(
+            "Select promoted piece",
+            "select-promoted-piece",
+        )
+        promotion_index = promotion_mode.findData(self._promotion_mode)
+        promotion_mode.setCurrentIndex(max(0, promotion_index))
         chess_layout.addRow("Promotion:", promotion_mode)
         chess_tab.setLayout(chess_layout)
         tabs.addTab(chess_tab, "Chess")
@@ -1764,7 +1853,7 @@ class CameraWindow(QMainWindow):
         self._settings.sync()
 
     def _set_promotion_mode(self, mode: str) -> None:
-        if mode != "auto-queen":
+        if mode not in ("auto-queen", "select-promoted-piece"):
             raise ValueError(f"Unsupported promotion mode: {mode}")
         self._promotion_mode = mode
         self._settings.setValue(_PROMOTION_MODE_SETTING, mode)
@@ -2895,6 +2984,15 @@ class CameraWindow(QMainWindow):
                 "Occupancy waiting for camera-grid verification."
             )
             return
+        if (
+            self._activate_offline_after_reset
+            and not self._reset_to_start_requested
+        ):
+            self._reset_pieces_to_start()
+            return
+        if self._pending_promotion_selection is not None:
+            self._update_promotion_selection()
+            return
         if self._lichess_guidance_projection_active:
             self._observe_lichess_guidance_activity()
             return
@@ -2928,6 +3026,7 @@ class CameraWindow(QMainWindow):
             self._reference_move_tracker.initialized
             and not self._reset_to_start_requested
             and not self._reconciliation_requested
+            and not self._offline_restore_requested
         ):
             self._update_reference_move_tracking()
             return
@@ -3002,6 +3101,9 @@ class CameraWindow(QMainWindow):
                 return
             if self._reconciliation_requested:
                 self._update_physical_reconciliation(stable_occupied)
+                return
+            if self._offline_restore_requested:
+                self._update_offline_position_restore(stable_occupied)
                 return
             position_update = self._piece_synchronizer.observe(
                 stable_occupied,
@@ -3164,6 +3266,26 @@ class CameraWindow(QMainWindow):
             and lichess_signature is not None
         )
         if lichess_controller is not None and not lichess_pending:
+            local_signature = next(
+                (
+                    signature
+                    for signature in lichess_controller.local_move_signatures
+                    if (
+                        signature.source,
+                        signature.destination,
+                    )
+                    == update.move
+                ),
+                None,
+            )
+            if (
+                self._promotion_mode == "select-promoted-piece"
+                and local_signature is not None
+                and local_signature.kind
+                in ("promotion", "capture-promotion")
+            ):
+                self._start_promotion_selection(update.move)
+                return
             try:
                 uci, legal_move = lichess_controller.prepare_local_move(
                     update.move
@@ -3193,6 +3315,26 @@ class CameraWindow(QMainWindow):
                 )
                 return
         elif self._game_mode == "offline-game":
+            local_signature = next(
+                (
+                    signature
+                    for signature in self._legal_game.legal_move_signatures
+                    if (
+                        signature.source,
+                        signature.destination,
+                    )
+                    == update.move
+                ),
+                None,
+            )
+            if (
+                self._promotion_mode == "select-promoted-piece"
+                and local_signature is not None
+                and local_signature.kind
+                in ("promotion", "capture-promotion")
+            ):
+                self._start_promotion_selection(update.move)
+                return
             try:
                 legal_move = self._legal_game.apply_move(
                     source,
@@ -3266,6 +3408,348 @@ class CameraWindow(QMainWindow):
             )
         if not lichess_pending:
             self._project_accepted_move(update.move)
+
+    def _start_promotion_selection(
+        self,
+        move: tuple[tuple[int, int], tuple[int, int]],
+    ) -> None:
+        if self._latest_frame is None or self._calibration_result is None:
+            self._fail_promotion_selection(
+                "Promotion selection requires a calibrated camera frame."
+            )
+            return
+        try:
+            edge = _physical_promotion_edge(
+                move,
+                self._board_quarter_turns,
+            )
+        except ValueError as error:
+            self._fail_promotion_selection(
+                str(error)
+            )
+            return
+        polygons = promotion_choice_polygons(
+            self._calibration_result.mapping.camera_grid,
+            edge,
+        )
+        try:
+            validate_promotion_polygons(
+                polygons,
+                self._latest_frame.shape[1],
+                self._latest_frame.shape[0],
+            )
+        except ValueError as error:
+            self._fail_promotion_selection(str(error))
+            return
+        self._pending_promotion_selection = _PendingPromotionSelection(
+            move,
+            edge,
+            polygons,
+            self._latest_frame.copy(),
+            viewer_edge=_physical_player_edge(
+                (
+                    self._lichess_player_color
+                    if self._lichess_game_controller is not None
+                    and self._lichess_player_color is not None
+                    else "white"
+                ),
+                self._board_quarter_turns,
+            ),
+        )
+        self._show_promotion_choices()
+
+    def _update_promotion_selection(self) -> None:
+        selection = self._pending_promotion_selection
+        if (
+            selection is None
+            or self._latest_frame is None
+            or self._calibration_result is None
+        ):
+            return
+        if selection.stage == "verifying":
+            self._verify_promotion_replacement()
+            return
+        if selection.stage.endswith("-blackout"):
+            self._occupancy_status.setText(
+                "Promotion projector is black; waiting for clean evidence."
+            )
+            return
+        activity_polygons = selection.camera_polygons
+        if selection.piece is not None:
+            physical_destination = self._physical_board_square(
+                *selection.move[1]
+            )
+            destination_polygon = square_polygons(
+                self._calibration_result.mapping.camera_grid
+            )[
+                physical_destination[0] * 8
+                + physical_destination[1]
+            ]
+            activity_polygons = np.concatenate(
+                (
+                    activity_polygons,
+                    destination_polygon[np.newaxis, :, :],
+                ),
+                axis=0,
+            )
+        try:
+            settled = self._promotion_activity_detector.observe(
+                self._latest_frame,
+                activity_polygons,
+            )
+        except (ValueError, cv2.error) as error:
+            self._fail_promotion_selection(
+                f"Promotion hand detection failed: {error}"
+            )
+            return
+        if not settled:
+            self._occupancy_status.setText(
+                "Promotion choices remain projected during manipulation."
+            )
+            return
+        selection.generation += 1
+        generation = selection.generation
+        selection.stage = f"{selection.stage}-blackout"
+        self._projector_window.show_black()
+        self._alignment_monitor.set_black()
+        self._projector_status.setText(
+            "Promotion manipulation settled; projector is black."
+        )
+        QTimer.singleShot(
+            1000,
+            lambda: self._finish_promotion_blackout(generation),
+        )
+
+    def _finish_promotion_blackout(self, generation: int) -> None:
+        selection = self._pending_promotion_selection
+        if (
+            selection is None
+            or selection.generation != generation
+            or self._latest_frame is None
+        ):
+            return
+        if selection.stage == "choices-blackout":
+            try:
+                observation = observe_promotion_choices(
+                    selection.reference_frame,
+                    self._latest_frame,
+                    selection.camera_polygons,
+                )
+            except (ValueError, cv2.error) as error:
+                self._fail_promotion_selection(
+                    f"Promotion choice detection failed: {error}"
+                )
+                return
+            piece = observation.selected_piece
+            if piece is None:
+                self._show_promotion_choices(
+                    "No unambiguous promotion choice was detected."
+                )
+                return
+            selection.piece = piece
+            self._show_promotion_confirmation()
+            return
+        if selection.stage == "confirmation-blackout":
+            selection.stage = "verifying"
+            self._promotion_activity_detector.reset()
+            self._reference_move_tracker.reset_activity()
+            self._projector_status.setText(
+                "Projector is black; verifying promotion replacement."
+            )
+
+    def _show_promotion_choices(self, reason: str | None = None) -> None:
+        selection = self._pending_promotion_selection
+        if selection is None:
+            return
+        if self._camera_only_calibration or not self._open_projector():
+            self._fail_promotion_selection(
+                "Promotion selection requires a calibrated projector."
+            )
+            return
+        try:
+            self._projector_window.show_promotion_choices(
+                selection.edge,
+                selection.viewer_edge,
+            )
+        except (RuntimeError, ValueError) as error:
+            self._fail_promotion_selection(
+                f"Promotion choices cannot be projected: {error}"
+            )
+            return
+        selection.stage = "choices"
+        selection.piece = None
+        self._promotion_activity_detector.reset()
+        self._alignment_monitor.set_paused("promotion choices")
+        message = (
+            "Move the pawn onto the projected promotion piece."
+            if reason is None
+            else f"{reason} Move the pawn onto one projected piece."
+        )
+        self._piece_status.setText(message)
+        self._projector_status.setText(message)
+
+    def _show_promotion_confirmation(self) -> None:
+        selection = self._pending_promotion_selection
+        if selection is None or selection.piece is None:
+            return
+        if not self._open_projector():
+            self._fail_promotion_selection(
+                "Promotion confirmation requires a calibrated projector."
+            )
+            return
+        destination = self._physical_board_square(*selection.move[1])
+        try:
+            self._projector_window.show_promotion_confirmation(
+                selection.edge,
+                selection.viewer_edge,
+                selection.piece,
+                destination,
+            )
+        except (RuntimeError, ValueError) as error:
+            self._fail_promotion_selection(
+                f"Promotion confirmation cannot be projected: {error}"
+            )
+            return
+        selection.stage = "confirmation"
+        self._promotion_activity_detector.reset()
+        self._alignment_monitor.set_paused("promotion replacement")
+        piece_name = {
+            "q": "queen",
+            "r": "rook",
+            "b": "bishop",
+            "n": "knight",
+        }[selection.piece]
+        message = (
+            f"{piece_name.capitalize()} selected. Replace the highlighted "
+            "pawn with that piece on the promotion square."
+        )
+        self._piece_status.setText(message)
+        self._projector_status.setText(message)
+
+    def _verify_promotion_replacement(self) -> None:
+        selection = self._pending_promotion_selection
+        controller = self._lichess_game_controller
+        if (
+            selection is None
+            or selection.piece is None
+            or self._latest_frame is None
+            or self._calibration_result is None
+        ):
+            self._fail_promotion_selection(
+                "Promotion replacement lost its active game state."
+            )
+            return
+        if controller is None and self._game_mode != "offline-game":
+            self._fail_promotion_selection(
+                "Promotion replacement lost its active game state."
+            )
+            return
+        tracking_position = (
+            controller.physical_position
+            if controller is not None
+            else self._piece_synchronizer.position
+        )
+        signatures = (
+            controller.local_move_signatures
+            if controller is not None
+            else self._legal_game.legal_move_signatures
+        )
+        try:
+            update = self._reference_move_tracker.observe(
+                self._latest_frame,
+                self._calibration_result.mapping.camera_grid,
+                self._board_quarter_turns,
+                tracking_position,
+                signatures,
+            )
+        except (ValueError, cv2.error) as error:
+            self._fail_promotion_selection(
+                f"Promotion replacement verification failed: {error}"
+            )
+            return
+        if update.state == "accepted" and update.move == selection.move:
+            if controller is None:
+                self._accept_offline_promotion(
+                    selection.move,
+                    selection.piece,
+                )
+                return
+            try:
+                uci, result = controller.prepare_local_move(
+                    selection.move,
+                    selection.piece,
+                )
+            except ValueError as error:
+                self._fail_promotion_selection(str(error))
+                return
+            move = selection.move
+            self._pending_promotion_selection = None
+            self._begin_lichess_local_move_submission(move, uci, result)
+            return
+        if update.state in ("watching", "ambiguous", "illegal-removal"):
+            self._show_promotion_confirmation()
+
+    def _accept_offline_promotion(
+        self,
+        move: tuple[tuple[int, int], tuple[int, int]],
+        piece: PromotionPiece,
+    ) -> None:
+        previous_position = self._piece_synchronizer.position
+        game_advanced = False
+        try:
+            legal_move = self._legal_game.apply_move(
+                move[0],
+                move[1],
+                piece,
+            )
+            game_advanced = True
+            position_update = (
+                self._piece_synchronizer.accept_authoritative_move(
+                    move[0],
+                    move[1],
+                    legal_move.position,
+                )
+            )
+            self._reference_move_tracker.commit_accepted(move)
+        except ValueError as error:
+            self._piece_synchronizer.restore(previous_position)
+            if game_advanced:
+                self._legal_game.rollback()
+            self._reference_move_tracker.reset_activity()
+            self._fail_promotion_selection(
+                f"Promotion replacement was rejected: {error}"
+            )
+            return
+        self._pending_promotion_selection = None
+        self._board_widget.set_pieces(position_update.position)
+        self._board_widget.set_occupied_squares(position_update.position)
+        self._board_widget.set_illegal_source(None)
+        self._board_widget.set_guidance_move(None)
+        self._board_widget.set_last_move(move)
+        self._last_rejected_move = None
+        self._persist_piece_position(position_update.position)
+        self._persist_move_reference()
+        self._persist_game_state()
+        self._update_turn_indicator()
+        self._piece_status.setText(
+            f"Legal move {legal_move.san} accepted; "
+            f"{legal_move.status.turn} to move."
+        )
+        self._project_accepted_move(move)
+
+    def _fail_promotion_selection(self, message: str) -> None:
+        self._pending_promotion_selection = None
+        self._promotion_activity_detector.reset()
+        self._projector_window.show_black()
+        self._alignment_monitor.set_black()
+        controller = self._lichess_game_controller
+        if controller is not None:
+            synchronization = controller.require_reconciliation(message)
+            self._lichess_sync_status.setText(synchronization.message)
+            self._piece_status.setText(synchronization.message)
+        else:
+            self._piece_status.setText(message)
+        self._projector_status.setText(message)
 
     def _begin_lichess_local_move_submission(
         self,
@@ -3346,7 +3830,12 @@ class CameraWindow(QMainWindow):
                     legal_move.position,
                 )
             )
-            committed = controller.commit_local_move(move)
+            promotion: PromotionPiece | None = (
+                cast(PromotionPiece, uci[4])
+                if len(uci) == 5
+                else None
+            )
+            committed = controller.commit_local_move(move, promotion)
             self._reference_move_tracker.commit_accepted(move)
         except ValueError as error:
             self._piece_synchronizer.restore(previous_position)
@@ -3515,9 +4004,22 @@ class CameraWindow(QMainWindow):
                 "Reset verification finished without changing the "
                 "logical position."
             )
+            if self._activate_offline_after_reset:
+                self._reset_to_start_requested = True
+                self._piece_status.setText(
+                    "Arrange all pieces in the standard starting position "
+                    "to begin an Offline legal game."
+                )
             return
         self._piece_synchronizer.reset()
         self._legal_game.reset()
+        if self._activate_offline_after_reset:
+            self._activate_offline_after_reset = False
+            self._game_mode = "offline-game"
+            self._game_mode_selector.blockSignals(True)
+            self._game_mode_selector.setCurrentIndex(1)
+            self._game_mode_selector.blockSignals(False)
+            self._sync_game_mode_actions()
         self._update_turn_indicator()
         update = self._piece_synchronizer.observe(
             occupied,
@@ -4170,17 +4672,16 @@ class CameraWindow(QMainWindow):
             return
         try:
             restored = LegalGame(saved_fen)
-        except ValueError:
-            self._settings.remove(_LEGAL_GAME_FEN_SETTING)
-            self._settings.setValue(_GAME_MODE_SETTING, "diagnostic")
-            self._settings.sync()
+        except ValueError as error:
+            self._offline_mode_recovery_error = (
+                f"The saved Offline legal game is invalid: {error}"
+            )
             return
         if (
             not self._piece_synchronizer.initialized
             or restored.position != self._piece_synchronizer.position
         ):
-            self._settings.setValue(_GAME_MODE_SETTING, "diagnostic")
-            self._settings.sync()
+            self._pending_offline_restore_game = restored
             return
         self._legal_game = restored
         self._game_mode = "offline-game"
@@ -4193,15 +4694,7 @@ class CameraWindow(QMainWindow):
     def _game_mode_changed(self, index: int) -> None:
         selected = str(self._game_mode_selector.itemData(index))
         if selected == "diagnostic":
-            self._game_mode = "diagnostic"
-            self._sync_game_mode_actions()
-            self._board_widget.set_illegal_source(None)
-            self._last_rejected_move = None
-            self._persist_game_state()
-            self._update_turn_indicator()
-            self._piece_status.setText(
-                "Diagnostic movement mode accepts unambiguous relocations."
-            )
+            self._activate_board_setup_mode()
             return
         if selected != "offline-game":
             raise ValueError(f"Unknown game mode: {selected}")
@@ -4217,13 +4710,160 @@ class CameraWindow(QMainWindow):
             )
             return
         self._game_mode_selector.blockSignals(True)
-        self._game_mode_selector.setCurrentIndex(0)
+        self._game_mode_selector.setCurrentIndex(
+            1 if self._game_mode == "offline-game" else 0
+        )
         self._game_mode_selector.blockSignals(False)
         self._sync_game_mode_actions()
         self._update_turn_indicator()
+        self._pending_offline_restore_game = LegalGame(
+            self._legal_game.fen
+        )
+        self._offline_mode_recovery_error = None
+        self._show_offline_mode_recovery_dialog()
+
+    def _show_offline_mode_recovery_dialog(self) -> None:
+        target = self._pending_offline_restore_game
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog.setWindowTitle("Offline game position mismatch")
+        explanation = (
+            self._offline_mode_recovery_error
+            or "The saved Offline legal position does not match the "
+            "accepted physical position."
+        )
+        dialog.setText(explanation)
+        dialog.setInformativeText(
+            "Choose how to recover. No saved state will be changed until "
+            "you select an option."
+        )
+        restore_button = dialog.addButton(
+            "Restore saved offline position",
+            QMessageBox.ButtonRole.AcceptRole,
+        )
+        restore_button.setEnabled(target is not None)
+        reset_button = dialog.addButton(
+            "Reset to starting position",
+            QMessageBox.ButtonRole.ActionRole,
+        )
+        setup_button = dialog.addButton(
+            "Remain in board setup",
+            QMessageBox.ButtonRole.DestructiveRole,
+        )
+        cancel_button = dialog.addButton(
+            QMessageBox.StandardButton.Cancel
+        )
+        dialog.setDefaultButton(cancel_button)
+        dialog.exec()
+        clicked = dialog.clickedButton()
+        if clicked is restore_button and target is not None:
+            self._begin_offline_position_restore(target)
+        elif clicked is reset_button:
+            self._pending_offline_restore_game = None
+            self._offline_mode_recovery_error = None
+            self._activate_offline_after_reset = True
+            if (
+                self._latest_frame is not None
+                and self._calibration_result is not None
+            ):
+                self._reset_pieces_to_start()
+            else:
+                self._piece_status.setText(
+                    "Waiting for a calibrated camera before verifying the "
+                    "starting position."
+                )
+        elif clicked is setup_button:
+            self._activate_board_setup_mode()
+        else:
+            self._game_mode_selector.blockSignals(True)
+            self._game_mode_selector.setCurrentIndex(
+                1 if self._game_mode == "offline-game" else 0
+            )
+            self._game_mode_selector.blockSignals(False)
+            self._sync_game_mode_actions()
+
+    def _activate_board_setup_mode(self) -> None:
+        self._pending_offline_restore_game = None
+        self._offline_mode_recovery_error = None
+        self._offline_restore_requested = False
+        self._activate_offline_after_reset = False
+        self._game_mode = "diagnostic"
+        self._game_mode_selector.blockSignals(True)
+        self._game_mode_selector.setCurrentIndex(0)
+        self._game_mode_selector.blockSignals(False)
+        self._sync_game_mode_actions()
+        self._board_widget.set_illegal_source(None)
+        self._board_widget.set_reconciliation_squares(())
+        self._last_rejected_move = None
+        self._settings.setValue(_GAME_MODE_SETTING, "diagnostic")
+        self._settings.sync()
+        self._update_turn_indicator()
         self._piece_status.setText(
-            "Cannot enable legal play: reset the physical board to the "
-            "starting position or restore its saved legal game."
+            "Board setup / diagnostic mode accepts unambiguous relocations."
+        )
+
+    def _begin_offline_position_restore(self, target: LegalGame) -> None:
+        self._pending_offline_restore_game = None
+        self._offline_mode_recovery_error = None
+        self._activate_offline_after_reset = False
+        self._legal_game = target
+        self._game_mode = "offline-game"
+        self._offline_restore_requested = True
+        self._game_mode_selector.blockSignals(True)
+        self._game_mode_selector.setCurrentIndex(1)
+        self._game_mode_selector.blockSignals(False)
+        self._sync_game_mode_actions()
+        self._persist_game_state()
+        self._update_turn_indicator()
+        self._black_projector()
+        self._occupancy_detector.reset()
+        self._piece_status.setText(
+            "Restore the physical board to the saved Offline legal position."
+        )
+        self._occupancy_status.setText(
+            "Checking physical occupancy against the saved offline game."
+        )
+
+    def _update_offline_position_restore(
+        self,
+        occupied: frozenset[tuple[int, int]],
+    ) -> None:
+        target_position = self._legal_game.position
+        target_occupied = frozenset(target_position)
+        discrepancies = tuple(sorted(occupied ^ target_occupied))
+        self._board_widget.set_reconciliation_squares(discrepancies)
+        if discrepancies:
+            names = ", ".join(square_name(square) for square in discrepancies)
+            self._piece_status.setText(
+                f"Restore the saved Offline legal position; check {names}."
+            )
+            self._occupancy_status.setText(
+                "Saved offline position does not yet match the physical board."
+            )
+            return
+        if self._latest_frame is None or self._calibration_result is None:
+            raise RuntimeError(
+                "Offline restoration completed without a calibrated frame."
+            )
+        self._piece_synchronizer.restore(target_position)
+        self._reference_move_tracker.set_reference(
+            self._latest_frame,
+            self._calibration_result.mapping.camera_grid,
+            self._board_quarter_turns,
+        )
+        self._offline_restore_requested = False
+        self._board_widget.set_pieces(target_position)
+        self._board_widget.set_occupied_squares(target_position)
+        self._board_widget.set_reconciliation_squares(())
+        self._persist_piece_position(target_position)
+        self._persist_move_reference()
+        self._persist_game_state()
+        self._piece_status.setText(
+            f"Offline legal game restored; "
+            f"{self._legal_game.status.turn} to move."
+        )
+        self._occupancy_status.setText(
+            "Saved offline position confirmed; move reference replaced."
         )
 
     def _toggle_lichess_connection(self) -> None:
