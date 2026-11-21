@@ -681,6 +681,15 @@ clocks when available, side to move, game status, and result. Polling snapshots
 without clocks show unavailable clocks rather than zero. Incremental state
 updates retain player identity from the latest full snapshot.
 
+**Start-new-game slice:** Implemented and automated-test validated. The native
+menu action opens the Lichess website for game creation and then detects the
+game through the existing account connection. Native challenge creation is
+deferred until time-control, opponent, color, and rated/casual setup are
+designed. The action does not discard completed-game information before the
+replacement game is received. Existing ongoing-game IDs are excluded when
+identifying the newly created game so unrelated older games do not force an
+unnecessary manual selection.
+
 For the first playable version, challenge creation may remain on the Lichess
 website. The application may initially detect and join an already active game.
 

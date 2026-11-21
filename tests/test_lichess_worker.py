@@ -473,6 +473,25 @@ def test_polling_waits_for_selection_when_multiple_games_are_active() -> None:
     assert account_events[-1].game_id == "newGame2"
 
 
+def test_polling_selects_single_new_game_among_existing_games() -> None:
+    client = MultiplePollingGamesClient()
+    worker = LichessConnectionWorker(cast(LichessReadOnlyClient, client))
+    statuses: list[str] = []
+    account_events: list[AccountGameEvent] = []
+    game_events: list[object] = []
+    worker.status_changed.connect(statuses.append)
+    worker.account_event_received.connect(account_events.append)
+    worker.game_event_received.connect(game_events.append)
+    worker.expect_new_game({"oldGame1"})
+
+    assert worker._poll_ongoing_game(None) == "newGame2"
+
+    assert statuses == []
+    assert account_events[-1].game_id == "newGame2"
+    assert isinstance(game_events[-1], LichessPollingSnapshot)
+    assert game_events[-1].game.game_id == "newGame2"
+
+
 def test_polling_cursor_appends_authoritative_last_move() -> None:
     worker = LichessConnectionWorker(
         cast(LichessReadOnlyClient, MultiplePollingGamesClient())

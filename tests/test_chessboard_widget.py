@@ -2,7 +2,7 @@ import os
 from typing import cast
 
 import pytest
-from PySide6.QtCore import QPointF
+from PySide6.QtCore import QPointF, QUrl
 from PySide6.QtGui import QAction, QColor
 from PySide6.QtWidgets import QApplication, QComboBox, QMainWindow
 
@@ -252,6 +252,8 @@ def test_multiple_ongoing_games_require_explicit_ui_selection(
             _remember_lichess_game_selection=MagicMock(),
             _lichess_game_id=None,
             _clear_lichess_game_information=MagicMock(),
+            _awaiting_new_lichess_game=False,
+            _new_lichess_game_existing_ids=None,
         ),
     )
 
@@ -296,6 +298,8 @@ def test_remembered_lichess_game_is_not_replaced_by_another_game(
             _preferred_lichess_game_id="remembered",
             _remember_lichess_game_selection=MagicMock(),
             _rebuild_lichess_games_menu=MagicMock(),
+            _awaiting_new_lichess_game=False,
+            _new_lichess_game_existing_ids=None,
         ),
     )
     available = OngoingGame(
@@ -313,6 +317,56 @@ def test_remembered_lichess_game_is_not_replaced_by_another_game(
     assert selector.findData("different") == 1
     worker.select_game.assert_called_once_with(None)
     window._remember_lichess_game_selection.assert_not_called()
+    selector.close()
+
+
+def test_newly_started_game_is_selected_among_older_ongoing_games(
+    application: QApplication,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    games = (
+        OngoingGame(
+            "oldGame1",
+            "oldGame1abcd",
+            "black",
+            "unused",
+            "Older opponent",
+            True,
+        ),
+        OngoingGame(
+            "newGame2",
+            "newGame2abcd",
+            "white",
+            "unused",
+            "New opponent",
+            False,
+        ),
+    )
+    selector = QComboBox()
+    worker = MagicMock()
+    remember_selection = MagicMock()
+    window = cast(
+        CameraWindow,
+        SimpleNamespace(
+            _lichess_game_selector=selector,
+            _lichess_worker=worker,
+            _preferred_lichess_game_id="",
+            _remember_lichess_game_selection=remember_selection,
+            _rebuild_lichess_games_menu=MagicMock(),
+            _awaiting_new_lichess_game=True,
+            _new_lichess_game_existing_ids=frozenset({"oldGame1"}),
+        ),
+    )
+
+    CameraWindow._lichess_ongoing_games_received(window, games)
+
+    assert selector.currentData() == "newGame2"
+    remember_selection.assert_called_once_with("newGame2")
+    worker.select_game.assert_called_once_with("newGame2")
     selector.close()
 
 
@@ -360,6 +414,10 @@ def test_main_commands_are_available_from_menus(
             )
             for name in action_names:
                 setattr(self, name, QAction(name, self))
+            self._start_new_lichess_game_action = QAction(
+                "Start new Lichess game",
+                self,
+            )
             self._game_mode_selector = QComboBox()
             self._game_mode_selector.addItem(
                 "Diagnostic movement",
@@ -395,7 +453,138 @@ def test_main_commands_are_available_from_menus(
         "_reset_pieces_button",
         "_reconcile_button",
     } <= camera_actions
+    game_menu = window.menuBar().actions()[2].menu()
+    assert game_menu is not None
+    lichess_menu = next(
+        action.menu()
+        for action in game_menu.actions()
+        if action.menu() is not None
+        and action.menu().title() == "Lichess"
+    )
+    assert lichess_menu is not None
+    assert "Start new Lichess game" in {
+        action.text() for action in lichess_menu.actions()
+    }
     window.deleteLater()
+
+
+def test_start_new_lichess_game_opens_browser_and_waits_for_game(
+    application: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera import camera_app
+    from src.chess_camera.camera_app import CameraWindow
+    from src.chess_camera.lichess_client import LichessGameState
+
+    state = LichessGameState(
+        (),
+        "unused",
+        "white",
+        0,
+        0,
+        0,
+        0,
+        "mate",
+        "white",
+        "1-0",
+    )
+    opened_urls: list[str] = []
+
+    class DesktopServices:
+        @staticmethod
+        def openUrl(url: QUrl) -> bool:
+            opened_urls.append(url.toString())
+            return True
+
+    monkeypatch.setattr(camera_app, "QDesktopServices", DesktopServices)
+    selector = QComboBox()
+    selector.addItem("Completed game", "oldGame")
+    worker = MagicMock()
+    window = cast(
+        CameraWindow,
+        SimpleNamespace(
+            _latest_lichess_state=state,
+            _lichess_status=MagicMock(),
+            _record_runtime_diagnostic=MagicMock(),
+            _remember_lichess_game_selection=MagicMock(),
+            _awaiting_new_lichess_game=False,
+            _new_lichess_game_existing_ids=None,
+            _lichess_game_id="oldGame",
+            _lichess_player_color="white",
+            _lichess_opponent_name="Opponent",
+            _lichess_game_controller=MagicMock(),
+            _last_projected_lichess_uci="e2e4",
+            _lichess_game_selector=selector,
+            _rebuild_lichess_games_menu=MagicMock(),
+            _lichess_worker=worker,
+            _toggle_lichess_connection=MagicMock(),
+            _start_new_lichess_game_action=MagicMock(),
+        ),
+    )
+
+    CameraWindow._start_new_lichess_game(window)
+
+    assert opened_urls == ["https://lichess.org/"]
+    window._remember_lichess_game_selection.assert_called_once_with("")
+    worker.expect_new_game.assert_called_once_with(frozenset({"oldGame"}))
+    assert window._awaiting_new_lichess_game
+    assert window._lichess_game_id is None
+    assert selector.currentText() == "Waiting for a new Lichess game..."
+    window._start_new_lichess_game_action.setEnabled.assert_called_with(False)
+    selector.close()
+
+
+def test_start_new_lichess_game_preserves_state_when_browser_fails(
+    application: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera import camera_app
+    from src.chess_camera.camera_app import CameraWindow
+    from src.chess_camera.lichess_client import LichessGameState
+
+    class DesktopServices:
+        @staticmethod
+        def openUrl(_url: QUrl) -> bool:
+            return False
+
+    monkeypatch.setattr(camera_app, "QDesktopServices", DesktopServices)
+    state = LichessGameState(
+        (),
+        "unused",
+        "white",
+        0,
+        0,
+        0,
+        0,
+        "mate",
+        "white",
+        "1-0",
+    )
+    remember_selection = MagicMock()
+    window = cast(
+        CameraWindow,
+        SimpleNamespace(
+            _latest_lichess_state=state,
+            _lichess_status=MagicMock(),
+            _record_runtime_diagnostic=MagicMock(),
+            _remember_lichess_game_selection=remember_selection,
+            _lichess_game_id="completedGame",
+        ),
+    )
+
+    CameraWindow._start_new_lichess_game(window)
+
+    remember_selection.assert_not_called()
+    assert window._lichess_game_id == "completedGame"
+    window._lichess_status.setText.assert_called_once_with(
+        "Could not open the Lichess website in the system browser."
+    )
 
 
 def test_interaction_panel_font_is_readable(

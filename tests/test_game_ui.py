@@ -3,6 +3,7 @@ import pytest
 from src.chess_camera.camera_app import (
     CameraWindow,
     _accepted_position_message,
+    _can_start_new_lichess_game,
     _format_lichess_clock,
     _illegal_correction_message,
     _lichess_board_state,
@@ -151,6 +152,25 @@ def test_lichess_turn_indicator_reports_completed_game() -> None:
         "#808080",
         "Lichess game over: 0-1",
     )
+    assert _can_start_new_lichess_game(state)
+
+
+def test_new_lichess_game_is_disabled_during_active_play() -> None:
+    state = LichessGameState(
+        (),
+        "unused",
+        "white",
+        60000,
+        60000,
+        0,
+        0,
+        "started",
+        None,
+        "*",
+    )
+
+    assert not _can_start_new_lichess_game(state)
+    assert _can_start_new_lichess_game(None)
 
 
 def test_polling_message_reports_unavailable_correspondence_clocks() -> None:

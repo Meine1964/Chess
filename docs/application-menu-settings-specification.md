@@ -28,8 +28,22 @@ main window.
 
 - **Mode** contains mutually exclusive **Diagnostic movement** and
   **Offline legal game** actions.
-- **Lichess** contains the dynamic connect/disconnect action and an
-  **Active game** submenu populated from the current ongoing games.
+- **Lichess** contains **Start new Lichess game**, the dynamic
+  connect/disconnect action, and an **Active game** submenu populated from the
+  current ongoing games.
+
+**Start new Lichess game** shall be available while no Lichess game is loaded
+and after the loaded game has finished, but not during active play. It shall
+open the Lichess website in the system browser, clear the obsolete remembered
+game selection only after the browser accepts the URL, and ensure the
+application is connected so it can detect the newly started game. The
+completed board, players, and result shall remain visible until a replacement
+snapshot arrives. If the browser cannot be opened, the existing selection and
+state shall remain unchanged and the failure shall be reported. If other games
+were already ongoing when the action was invoked, the application shall
+remember their IDs and automatically select the single newly appearing game.
+It shall require explicit selection only when no unique new game can be
+identified.
 
 ### 2.4 Projector
 
@@ -174,7 +188,7 @@ interaction rows.
 ## 7. Validation Status
 
 The implemented menu bar exposes File, Camera, Game, Projector, and
-Calibration menus. The complete automated suite contains 261 passing tests,
+Calibration menus. The complete automated suite contains 266 passing tests,
 including menu structure, transactional selector-copy behavior, existing UI
 state transitions, reconciliation controls, and the readable interaction-font
 minimum. Token-status coverage confirms configured and missing environment

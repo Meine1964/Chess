@@ -1,4 +1,4 @@
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from threading import Event, Lock
 
 import chess
@@ -112,6 +112,7 @@ class LichessConnectionWorker(QObject):
         self._stop_requested = Event()
         self._selection_lock = Lock()
         self._selected_game_id: str | None = None
+        self._new_game_baseline_ids: frozenset[str] | None = None
         self._polling_game_id: str | None = None
         self._polling_initial_fen: str | None = None
         self._polling_fen: str | None = None
@@ -128,10 +129,22 @@ class LichessConnectionWorker(QObject):
         selected = None if game_id is None else game_id.strip() or None
         with self._selection_lock:
             self._selected_game_id = selected
+            if selected is not None:
+                self._new_game_baseline_ids = None
 
-    def _selected_game(self) -> str | None:
+    def expect_new_game(
+        self,
+        existing_game_ids: Collection[str],
+    ) -> None:
         with self._selection_lock:
-            return self._selected_game_id
+            self._selected_game_id = None
+            self._new_game_baseline_ids = frozenset(existing_game_ids)
+
+    def _game_selection(
+        self,
+    ) -> tuple[str | None, frozenset[str] | None]:
+        with self._selection_lock:
+            return self._selected_game_id, self._new_game_baseline_ids
 
     def note_local_move(
         self,
@@ -281,8 +294,24 @@ class LichessConnectionWorker(QObject):
                 "Connected to Lichess by polling; waiting for a game."
             )
             return None
-        selected_game_id = self._selected_game()
-        if len(games) == 1:
+        selected_game_id, new_game_baseline_ids = self._game_selection()
+        if new_game_baseline_ids is not None:
+            new_games = tuple(
+                game
+                for game in games
+                if game.game_id not in new_game_baseline_ids
+            )
+            if len(new_games) == 1:
+                game = new_games[0]
+                self.select_game(game.game_id)
+            else:
+                self._reset_polling_cursor()
+                self.status_changed.emit(
+                    "Connected to Lichess by polling; waiting for the newly "
+                    "started game."
+                )
+                return None
+        elif len(games) == 1:
             game = games[0]
             self.select_game(game.game_id)
         else:

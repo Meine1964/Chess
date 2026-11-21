@@ -9,11 +9,12 @@ from typing import cast
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QByteArray, QSettings, QThread, QTimer, Qt
+from PySide6.QtCore import QByteArray, QSettings, QThread, QTimer, Qt, QUrl
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
     QCloseEvent,
+    QDesktopServices,
     QGuiApplication,
     QImage,
     QKeyEvent,
@@ -105,6 +106,7 @@ from .reference_store import ReferenceImageStore
 
 _SETTINGS_ORGANIZATION = "ChessProject"
 _SETTINGS_APPLICATION = "ChessboardCamera"
+_LICHESS_WEBSITE_URL = "https://lichess.org/"
 _CAMERA_SETTING = "camera/device_id"
 _CAMERA_NAME_SETTING = "camera/device_name"
 _PROJECTOR_SETTING = "projector/screen_name"
@@ -242,6 +244,16 @@ def _lichess_game_information(
         player_text(game.white),
         f"White clock: {white_clock}",
         status,
+    )
+
+
+def _can_start_new_lichess_game(
+    state: LichessGameState | None,
+) -> bool:
+    return (
+        state is None
+        or state.result != "*"
+        or state.status not in ("created", "started")
     )
 
 
@@ -569,6 +581,8 @@ class CameraWindow(QMainWindow):
         self._latest_lichess_state: LichessGameState | None = None
         self._latest_lichess_game: LichessGameFull | None = None
         self._lichess_clocks_available = False
+        self._awaiting_new_lichess_game = False
+        self._new_lichess_game_existing_ids: frozenset[str] | None = None
         self._last_runtime_tracker_state: str | None = None
         self._runtime_diagnostics_error: str | None = None
         self._latest_stable_occupied_ui: (
@@ -694,6 +708,13 @@ class CameraWindow(QMainWindow):
         self._lichess_button = QAction("Connect to Lichess", self)
         self._lichess_button.triggered.connect(
             self._toggle_lichess_connection
+        )
+        self._start_new_lichess_game_action = QAction(
+            "Start new Lichess game",
+            self,
+        )
+        self._start_new_lichess_game_action.triggered.connect(
+            self._start_new_lichess_game
         )
         self._lichess_game_selector = QComboBox()
         self._lichess_game_selector.setMaximumWidth(520)
@@ -1041,6 +1062,8 @@ class CameraWindow(QMainWindow):
         self._sync_game_mode_actions()
 
         lichess_menu = game_menu.addMenu("Lichess")
+        lichess_menu.addAction(self._start_new_lichess_game_action)
+        lichess_menu.addSeparator()
         lichess_menu.addAction(self._lichess_button)
         lichess_menu.addSeparator()
         self._lichess_games_menu = lichess_menu.addMenu("Active game")
@@ -3771,6 +3794,69 @@ class CameraWindow(QMainWindow):
         )
         thread.start()
 
+    def _start_new_lichess_game(self) -> None:
+        if not _can_start_new_lichess_game(self._latest_lichess_state):
+            self._lichess_status.setText(
+                "Finish the active Lichess game before starting a new one."
+            )
+            return
+        if not QDesktopServices.openUrl(QUrl(_LICHESS_WEBSITE_URL)):
+            self._lichess_status.setText(
+                "Could not open the Lichess website in the system browser."
+            )
+            self._record_runtime_diagnostic(
+                "lichess-new-game-open-failed",
+                "Could not open the Lichess website.",
+            )
+            return
+
+        existing_game_ids = frozenset(
+            game_id
+            for index in range(self._lichess_game_selector.count())
+            if isinstance(
+                game_id := self._lichess_game_selector.itemData(index),
+                str,
+            )
+        )
+        self._remember_lichess_game_selection("")
+        self._awaiting_new_lichess_game = True
+        self._new_lichess_game_existing_ids = existing_game_ids
+        self._lichess_game_id = None
+        self._lichess_player_color = None
+        self._lichess_opponent_name = ""
+        self._lichess_game_controller = None
+        self._last_projected_lichess_uci = None
+        self._lichess_game_selector.blockSignals(True)
+        self._lichess_game_selector.clear()
+        self._lichess_game_selector.addItem(
+            "Waiting for a new Lichess game...",
+            None,
+        )
+        self._lichess_game_selector.setEnabled(False)
+        self._lichess_game_selector.blockSignals(False)
+        self._rebuild_lichess_games_menu()
+
+        if self._lichess_worker is None:
+            self._toggle_lichess_connection()
+            if self._lichess_worker is None:
+                self._awaiting_new_lichess_game = False
+                self._new_lichess_game_existing_ids = None
+            else:
+                self._lichess_worker.expect_new_game(existing_game_ids)
+        else:
+            self._lichess_worker.expect_new_game(existing_game_ids)
+            self._lichess_status.setText(
+                "Lichess website opened. Start the game there; "
+                "this application is waiting for it."
+            )
+        self._start_new_lichess_game_action.setEnabled(
+            not self._awaiting_new_lichess_game
+        )
+        self._record_runtime_diagnostic(
+            "lichess-new-game-requested",
+            "Opened the Lichess website and started waiting for a new game.",
+        )
+
     def _lichess_ongoing_games_received(self, value: object) -> None:
         if not isinstance(value, tuple) or not all(
             isinstance(game, OngoingGame) for game in value
@@ -3778,6 +3864,16 @@ class CameraWindow(QMainWindow):
             raise TypeError("Ongoing Lichess games must be a tuple.")
         games = cast(tuple[OngoingGame, ...], value)
         remembered = self._preferred_lichess_game_id
+        new_games = (
+            tuple(
+                game
+                for game in games
+                if game.game_id not in self._new_lichess_game_existing_ids
+            )
+            if self._awaiting_new_lichess_game
+            and self._new_lichess_game_existing_ids is not None
+            else ()
+        )
         self._lichess_game_selector.blockSignals(True)
         self._lichess_game_selector.clear()
         if not games:
@@ -3787,10 +3883,21 @@ class CameraWindow(QMainWindow):
             )
             self._lichess_game_selector.setEnabled(False)
             selected: str | None = None
-            self._clear_lichess_game_information()
+            if not self._awaiting_new_lichess_game:
+                self._clear_lichess_game_information()
+            self._start_new_lichess_game_action.setEnabled(
+                not self._awaiting_new_lichess_game
+            )
         elif len(games) == 1:
             game = games[0]
-            if remembered and remembered != game.game_id:
+            if self._awaiting_new_lichess_game and not new_games:
+                self._lichess_game_selector.addItem(
+                    _ongoing_game_label(game),
+                    game.game_id,
+                )
+                self._lichess_game_selector.setEnabled(True)
+                selected = None
+            elif remembered and remembered != game.game_id:
                 self._lichess_game_selector.addItem(
                     "Previously selected game is not ongoing",
                     None,
@@ -3820,12 +3927,23 @@ class CameraWindow(QMainWindow):
                     _ongoing_game_label(game),
                     game.game_id,
                 )
-            matching_index = self._lichess_game_selector.findData(remembered)
-            if matching_index > 0:
-                self._lichess_game_selector.setCurrentIndex(matching_index)
-                selected = remembered
+            if len(new_games) == 1:
+                selected = new_games[0].game_id
+                self._lichess_game_selector.setCurrentIndex(
+                    self._lichess_game_selector.findData(selected)
+                )
+                self._remember_lichess_game_selection(selected)
             else:
-                selected = None
+                matching_index = self._lichess_game_selector.findData(
+                    remembered
+                )
+                if matching_index > 0:
+                    self._lichess_game_selector.setCurrentIndex(
+                        matching_index
+                    )
+                    selected = remembered
+                else:
+                    selected = None
             self._lichess_game_selector.setEnabled(True)
         self._lichess_game_selector.blockSignals(False)
         self._rebuild_lichess_games_menu()
@@ -3872,6 +3990,8 @@ class CameraWindow(QMainWindow):
         if not isinstance(event, AccountGameEvent):
             return
         if event.event_type == "gameStart":
+            self._awaiting_new_lichess_game = False
+            self._new_lichess_game_existing_ids = None
             if event.game_id != self._lichess_game_id:
                 self._lichess_game_controller = None
                 self._latest_lichess_game = None
@@ -3882,11 +4002,13 @@ class CameraWindow(QMainWindow):
             self._lichess_game_id = event.game_id
             self._lichess_player_color = event.color
             self._lichess_opponent_name = event.opponent_name
+            self._start_new_lichess_game_action.setEnabled(False)
             self._lichess_status.setText(
                 f"Lichess game {event.game_id} started as "
                 f"{event.color} against {event.opponent_name}; loading state."
             )
         else:
+            self._start_new_lichess_game_action.setEnabled(True)
             self._lichess_status.setText(
                 f"Lichess game {event.game_id} finished."
             )
@@ -3897,21 +4019,31 @@ class CameraWindow(QMainWindow):
 
     def _lichess_game_event_received(self, event: object) -> None:
         if isinstance(event, LichessPollingSnapshot):
+            self._awaiting_new_lichess_game = False
+            self._new_lichess_game_existing_ids = None
             self._update_lichess_board(event.game.state)
             self._update_lichess_synchronization(event.game)
             self._update_lichess_game_information(
                 event.game,
                 clocks_available=event.clocks_available,
             )
+            self._start_new_lichess_game_action.setEnabled(
+                _can_start_new_lichess_game(event.game.state)
+            )
             self._lichess_status.setText(
                 _lichess_polling_snapshot_message(event)
             )
         elif isinstance(event, LichessGameFull):
+            self._awaiting_new_lichess_game = False
+            self._new_lichess_game_existing_ids = None
             self._update_lichess_board(event.state)
             self._update_lichess_synchronization(event)
             self._update_lichess_game_information(
                 event,
                 clocks_available=True,
+            )
+            self._start_new_lichess_game_action.setEnabled(
+                _can_start_new_lichess_game(event.state)
             )
             self._lichess_status.setText(
                 f"Lichess game {event.game_id}: "
@@ -3927,6 +4059,9 @@ class CameraWindow(QMainWindow):
                     self._latest_lichess_game,
                     clocks_available=self._lichess_clocks_available,
                 )
+            self._start_new_lichess_game_action.setEnabled(
+                _can_start_new_lichess_game(event)
+            )
             self._lichess_status.setText(
                 _lichess_game_state_message(event)
             )
@@ -4350,8 +4485,13 @@ class CameraWindow(QMainWindow):
         self._lichess_thread = None
         self._lichess_worker = None
         self._lichess_client = None
+        self._awaiting_new_lichess_game = False
+        self._new_lichess_game_existing_ids = None
         self._lichess_button.setText("Connect to Lichess")
         self._lichess_button.setEnabled(True)
+        self._start_new_lichess_game_action.setEnabled(
+            _can_start_new_lichess_game(self._latest_lichess_state)
+        )
         if self._lichess_disconnect_requested:
             self._lichess_status.setText("Lichess disconnected.")
         self._lichess_disconnect_requested = False
