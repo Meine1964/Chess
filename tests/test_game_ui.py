@@ -1361,6 +1361,50 @@ def test_time_forfeit_keeps_projected_clocks_and_replaces_turn_dots(
     )
 
 
+def test_agreed_draw_keeps_stopped_projected_clocks_and_replaces_turn_dot(
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    game = LichessGameFull(
+        "draw1",
+        "unused",
+        LichessPlayer("white", "Local", 1510),
+        LichessPlayer("black", "Remote", 1490),
+        LichessGameState(
+            (),
+            "unused",
+            "black",
+            314000,
+            157000,
+            5000,
+            5000,
+            "draw",
+            None,
+            "1/2-1/2",
+        ),
+    )
+    window = SimpleNamespace(
+        _lichess_clocks_available=True,
+        _lichess_clock_snapshot_monotonic=None,
+        _calibration_result=object(),
+        _board_orientation_needs_detection=False,
+        _piece_side_orientation_needs_detection=False,
+        _projector_window=MagicMock(),
+        _board_quarter_turns=3,
+    )
+
+    CameraWindow._update_projected_lichess_clocks(window, game)
+
+    window._projector_window.set_edge_clocks.assert_called_once_with(
+        "05:14",
+        "02:37",
+        board_quarter_turns=3,
+        result="1/2-1/2",
+        expired_player=None,
+    )
+
+
 def test_lichess_turn_indicator_reports_completed_game() -> None:
     state = LichessGameState(
         (),

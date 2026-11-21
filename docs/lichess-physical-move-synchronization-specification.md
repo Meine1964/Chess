@@ -195,6 +195,22 @@ plane, including fractional board coordinates and the extrapolated outer edge,
 so the projected result retains the board's perspective and parallax
 correction.
 
+For an authoritative agreed draw with status `draw` and result `1/2-1/2`,
+both on-screen and projected clocks shall remain visible at their last reported
+values and shall stop advancing. The projected turn dot shall disappear. The
+edge gap between the clocks shall instead show the conventional unspaced
+fractional score `1/2-1/2`: each `1/2` shall be drawn as a stacked fraction
+with a horizontal fraction bar, with a dash directly between the two
+fractions. The numerator and denominator glyphs shall be smaller than the clock
+glyphs so that each complete stacked fraction has the same physical height and
+orientation as a clock glyph. Each visible numerator `1` shall be horizontally
+centered above its denominator `2`, accounting for the asymmetric
+seven-segment shape of `1`. The result quadrilateral shall use the same
+calibrated board-plane geometry, including fractional board coordinates and
+the extrapolated outer edge, as the timeout score. No expiration flag shall be
+shown. Other drawn-game statuses shall retain their existing terminal-game
+projection behavior.
+
 ## 3. Scope
 
 ### 3.1 First implementation

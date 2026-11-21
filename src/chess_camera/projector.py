@@ -48,6 +48,7 @@ TurnIndicatorCorner = Literal[
     "bottom-right",
     "bottom-left",
 ]
+ProjectedResult = Literal["1-0", "0-1", "1/2-1/2"]
 PROJECTED_ON_LIGHT_SQUARE = QColor("#007fff")
 PROJECTED_ON_DARK_SQUARE = QColor("#00ffff")
 PROJECTED_LEGAL_MOVE = QColor("#ffffff")
@@ -132,7 +133,7 @@ class ProjectorWindow(QWidget):
         self._turn_indicator_corner: TurnIndicatorCorner | None = None
         self._white_clock_text: str | None = None
         self._black_clock_text: str | None = None
-        self._result_text: str | None = None
+        self._result_text: ProjectedResult | None = None
         self._expired_player: Literal["white", "black"] | None = None
         self._clock_board_quarter_turns = 0
         self.setWindowTitle("Chess Projector Output")
@@ -178,7 +179,7 @@ class ProjectorWindow(QWidget):
         black_clock: str | None,
         *,
         board_quarter_turns: int,
-        result: Literal["1-0", "0-1"] | None = None,
+        result: ProjectedResult | None = None,
         expired_player: Literal["white", "black"] | None = None,
     ) -> None:
         if (white_clock is None) != (black_clock is None):
@@ -189,8 +190,10 @@ class ProjectorWindow(QWidget):
                 or any(character not in "0123456789:" for character in clock)
             ):
                 raise ValueError("Projected clocks must use digits and a colon.")
-        if result not in (None, "1-0", "0-1"):
-            raise ValueError("The projected result must be 1-0 or 0-1.")
+        if result not in (None, "1-0", "0-1", "1/2-1/2"):
+            raise ValueError(
+                "The projected result must be 1-0, 0-1, or 1/2-1/2."
+            )
         if white_clock is None and result is not None:
             raise ValueError("Projected results require projected clocks.")
         if expired_player is not None and result is None:
@@ -564,7 +567,7 @@ class ProjectorWindow(QWidget):
                 self._black_clock_text,
             )
             if self._result_text is not None:
-                self._draw_edge_clock(
+                self._draw_edge_result(
                     painter,
                     self._edge_result_polygon(
                         self._projector_grid,
@@ -754,6 +757,70 @@ class ProjectorWindow(QWidget):
         painter.restore()
 
     @staticmethod
+    def _draw_edge_result(
+        painter: QPainter,
+        polygon: NDArray[np.float32],
+        result: ProjectedResult,
+    ) -> None:
+        if result != "1/2-1/2":
+            ProjectorWindow._draw_edge_clock(painter, polygon, result)
+            return
+        canonical_width = 256.0
+        canonical_height = 128.0
+        transform = ProjectorWindow._edge_clock_paint_transform(
+            polygon,
+            canonical_width,
+            canonical_height,
+        )
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(PROJECTED_LEGAL_MOVE)
+        painter.setWorldTransform(transform, combine=True)
+        margin = 8.0
+        cell_width = (canonical_width - margin * 2) / 3
+        for index in (0, 2):
+            left = margin + index * cell_width
+            digit_left = left + cell_width * 0.28
+            digit_width = cell_width * 0.44
+            numerator_width = 14.0
+            numerator_left = (
+                left + cell_width / 2 - numerator_width + 3.5
+            )
+            ProjectorWindow._draw_seven_segment_digit(
+                painter,
+                QRectF(numerator_left, 8.0, numerator_width, 45.0),
+                "1",
+                thickness=7.0,
+            )
+            painter.drawRect(
+                QRectF(
+                    left + cell_width * 0.16,
+                    61.0,
+                    cell_width * 0.68,
+                    6.0,
+                )
+            )
+            ProjectorWindow._draw_seven_segment_digit(
+                painter,
+                QRectF(digit_left, 75.0, digit_width, 45.0),
+                "2",
+                thickness=7.0,
+            )
+        dash_left = margin + cell_width
+        ProjectorWindow._draw_seven_segment_digit(
+            painter,
+            QRectF(
+                dash_left + cell_width * 0.08,
+                canonical_height * 0.08,
+                cell_width * 0.84,
+                canonical_height * 0.84,
+            ),
+            "-",
+        )
+        painter.restore()
+
+    @staticmethod
     def _draw_expiration_flag(
         painter: QPainter,
         polygon: NDArray[np.float32],
@@ -824,11 +891,14 @@ class ProjectorWindow(QWidget):
         painter: QPainter,
         bounds: QRectF,
         digit: str,
+        *,
+        thickness: float | None = None,
     ) -> None:
         segments = _SEVEN_SEGMENT_DIGITS[digit]
         width = bounds.width()
         height = bounds.height()
-        thickness = min(width * 0.22, height * 0.09)
+        if thickness is None:
+            thickness = min(width * 0.22, height * 0.09)
         horizontal_width = width - thickness * 2
         vertical_height = height / 2 - thickness * 1.5
         rectangles = {

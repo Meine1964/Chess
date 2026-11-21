@@ -6592,12 +6592,18 @@ class CameraWindow(QMainWindow):
             and game.state.status == "outoftime"
             and game.state.winner in ("white", "black")
         )
+        agreed_draw = (
+            game is not None
+            and game.state.status == "draw"
+            and game.state.result == "1/2-1/2"
+        )
         clocks_visible = (
             game is not None
             and self._lichess_clocks_available
             and (
                 self._lichess_clock_snapshot_monotonic is not None
                 or timeout_result
+                or agreed_draw
             )
             and self._calibration_result is not None
             and not self._board_orientation_needs_detection
@@ -6613,13 +6619,15 @@ class CameraWindow(QMainWindow):
         white_time_ms, black_time_ms = _lichess_display_clock_times(
             game.state
         )
-        result: Literal["1-0", "0-1"] | None = None
+        result: Literal["1-0", "0-1", "1/2-1/2"] | None = None
         expired_player: PlayerColor | None = None
         if timeout_result:
             result = "1-0" if game.state.winner == "white" else "0-1"
             expired_player = (
                 "black" if game.state.winner == "white" else "white"
             )
+        elif agreed_draw:
+            result = "1/2-1/2"
         self._projector_window.set_edge_clocks(
             _format_projected_lichess_clock(white_time_ms),
             _format_projected_lichess_clock(black_time_ms),
