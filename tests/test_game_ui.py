@@ -35,6 +35,7 @@ from src.chess_camera.lichess_client import (
     OngoingGame,
     PlayerColor,
 )
+from src.chess_camera.offline_clock import OfflineClock
 from src.chess_camera.reference_move_tracker import (
     ReferenceTrackerState,
     ReferenceTrackerUpdate,
@@ -555,6 +556,7 @@ def test_offline_selected_promotion_commits_selected_piece() -> None:
         _persist_piece_position=MagicMock(),
         _persist_move_reference=MagicMock(),
         _persist_game_state=MagicMock(),
+        _offline_clock_move_accepted=MagicMock(),
         _update_turn_indicator=MagicMock(),
         _piece_status=MagicMock(),
         _project_offline_accepted_move=MagicMock(),
@@ -573,6 +575,7 @@ def test_offline_selected_promotion_commits_selected_piece() -> None:
     window._project_offline_accepted_move.assert_called_once_with(
         ((1, 0), (0, 0))
     )
+    window._offline_clock_move_accepted.assert_called_once_with()
 
 
 def test_offline_mode_mismatch_is_preserved_for_explicit_recovery() -> None:
@@ -1448,6 +1451,48 @@ def test_resignation_keeps_stopped_projected_clocks_and_shows_result() -> None:
     )
 
 
+def test_terminal_lichess_result_projects_without_available_clocks() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    game = LichessGameFull(
+        "mate1",
+        "unused",
+        LichessPlayer("white", "Local", 1510),
+        LichessPlayer("black", "Remote", 1490),
+        LichessGameState(
+            (),
+            "unused",
+            "white",
+            0,
+            0,
+            0,
+            0,
+            "mate",
+            "black",
+            "0-1",
+        ),
+    )
+    window = SimpleNamespace(
+        _lichess_clocks_available=False,
+        _lichess_clock_snapshot_monotonic=None,
+        _calibration_result=object(),
+        _board_orientation_needs_detection=False,
+        _piece_side_orientation_needs_detection=False,
+        _projector_window=MagicMock(),
+        _board_quarter_turns=2,
+    )
+
+    CameraWindow._update_projected_lichess_clocks(window, game)
+
+    window._projector_window.set_edge_clocks.assert_called_once_with(
+        None,
+        None,
+        board_quarter_turns=2,
+        result="0-1",
+    )
+
+
 def test_successful_resignation_immediately_sets_authoritative_result() -> None:
     from types import SimpleNamespace
     from unittest.mock import MagicMock
@@ -2077,6 +2122,98 @@ def test_turn_indicator_reports_completed_game() -> None:
     assert _turn_indicator_state("offline-game", game) == (
         "#808080",
         "Game over: 0-1",
+    )
+
+
+def test_offline_checkmate_projects_result_without_clocks() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    game = LegalGame()
+    for source, destination in (
+        ((6, 5), (5, 5)),
+        ((1, 4), (3, 4)),
+        ((6, 6), (4, 6)),
+        ((0, 3), (4, 7)),
+    ):
+        game.apply_move(source, destination)
+    window = SimpleNamespace(
+        _project_turn_indicator=True,
+        _game_mode="offline-game",
+        _legal_game=game,
+        _latest_lichess_state=None,
+        _board_quarter_turns=3,
+        _projector_window=MagicMock(),
+    )
+
+    CameraWindow._update_projected_turn_indicator(window)
+
+    window._projector_window.set_turn_indicator.assert_called_once_with(None)
+    window._projector_window.set_edge_clocks.assert_called_once_with(
+        None,
+        None,
+        board_quarter_turns=3,
+        result="0-1",
+    )
+
+
+def test_first_offline_move_starts_next_players_clock() -> None:
+    from types import SimpleNamespace
+
+    now = [0.0]
+    clock = OfflineClock(600_000, 5_000, clock=lambda: now[0])
+    game = LegalGame()
+    game.apply_move((6, 4), (4, 4))
+    window = SimpleNamespace(
+        _offline_clock_enabled=True,
+        _offline_clock=clock,
+        _legal_game=game,
+        _persist_offline_clock=lambda: None,
+    )
+
+    CameraWindow._offline_clock_move_accepted(window)
+
+    snapshot = clock.snapshot()
+    assert snapshot.active_player == "black"
+    assert snapshot.running is True
+    assert snapshot.white_time_ms == 600_000
+
+
+def test_offline_clock_timeout_projects_result_and_expired_player() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    now = [0.0]
+    clock = OfflineClock(1_000, 0, clock=lambda: now[0])
+    clock.start("white")
+    now[0] = 1.0
+    window = SimpleNamespace(
+        _offline_clock_panel=MagicMock(),
+        _offline_clock_enabled=True,
+        _game_mode="offline-game",
+        _latest_lichess_state=None,
+        _offline_clock=clock,
+        _offline_white_clock=MagicMock(),
+        _offline_black_clock=MagicMock(),
+        _offline_clock_status=MagicMock(),
+        _offline_clock_button=MagicMock(),
+        _offline_turn_inference_pending=False,
+        _legal_game=LegalGame(),
+        _projector_window=MagicMock(),
+        _board_quarter_turns=2,
+    )
+
+    CameraWindow._refresh_offline_clock_display(window)
+
+    window._offline_clock_status.setText.assert_called_once_with(
+        "White flag fell"
+    )
+    window._projector_window.set_edge_clocks.assert_called_once_with(
+        "00:00",
+        "00:01",
+        board_quarter_turns=2,
+        result="0-1",
+        expired_player="white",
     )
 
 

@@ -261,8 +261,17 @@ and a calibrated projector grid are available. They shall also remain hidden
 when clocks are unavailable or calibration and diagnostic patterns own the
 projector output. Any authoritative terminal result shall keep both clocks at
 their last reported values, remove the projected turn dot, and show the result
-in the edge gap. Locally displayed zero shall not project or imply an
-authoritative timeout result.
+in the edge gap. If authoritative clocks are unavailable, the same result
+shall appear alone in the calibrated edge-result position. Locally displayed
+zero shall not project or imply an authoritative timeout result.
+
+Offline play shall use the same result-only edge rendering for every terminal
+legal-game result, including White or Black checkmate wins and draws. A local
+Lichess move that delivers checkmate shall refresh the result projection
+immediately from the locally verified legal result rather than waiting for a
+later server snapshot. Official Lichess terminal snapshots, successful
+resignation, and successful draw acceptance shall converge on the same edge
+result rendering.
 
 When Lichess accepts a resignation request, that successful response is
 immediate terminal authority; the application shall not wait for the resigned

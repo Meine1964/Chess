@@ -426,6 +426,50 @@ def test_projector_places_timeout_result_between_clocks(
     assert expiration_flag_pixels > 10
 
 
+def test_projector_places_terminal_result_without_clocks(
+    application: QApplication,
+) -> None:
+    window = ProjectorWindow()
+    window.resize(360, 180)
+    x_values = np.linspace(100, 260, 9, dtype=np.float32)
+    y_values = np.linspace(30, 150, 9, dtype=np.float32)
+    x_grid, y_grid = np.meshgrid(x_values, y_values)
+    grid = np.stack((x_grid, y_grid), axis=2).astype(np.float32)
+    window.set_projector_grid(grid)
+    window.set_turn_indicator("bottom-left")
+    window.set_edge_clocks(
+        None,
+        None,
+        board_quarter_turns=1,
+        result="0-1",
+    )
+    window.show_black()
+    window.show()
+    application.processEvents()
+
+    image = window.grab().toImage()
+    result_pixels = sum(
+        image.pixelColor(x, y).red() > 150
+        for x in range(166, 195)
+        for y in range(10, 36)
+    )
+    black_clock_pixels = sum(
+        image.pixelColor(x, y).red() > 150
+        for x in range(135, 166)
+        for y in range(10, 41)
+    )
+    white_clock_pixels = sum(
+        image.pixelColor(x, y).red() > 150
+        for x in range(195, 226)
+        for y in range(10, 41)
+    )
+
+    assert result_pixels > 20
+    assert black_clock_pixels == 0
+    assert white_clock_pixels == 0
+    assert image.pixelColor(90, 158).red() == 0
+
+
 def test_projector_places_agreed_draw_result_between_clocks(
     application: QApplication,
 ) -> None:

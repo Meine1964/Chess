@@ -107,6 +107,7 @@ from .occupancy import (
     SquareOccupancyDetector,
     detect_starting_position_orientation,
 )
+from .offline_clock import OfflineClock, OfflineClockSnapshot
 from .piece_color_classifier import PieceColorLabel, classify_piece_colors
 from .projector import ProjectorWindow, TurnIndicatorCorner, focus_pattern
 from .promotion_selection import (
@@ -184,6 +185,14 @@ _PIECE_POSITION_SETTING = "pieces/accepted_position"
 _GAME_MODE_SETTING = "game/mode"
 _LEGAL_GAME_FEN_SETTING = "game/offline_fen"
 _OFFLINE_TURN_INFERENCE_SETTING = "game/offline_turn_inference_pending"
+_OFFLINE_CLOCK_ENABLED_SETTING = "game/offline_clock_enabled"
+_OFFLINE_CLOCK_INITIAL_MINUTES_SETTING = "game/offline_clock_initial_minutes"
+_OFFLINE_CLOCK_INCREMENT_SECONDS_SETTING = (
+    "game/offline_clock_increment_seconds"
+)
+_OFFLINE_CLOCK_WHITE_TIME_SETTING = "game/offline_clock_white_time_ms"
+_OFFLINE_CLOCK_BLACK_TIME_SETTING = "game/offline_clock_black_time_ms"
+_OFFLINE_CLOCK_HAS_STARTED_SETTING = "game/offline_clock_has_started"
 _BOARD_ORIENTATION_SETTING = "board/automatic_clockwise_quarter_turns"
 _INTERACTION_FONT_POINT_SIZE = 12
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -1089,6 +1098,32 @@ class CameraWindow(QMainWindow):
         self._reference_move_tracker = ReferenceMoveTracker()
         self._piece_synchronizer = PiecePositionSynchronizer()
         self._legal_game = LegalGame()
+        self._offline_clock_enabled = _stored_boolean(
+            self._settings.value(_OFFLINE_CLOCK_ENABLED_SETTING, False),
+            False,
+        )
+        self._offline_clock_initial_minutes = max(
+            1,
+            _stored_integer(
+                self._settings.value(
+                    _OFFLINE_CLOCK_INITIAL_MINUTES_SETTING, 10
+                ),
+                10,
+            ),
+        )
+        self._offline_clock_increment_seconds = max(
+            0,
+            _stored_integer(
+                self._settings.value(
+                    _OFFLINE_CLOCK_INCREMENT_SECONDS_SETTING, 0
+                ),
+                0,
+            ),
+        )
+        self._offline_clock = OfflineClock(
+            self._offline_clock_initial_minutes * 60_000,
+            self._offline_clock_increment_seconds * 1000,
+        )
         self._game_mode: GameMode = "diagnostic"
         self._offline_turn_inference_pending = False
         self._pending_offline_games: tuple[LegalGame, LegalGame] | None = None
@@ -1287,6 +1322,31 @@ class CameraWindow(QMainWindow):
         camera_layout.addWidget(self._turn_text)
         camera_layout.addStretch(1)
         self._update_turn_indicator()
+
+        self._offline_white_clock = QLabel("--:--")
+        self._offline_black_clock = QLabel("--:--")
+        self._offline_clock_status = QLabel("Paused")
+        self._offline_clock_button = QPushButton("Start")
+        self._offline_clock_button.clicked.connect(
+            self._start_or_pause_offline_clock
+        )
+        self._offline_clock_reset_button = QPushButton("Reset")
+        self._offline_clock_reset_button.clicked.connect(
+            self._reset_offline_clock
+        )
+        offline_clock_layout = QHBoxLayout()
+        offline_clock_layout.addWidget(QLabel("White:"))
+        offline_clock_layout.addWidget(self._offline_white_clock)
+        offline_clock_layout.addSpacing(12)
+        offline_clock_layout.addWidget(QLabel("Black:"))
+        offline_clock_layout.addWidget(self._offline_black_clock)
+        offline_clock_layout.addSpacing(12)
+        offline_clock_layout.addWidget(self._offline_clock_status)
+        offline_clock_layout.addStretch(1)
+        offline_clock_layout.addWidget(self._offline_clock_button)
+        offline_clock_layout.addWidget(self._offline_clock_reset_button)
+        self._offline_clock_panel = QGroupBox("Offline clock")
+        self._offline_clock_panel.setLayout(offline_clock_layout)
 
         self._camera_status = QLabel()
         self._camera_status.setTextInteractionFlags(
@@ -1669,6 +1729,7 @@ class CameraWindow(QMainWindow):
         _set_readable_interaction_font(interaction_content)
         interaction_layout = QVBoxLayout()
         interaction_layout.addLayout(camera_layout)
+        interaction_layout.addWidget(self._offline_clock_panel)
         interaction_layout.addWidget(self._calibration_progress)
         interaction_layout.addLayout(calibration_indicator_layout)
         interaction_layout.addWidget(self._camera_status)
@@ -1736,7 +1797,11 @@ class CameraWindow(QMainWindow):
         self._lichess_clock_timer.timeout.connect(
             self._refresh_lichess_clock_display
         )
+        self._lichess_clock_timer.timeout.connect(
+            self._refresh_offline_clock_display
+        )
         self._lichess_clock_timer.start()
+        self._refresh_offline_clock_display()
         QTimer.singleShot(0, self._black_projector)
         if selected_index is None:
             self._wait_for_external_camera()
@@ -1954,6 +2019,38 @@ class CameraWindow(QMainWindow):
         )
         project_turn_indicator.setChecked(self._project_turn_indicator)
         chess_layout.addRow(project_turn_indicator)
+        current_offline_clock_enabled = getattr(
+            self, "_offline_clock_enabled", False
+        )
+        current_offline_clock_initial_minutes = getattr(
+            self, "_offline_clock_initial_minutes", 10
+        )
+        current_offline_clock_increment_seconds = getattr(
+            self, "_offline_clock_increment_seconds", 0
+        )
+        offline_clock_enabled = QCheckBox("Enable clock for Offline games")
+        offline_clock_enabled.setChecked(current_offline_clock_enabled)
+        chess_layout.addRow(offline_clock_enabled)
+        offline_clock_initial_minutes = QSpinBox()
+        offline_clock_initial_minutes.setRange(1, 180)
+        offline_clock_initial_minutes.setSuffix(" min")
+        offline_clock_initial_minutes.setValue(
+            current_offline_clock_initial_minutes
+        )
+        chess_layout.addRow(
+            "Offline initial time:",
+            offline_clock_initial_minutes,
+        )
+        offline_clock_increment_seconds = QSpinBox()
+        offline_clock_increment_seconds.setRange(0, 60)
+        offline_clock_increment_seconds.setSuffix(" sec")
+        offline_clock_increment_seconds.setValue(
+            current_offline_clock_increment_seconds
+        )
+        chess_layout.addRow(
+            "Offline increment:",
+            offline_clock_increment_seconds,
+        )
         chess_tab.setLayout(chess_layout)
         tabs.addTab(chess_tab, "Chess")
 
@@ -2056,6 +2153,17 @@ class CameraWindow(QMainWindow):
             self._set_project_turn_indicator(
                 project_turn_indicator.isChecked()
             )
+            offline_clock_values = (
+                offline_clock_enabled.isChecked(),
+                offline_clock_initial_minutes.value(),
+                offline_clock_increment_seconds.value(),
+            )
+            if offline_clock_values != (
+                current_offline_clock_enabled,
+                current_offline_clock_initial_minutes,
+                current_offline_clock_increment_seconds,
+            ):
+                self._configure_offline_clock(*offline_clock_values)
             selected_ai_color = ai_color.currentData()
             selected_ai_clock = ai_clock.currentData()
             if not isinstance(selected_ai_color, str):
@@ -3748,6 +3856,12 @@ class CameraWindow(QMainWindow):
             return
         if self._pending_lichess_local_move is not None:
             return
+        if (
+            self._game_mode == "offline-game"
+            and getattr(self, "_offline_clock_enabled", False)
+            and self._offline_clock.snapshot().expired_player is not None
+        ):
+            return
         lichess_controller = self._lichess_game_controller
         lichess_signature = (
             None
@@ -4067,6 +4181,11 @@ class CameraWindow(QMainWindow):
         elif legal_move is None:
             self._piece_status.setText(position_update.message)
         else:
+            offline_clock_move_accepted = getattr(
+                self, "_offline_clock_move_accepted", None
+            )
+            if offline_clock_move_accepted is not None:
+                offline_clock_move_accepted()
             self._persist_game_state()
             self._update_turn_indicator()
             self._piece_status.setText(
@@ -4444,6 +4563,11 @@ class CameraWindow(QMainWindow):
         self._last_rejected_move = None
         self._persist_piece_position(position_update.position)
         self._persist_move_reference()
+        offline_clock_move_accepted = getattr(
+            self, "_offline_clock_move_accepted", None
+        )
+        if offline_clock_move_accepted is not None:
+            offline_clock_move_accepted()
         self._persist_game_state()
         self._update_turn_indicator()
         self._piece_status.setText(
@@ -4603,6 +4727,14 @@ class CameraWindow(QMainWindow):
                     result=committed.status.result,
                 )
             )
+            if (
+                committed.status.is_game_over
+                and self._latest_lichess_game is not None
+            ):
+                self._update_lichess_game_information(
+                    self._latest_lichess_game,
+                    clocks_available=self._lichess_clocks_available,
+                )
         message = (
             f"Lichess accepted {square_name(move[0])}-"
             f"{square_name(move[1])}; {committed.status.turn} to move."
@@ -4736,6 +4868,9 @@ class CameraWindow(QMainWindow):
             return
         self._piece_synchronizer.reset()
         self._legal_game.reset()
+        offline_clock = getattr(self, "_offline_clock", None)
+        if offline_clock is not None:
+            offline_clock.reset(self._legal_game.status.turn)
         self._offline_turn_inference_pending = False
         self._pending_offline_games = None
         if self._activate_offline_after_reset:
@@ -5822,6 +5957,11 @@ class CameraWindow(QMainWindow):
             if self._offline_turn_inference_pending
             else None
         )
+        restore_saved_offline_clock = getattr(
+            self, "_restore_saved_offline_clock", None
+        )
+        if restore_saved_offline_clock is not None:
+            restore_saved_offline_clock()
         self._startup_offline_reference_refresh_pending = True
 
     def _start_pending_offline_reference_refresh(self) -> None:
@@ -5840,7 +5980,40 @@ class CameraWindow(QMainWindow):
             _OFFLINE_TURN_INFERENCE_SETTING,
             getattr(self, "_offline_turn_inference_pending", False),
         )
+        self._persist_offline_clock()
         self._settings.sync()
+
+    def _restore_saved_offline_clock(self) -> None:
+        initial_time_ms = self._offline_clock.initial_time_ms
+        white_time_ms = max(
+            0,
+            _stored_integer(
+                self._settings.value(
+                    _OFFLINE_CLOCK_WHITE_TIME_SETTING, initial_time_ms
+                ),
+                initial_time_ms,
+            ),
+        )
+        black_time_ms = max(
+            0,
+            _stored_integer(
+                self._settings.value(
+                    _OFFLINE_CLOCK_BLACK_TIME_SETTING, initial_time_ms
+                ),
+                initial_time_ms,
+            ),
+        )
+        self._offline_clock.restore(
+            white_time_ms,
+            black_time_ms,
+            self._legal_game.status.turn,
+            has_started=_stored_boolean(
+                self._settings.value(
+                    _OFFLINE_CLOCK_HAS_STARTED_SETTING, False
+                ),
+                False,
+            ),
+        )
 
     def _game_mode_changed(self, index: int) -> None:
         selected = str(self._game_mode_selector.itemData(index))
@@ -5952,6 +6125,10 @@ class CameraWindow(QMainWindow):
             self._sync_game_mode_actions()
 
     def _activate_board_setup_mode(self) -> None:
+        offline_clock = getattr(self, "_offline_clock", None)
+        if offline_clock is not None:
+            offline_clock.pause()
+            self._persist_offline_clock()
         self._pending_offline_restore_game = None
         self._offline_mode_recovery_error = None
         self._offline_restore_requested = False
@@ -5999,6 +6176,9 @@ class CameraWindow(QMainWindow):
         )
         self._pending_offline_games = pending_games
         self._offline_turn_inference_pending = pending_games is not None
+        offline_clock = getattr(self, "_offline_clock", None)
+        if offline_clock is not None:
+            offline_clock.reset(self._legal_game.status.turn)
         self._game_mode = "offline-game"
         self._game_mode_selector.blockSignals(True)
         self._game_mode_selector.setCurrentIndex(1)
@@ -6024,6 +6204,11 @@ class CameraWindow(QMainWindow):
         self._offline_turn_inference_pending = False
         self._pending_offline_games = None
         self._legal_game = target
+        restore_saved_offline_clock = getattr(
+            self, "_restore_saved_offline_clock", None
+        )
+        if restore_saved_offline_clock is not None:
+            restore_saved_offline_clock()
         self._game_mode = "offline-game"
         self._offline_restore_requested = True
         self._game_mode_selector.blockSignals(True)
@@ -6922,6 +7107,133 @@ class CameraWindow(QMainWindow):
             ),
         )
 
+    def _configure_offline_clock(
+        self,
+        enabled: bool,
+        initial_minutes: int,
+        increment_seconds: int,
+    ) -> None:
+        timing_changed = (
+            initial_minutes != self._offline_clock_initial_minutes
+            or increment_seconds != self._offline_clock_increment_seconds
+        )
+        self._offline_clock_enabled = enabled
+        self._offline_clock_initial_minutes = initial_minutes
+        self._offline_clock_increment_seconds = increment_seconds
+        if timing_changed:
+            self._offline_clock.configure(
+                initial_minutes * 60_000,
+                increment_seconds * 1000,
+            )
+        elif not enabled:
+            self._offline_clock.pause()
+        self._settings.setValue(_OFFLINE_CLOCK_ENABLED_SETTING, enabled)
+        self._settings.setValue(
+            _OFFLINE_CLOCK_INITIAL_MINUTES_SETTING, initial_minutes
+        )
+        self._settings.setValue(
+            _OFFLINE_CLOCK_INCREMENT_SECONDS_SETTING, increment_seconds
+        )
+        self._persist_offline_clock()
+        self._settings.sync()
+        self._refresh_offline_clock_display()
+        self._update_projected_turn_indicator()
+
+    def _persist_offline_clock(self) -> None:
+        snapshot = self._offline_clock.snapshot()
+        self._settings.setValue(
+            _OFFLINE_CLOCK_WHITE_TIME_SETTING, snapshot.white_time_ms
+        )
+        self._settings.setValue(
+            _OFFLINE_CLOCK_BLACK_TIME_SETTING, snapshot.black_time_ms
+        )
+        self._settings.setValue(
+            _OFFLINE_CLOCK_HAS_STARTED_SETTING, snapshot.has_started
+        )
+
+    def _start_or_pause_offline_clock(self) -> None:
+        snapshot = self._offline_clock.snapshot()
+        if snapshot.running:
+            self._offline_clock.pause()
+        else:
+            self._offline_clock.start(self._legal_game.status.turn)
+        self._persist_offline_clock()
+        self._settings.sync()
+        self._refresh_offline_clock_display()
+
+    def _reset_offline_clock(self) -> None:
+        self._offline_clock.reset(self._legal_game.status.turn)
+        self._persist_offline_clock()
+        self._settings.sync()
+        self._refresh_offline_clock_display()
+
+    def _offline_clock_move_accepted(self) -> None:
+        if not self._offline_clock_enabled:
+            return
+        if self._legal_game.status.is_game_over:
+            self._offline_clock.pause()
+        else:
+            self._offline_clock.accept_move(self._legal_game.status.turn)
+        self._persist_offline_clock()
+
+    def _refresh_offline_clock_display(self) -> None:
+        if not hasattr(self, "_offline_clock_panel"):
+            return
+        visible = (
+            self._offline_clock_enabled
+            and self._game_mode == "offline-game"
+            and self._latest_lichess_state is None
+        )
+        self._offline_clock_panel.setVisible(visible)
+        if not visible:
+            return
+        snapshot = self._offline_clock.snapshot()
+        self._offline_white_clock.setText(
+            _format_lichess_clock(snapshot.white_time_ms)
+        )
+        self._offline_black_clock.setText(
+            _format_lichess_clock(snapshot.black_time_ms)
+        )
+        status = self._legal_game.status
+        if snapshot.expired_player is not None:
+            self._offline_clock_status.setText(
+                f"{snapshot.expired_player.title()} flag fell"
+            )
+        elif status.is_game_over:
+            self._offline_clock_status.setText(f"Game over: {status.result}")
+        elif snapshot.running:
+            self._offline_clock_status.setText(
+                f"{snapshot.active_player.title()} running"
+            )
+        else:
+            self._offline_clock_status.setText("Paused")
+        can_start = (
+            not self._offline_turn_inference_pending
+            and not status.is_game_over
+            and snapshot.expired_player is None
+        )
+        self._offline_clock_button.setEnabled(
+            snapshot.running or can_start
+        )
+        self._offline_clock_button.setText(
+            "Pause" if snapshot.running else "Start"
+        )
+        result = (
+            status.result
+            if status.result in ("1-0", "0-1", "1/2-1/2")
+            else snapshot.result
+        )
+        self._projector_window.set_edge_clocks(
+            _format_projected_lichess_clock(snapshot.white_time_ms),
+            _format_projected_lichess_clock(snapshot.black_time_ms),
+            board_quarter_turns=self._board_quarter_turns,
+            result=cast(
+                Literal["1-0", "0-1", "1/2-1/2"] | None,
+                result,
+            ),
+            expired_player=snapshot.expired_player,
+        )
+
     def _refresh_lichess_clock_display(self) -> None:
         game = self._displayed_lichess_game()
         if game is None or self._lichess_clock_snapshot_monotonic is None:
@@ -6947,18 +7259,43 @@ class CameraWindow(QMainWindow):
             game is not None
             and game.state.result in ("1-0", "0-1", "1/2-1/2")
         )
-        clocks_visible = (
+        projection_available = (
             game is not None
-            and self._lichess_clocks_available
-            and (
-                self._lichess_clock_snapshot_monotonic is not None
-                or terminal_result
-            )
             and self._calibration_result is not None
             and not self._board_orientation_needs_detection
             and not self._piece_side_orientation_needs_detection
         )
-        if not clocks_visible or game is None:
+        if not projection_available or game is None:
+            self._projector_window.set_edge_clocks(
+                None,
+                None,
+                board_quarter_turns=self._board_quarter_turns,
+            )
+            return
+        result = (
+            cast(
+                Literal["1-0", "0-1", "1/2-1/2"],
+                game.state.result,
+            )
+            if terminal_result
+            else None
+        )
+        if terminal_result and not self._lichess_clocks_available:
+            self._projector_window.set_edge_clocks(
+                None,
+                None,
+                board_quarter_turns=self._board_quarter_turns,
+                result=result,
+            )
+            return
+        clocks_visible = (
+            self._lichess_clocks_available
+            and (
+                self._lichess_clock_snapshot_monotonic is not None
+                or terminal_result
+            )
+        )
+        if not clocks_visible:
             self._projector_window.set_edge_clocks(
                 None,
                 None,
@@ -6968,17 +7305,10 @@ class CameraWindow(QMainWindow):
         white_time_ms, black_time_ms = _lichess_display_clock_times(
             game.state
         )
-        result: Literal["1-0", "0-1", "1/2-1/2"] | None = None
         expired_player: PlayerColor | None = None
         if timeout_result:
-            result = "1-0" if game.state.winner == "white" else "0-1"
             expired_player = (
                 "black" if game.state.winner == "white" else "white"
-            )
-        elif terminal_result:
-            result = cast(
-                Literal["1-0", "0-1", "1/2-1/2"],
-                game.state.result,
             )
         self._projector_window.set_edge_clocks(
             _format_projected_lichess_clock(white_time_ms),
@@ -7533,6 +7863,32 @@ class CameraWindow(QMainWindow):
             )
         )
         self._projector_window.set_turn_indicator(corner)
+        if self._latest_lichess_state is not None:
+            return
+        if (
+            getattr(self, "_offline_clock_enabled", False)
+            and self._game_mode == "offline-game"
+        ):
+            self._refresh_offline_clock_display()
+            return
+        offline_result = (
+            self._legal_game.status.result
+            if (
+                self._game_mode == "offline-game"
+                and self._legal_game.status.result
+                in ("1-0", "0-1", "1/2-1/2")
+            )
+            else None
+        )
+        self._projector_window.set_edge_clocks(
+            None,
+            None,
+            board_quarter_turns=self._board_quarter_turns,
+            result=cast(
+                Literal["1-0", "0-1", "1/2-1/2"] | None,
+                offline_result,
+            ),
+        )
 
     def _restore_move_reference(self) -> None:
         if (
@@ -8017,6 +8373,11 @@ class CameraWindow(QMainWindow):
             self._lichess_worker.request_stop()
             event.ignore()
             return
+        offline_clock = getattr(self, "_offline_clock", None)
+        if offline_clock is not None:
+            offline_clock.pause()
+            self._persist_offline_clock()
+            self._settings.sync()
         _save_window_placement(self, self._settings)
         self._calibrator.cancel()
         self._alignment_monitor.clear()

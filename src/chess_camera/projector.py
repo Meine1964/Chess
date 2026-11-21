@@ -203,8 +203,6 @@ class ProjectorWindow(QWidget):
             raise ValueError(
                 "The projected result must be 1-0, 0-1, or 1/2-1/2."
             )
-        if white_clock is None and result is not None:
-            raise ValueError("Projected results require projected clocks.")
         if expired_player is not None and result is None:
             raise ValueError("An expiration flag requires projected results.")
         self._white_clock_text = white_clock
@@ -542,8 +540,13 @@ class ProjectorWindow(QWidget):
             self._display_mode
             in ("black", "move", "illegal", "correction", "reconciliation")
             and self._projector_grid is not None
-            and self._white_clock_text is not None
-            and self._black_clock_text is not None
+            and (
+                (
+                    self._white_clock_text is not None
+                    and self._black_clock_text is not None
+                )
+                or self._result_text is not None
+            )
         ):
             white_clock_polygon = self._edge_clock_polygon(
                 self._projector_grid,
@@ -568,18 +571,22 @@ class ProjectorWindow(QWidget):
                     result_polygon,
                 ]
             )
-            self._draw_edge_clock(
-                painter,
-                white_clock_polygon,
-                self._white_clock_text,
-                stroke_scale=stroke_scales[0],
-            )
-            self._draw_edge_clock(
-                painter,
-                black_clock_polygon,
-                self._black_clock_text,
-                stroke_scale=stroke_scales[1],
-            )
+            if (
+                self._white_clock_text is not None
+                and self._black_clock_text is not None
+            ):
+                self._draw_edge_clock(
+                    painter,
+                    white_clock_polygon,
+                    self._white_clock_text,
+                    stroke_scale=stroke_scales[0],
+                )
+                self._draw_edge_clock(
+                    painter,
+                    black_clock_polygon,
+                    self._black_clock_text,
+                    stroke_scale=stroke_scales[1],
+                )
             if self._result_text is not None:
                 self._draw_edge_result(
                     painter,
