@@ -427,12 +427,19 @@ An accepted move shall be applied atomically:
 6. Persist the logical position and reference metadata.
 7. Return to `watching`.
 
-Offline legal play shall keep the projector black after an accepted move so
-ordinary verification continues against the newly accepted reference without
-a marking-removal handoff. The optional next-turn dot may remain visible
-independently. Diagnostic movement may retain temporary accepted-square
-projection, and illegal correction may retain its red projection; neither
-shall expose the turn dot.
+Offline legal play shall project the accepted source and destination for
+exactly one second after the move and its new reference have been committed.
+The marking may include the optional next-turn dot. Ordinary move verification
+shall remain paused while the marking is visible. After one second, the
+projector shall return to black and verification shall remain paused for a
+fixed one-second camera-exposure settling interval before resuming against the
+committed reference.
+
+This brief lifecycle shall use generation-guarded timers so stale callbacks
+cannot clear a newer marking. It shall not use hand detection, adaptive
+settling, automatic reprojection, or a configurable duration. Diagnostic
+movement may retain temporary accepted-square projection, and illegal
+correction may retain its red projection; neither shall expose the turn dot.
 
 Illegal-relocation correction shall project both the authoritative source and
 observed destination in red until a board-and-halo activity detector confirms

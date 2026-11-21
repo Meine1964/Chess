@@ -549,6 +549,95 @@ def test_worker_falls_back_to_read_only_polling() -> None:
     assert isinstance(game_events[0], LichessPollingSnapshot)
 
 
+def test_polling_fetches_terminal_move_when_game_disappears() -> None:
+    moves = (
+        "e2e4",
+        "e7e5",
+        "c2c3",
+        "d8h4",
+        "d2d3",
+        "f8c5",
+        "g1f3",
+    )
+    before_mate = chess.Board()
+    for uci in moves:
+        before_mate.push_uci(uci)
+    after_mate = before_mate.copy()
+    after_mate.push_uci("h4f2")
+
+    class FinishedGameClient:
+        def __init__(self) -> None:
+            self.ongoing_calls = 0
+            self.snapshot_calls: list[str] = []
+
+        def get_ongoing_games(self) -> tuple[OngoingGame, ...]:
+            self.ongoing_calls += 1
+            if self.ongoing_calls > 1:
+                return ()
+            return (
+                OngoingGame(
+                    "Fz54fOC3",
+                    "Fz54fOC3abcd",
+                    "white",
+                    before_mate.fen(),
+                    "Stockfish level 1",
+                    False,
+                    "g1f3",
+                ),
+            )
+
+        def get_game_snapshot(
+            self,
+            game_id: str,
+        ) -> LichessPollingSnapshot:
+            self.snapshot_calls.append(game_id)
+            state = LichessGameState(
+                (*moves, "h4f2"),
+                after_mate.fen(),
+                "white",
+                0,
+                0,
+                0,
+                0,
+                "mate",
+                "black",
+                "0-1",
+            )
+            return LichessPollingSnapshot(
+                LichessGameFull(
+                    game_id,
+                    chess.STARTING_FEN,
+                    LichessPlayer("white", "Meine", None),
+                    LichessPlayer(
+                        "black",
+                        "Stockfish level 1",
+                        None,
+                    ),
+                    state,
+                ),
+                False,
+            )
+
+    client = FinishedGameClient()
+    worker = LichessConnectionWorker(
+        cast(LichessReadOnlyClient, client)
+    )
+    game_events: list[object] = []
+    worker.game_event_received.connect(game_events.append)
+
+    assert worker._poll_ongoing_game(None) == "Fz54fOC3"
+    assert worker._poll_ongoing_game("Fz54fOC3") is None
+
+    final_snapshot = cast(LichessPollingSnapshot, game_events[-1])
+    assert client.snapshot_calls == ["Fz54fOC3"]
+    assert final_snapshot.game.initial_fen == before_mate.fen()
+    assert final_snapshot.game.state.moves == ("h4f2",)
+    assert final_snapshot.game.state.fen == after_mate.fen()
+    assert final_snapshot.game.state.status == "mate"
+    assert final_snapshot.game.state.result == "0-1"
+    assert worker._polling_game_id is None
+
+
 def test_polling_waits_for_selection_when_multiple_games_are_active() -> None:
     client = MultiplePollingGamesClient()
     worker = LichessConnectionWorker(cast(LichessReadOnlyClient, client))

@@ -190,6 +190,11 @@ extensible right-click context menu with:
   pieces.
 - **Copy Board**: copy the square rendered board, including its current pieces
   and visible overlays but excluding layout margins, as an image.
+- The Lichess board shall additionally expose **Current Lichess game...**.
+  The action shall be enabled when current or most recently finished game
+  metadata is available and shall open a selectable, read-only dialog showing
+  the game ID, players, clocks, game status/result, and physical
+  synchronization status.
 
 The menu shall remain available on the display-only Lichess board; enabling
 the context menu shall not make its squares selectable.
@@ -210,12 +215,12 @@ After an accepted move, both its source and destination squares shall remain
 visibly lighter on the UI board until another move is accepted. An explicit
 reset to the standard starting position shall clear the highlight.
 
-In Offline legal mode, accepting a move shall not illuminate its source and
-destination on the projector. The projector shall remain idle-dark so camera
-verification of the next move continues immediately. The optional next-turn
-dot lies outside the camera-evidence board and may remain visible. Red
-illegal-move correction projection and every other actionable projector mode
-shall continue to suppress the turn dot.
+In Offline legal mode, accepting a move shall illuminate its source and
+destination on the projector for exactly one second. The optional next-turn
+dot may appear concurrently. The projector shall then return to idle-dark
+output and allow one fixed second for camera exposure to settle before
+verification resumes. Red illegal-move correction projection and every other
+actionable projector mode shall continue to suppress the turn dot.
 
 If that next manipulation produces a clear relocation which does not match
 any legal physical move signature, including a move by the wrong side, the

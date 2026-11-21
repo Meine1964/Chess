@@ -726,6 +726,10 @@ def test_lichess_ai_defaults_apply_and_cancel_transactionally(
 
     def interact(dialog: QDialog) -> int:
         nonlocal invocation
+        assert all(
+            label.text() != "Disconnected"
+            for label in dialog.findChildren(QLabel)
+        )
         defaults = next(
             group
             for group in dialog.findChildren(QGroupBox)

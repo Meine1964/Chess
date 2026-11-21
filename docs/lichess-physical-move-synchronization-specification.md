@@ -201,8 +201,15 @@ selects one.
 The selector shall identify each game by opponent, player color, turn state,
 and game ID. Changing the selection shall discard the prior game's
 synchronization controller before the selected game's snapshot is applied.
-If the selected game is no longer ongoing, polling shall return to the
-selection-required state.
+If the selected game is no longer present in the ongoing-games response,
+polling shall retrieve one final authoritative snapshot by the remembered game
+ID before clearing its polling cursor. Any final opponent move, including a
+move that ends the game, shall enter the normal pending physical-move queue and
+remain available for projection and confirmation. Only after that snapshot is
+emitted may polling return to the selection-required state. If final-snapshot
+retrieval fails, the cursor shall remain intact and polling shall report the
+failure through its normal retry path rather than silently dropping the final
+move.
 
 ## 6. Runtime States
 
@@ -399,6 +406,12 @@ that cannot be verified as one legal move shall establish a new baseline and
 require physical reconciliation rather than inventing missing history. The
 public game-export endpoint shall not be used for live synchronization because
 Lichess deliberately delays ongoing-game exports by multiple moves.
+
+Because a terminal move removes the game from the ongoing-games endpoint, the
+worker shall use the authenticated Board API game snapshot for exactly one
+final refresh when the previously tracked game disappears. That snapshot shall
+be processed before the polling cursor is cleared, preserving the terminal
+move and result without relying on delayed public exports.
 
 ## 9. Expected Physical Move
 

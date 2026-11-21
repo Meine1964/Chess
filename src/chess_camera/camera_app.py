@@ -327,6 +327,25 @@ def _lichess_game_information(
     )
 
 
+def _current_lichess_game_text(
+    game: LichessGameFull,
+    *,
+    clocks_available: bool,
+    synchronization_status: str,
+) -> str:
+    information = _lichess_game_information(
+        game,
+        clocks_available=clocks_available,
+    )
+    return "\n".join(
+        (
+            f"Game ID: {game.game_id}",
+            *information,
+            f"Physical synchronization: {synchronization_status}",
+        )
+    )
+
+
 def _can_start_new_lichess_game(
     state: LichessGameState | None,
 ) -> bool:
@@ -1060,6 +1079,9 @@ class CameraWindow(QMainWindow):
         self._lichess_guidance_projection_active = False
         self._lichess_guidance_blackout_pending = False
         self._lichess_guidance_reprojection_pending = False
+        self._offline_move_marking_active = False
+        self._offline_move_marking_blackout_pending = False
+        self._offline_move_marking_generation = 0
         self._illegal_correction_projection_active = False
         self._illegal_correction_blackout_pending = False
         self._illegal_correction_generation = 0
@@ -1121,6 +1143,17 @@ class CameraWindow(QMainWindow):
         )
         self._lichess_board_widget.copy_board_requested.connect(
             self._copy_lichess_board_image
+        )
+        self._current_lichess_game_action = QAction(
+            "Current Lichess game...",
+            self._lichess_board_widget,
+        )
+        self._current_lichess_game_action.setEnabled(False)
+        self._current_lichess_game_action.triggered.connect(
+            self._show_current_lichess_game
+        )
+        self._lichess_board_widget.addAction(
+            self._current_lichess_game_action
         )
         self._restore_piece_position()
         self._restore_game_mode()
@@ -1833,9 +1866,6 @@ class CameraWindow(QMainWindow):
 
         lichess_tab = QWidget()
         lichess_layout = QVBoxLayout()
-        lichess_status = QLabel(self._lichess_status.text())
-        lichess_status.setWordWrap(True)
-        lichess_layout.addWidget(lichess_status)
         lichess_layout.addWidget(
             QLabel(
                 f"{_lichess_token_configuration_message()} Authentication "
@@ -2484,6 +2514,9 @@ class CameraWindow(QMainWindow):
 
     def _black_projector(self) -> None:
         lichess_guidance_active = self._lichess_guidance_projection_active
+        self._offline_move_marking_active = False
+        self._offline_move_marking_blackout_pending = False
+        self._offline_move_marking_generation += 1
         self._illegal_correction_projection_active = False
         self._illegal_correction_blackout_pending = False
         self._illegal_correction_generation += 1
@@ -2800,6 +2833,25 @@ class CameraWindow(QMainWindow):
             self._lichess_board_widget.rendered_board_pixmap()
         )
         self.statusBar().showMessage("Lichess board image copied.", 3000)
+
+    def _show_current_lichess_game(self) -> None:
+        game = self._latest_lichess_game
+        if game is None:
+            return
+        message_box = QMessageBox(self)
+        message_box.setIcon(QMessageBox.Icon.Information)
+        message_box.setWindowTitle("Current Lichess game")
+        message_box.setText(
+            _current_lichess_game_text(
+                game,
+                clocks_available=self._lichess_clocks_available,
+                synchronization_status=self._lichess_sync_status.text(),
+            )
+        )
+        message_box.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        message_box.exec()
 
     def _board_square_clicked(self, row: int, column: int) -> None:
         clicked_square = f"{chr(ord('a') + column)}{8 - row}"
@@ -3197,6 +3249,17 @@ class CameraWindow(QMainWindow):
             self._occupancy_status.setText(
                 "Red correction removed; waiting for projector black to "
                 "settle."
+            )
+            return
+        if self._offline_move_marking_active:
+            self._occupancy_status.setText(
+                "Accepted move is marked for one second."
+            )
+            return
+        if self._offline_move_marking_blackout_pending:
+            self._occupancy_status.setText(
+                "Accepted-move marking removed; waiting for projector black "
+                "to settle."
             )
             return
         if self._lichess_guidance_projection_active:
@@ -3726,8 +3789,11 @@ class CameraWindow(QMainWindow):
                 f"Legal move {legal_move.san} accepted; "
                 f"{legal_move.status.turn} to move."
             )
-        if not lichess_pending and legal_move is None:
-            self._project_accepted_move(update.move)
+        if not lichess_pending:
+            if legal_move is None:
+                self._project_accepted_move(update.move)
+            else:
+                self._project_offline_accepted_move(update.move)
 
     def _offline_correction_game(
         self,
@@ -4100,6 +4166,7 @@ class CameraWindow(QMainWindow):
             f"Legal move {legal_move.san} accepted; "
             f"{legal_move.status.turn} to move."
         )
+        self._project_offline_accepted_move(move)
 
     def _fail_promotion_selection(self, message: str) -> None:
         self._pending_promotion_selection = None
@@ -4461,6 +4528,76 @@ class CameraWindow(QMainWindow):
             f"Projecting move {source_name}-{destination_name} for 2 seconds."
         )
         QTimer.singleShot(2000, self._finish_move_projection)
+
+    def _project_offline_accepted_move(
+        self,
+        move: tuple[tuple[int, int], tuple[int, int]],
+    ) -> None:
+        if self._camera_only_calibration:
+            return
+        if self._calibration_result is None or not self._open_projector():
+            return
+        source, destination = move
+        try:
+            self._projector_window.show_move(
+                self._physical_board_square(*source),
+                self._physical_board_square(*destination),
+                source_is_light=(sum(source) % 2 == 0),
+                destination_is_light=(sum(destination) % 2 == 0),
+                include_turn_indicator=True,
+            )
+        except (RuntimeError, ValueError) as error:
+            self._projector_status.setText(
+                f"Accepted-move projection failed: {error}"
+            )
+            return
+        self._offline_move_marking_generation += 1
+        generation = self._offline_move_marking_generation
+        self._offline_move_marking_active = True
+        self._offline_move_marking_blackout_pending = False
+        self._alignment_monitor.set_paused("Offline accepted move marking")
+        self._projector_status.setText(
+            "Showing the accepted Offline move for 1 second."
+        )
+        QTimer.singleShot(
+            1000,
+            lambda: self._finish_offline_move_marking(generation),
+        )
+
+    def _finish_offline_move_marking(self, generation: int) -> None:
+        if (
+            generation != self._offline_move_marking_generation
+            or not self._offline_move_marking_active
+        ):
+            return
+        self._offline_move_marking_active = False
+        self._offline_move_marking_blackout_pending = True
+        self._projector_window.show_black()
+        self._alignment_monitor.set_black()
+        self._reference_move_tracker.reset_activity()
+        self._projector_status.setText(
+            "Accepted-move marking removed; projector black is settling."
+        )
+        QTimer.singleShot(
+            1000,
+            lambda: self._finish_offline_move_marking_blackout(generation),
+        )
+
+    def _finish_offline_move_marking_blackout(
+        self,
+        generation: int,
+    ) -> None:
+        if (
+            generation != self._offline_move_marking_generation
+            or self._offline_move_marking_active
+            or not self._offline_move_marking_blackout_pending
+        ):
+            return
+        self._offline_move_marking_blackout_pending = False
+        self._reference_move_tracker.reset_activity()
+        self._projector_status.setText(
+            "Projector black settled; watching for the next Offline move."
+        )
 
     def _update_lichess_synchronization_projection(self) -> None:
         controller = self._lichess_game_controller
@@ -6233,6 +6370,9 @@ class CameraWindow(QMainWindow):
         self._lichess_white_player.setText("White: --")
         self._lichess_white_clock.setText("White clock: --:--")
         self._lichess_game_information_status.setText(status)
+        action = getattr(self, "_current_lichess_game_action", None)
+        if isinstance(action, QAction):
+            action.setEnabled(self._latest_lichess_game is not None)
 
     def _update_lichess_game_information(
         self,
@@ -6256,6 +6396,9 @@ class CameraWindow(QMainWindow):
         self._lichess_white_player.setText(white_player)
         self._lichess_white_clock.setText(white_clock)
         self._lichess_game_information_status.setText(status)
+        action = getattr(self, "_current_lichess_game_action", None)
+        if isinstance(action, QAction):
+            action.setEnabled(True)
 
     def _update_lichess_synchronization(
         self,

@@ -389,6 +389,12 @@ class LichessConnectionWorker(QObject):
         games = self._client.get_ongoing_games()
         self.ongoing_games_received.emit(games)
         if not games:
+            if previous_game_id is not None:
+                final_snapshot = self._final_polling_snapshot(
+                    previous_game_id,
+                    self._client.get_game_snapshot(previous_game_id),
+                )
+                self.game_event_received.emit(final_snapshot)
             self.select_game(None)
             self._reset_polling_cursor()
             self.status_changed.emit(
@@ -430,6 +436,77 @@ class LichessConnectionWorker(QObject):
         snapshot = self._polling_snapshot(game)
         self.game_event_received.emit(snapshot)
         return game.game_id
+
+    def _final_polling_snapshot(
+        self,
+        game_id: str,
+        snapshot: LichessPollingSnapshot,
+    ) -> LichessPollingSnapshot:
+        with self._polling_lock:
+            if (
+                self._polling_game_id != game_id
+                or self._polling_initial_fen is None
+                or self._polling_fen is None
+            ):
+                raise LichessProtocolError(
+                    "The finished Lichess game has no polling baseline."
+                )
+            try:
+                final_board = chess.Board(snapshot.game.state.fen)
+                current_board = chess.Board(self._polling_fen)
+            except ValueError as error:
+                raise LichessProtocolError(
+                    "The finished Lichess game has an invalid FEN."
+                ) from error
+            final_fen = final_board.fen()
+            if final_fen != self._polling_fen:
+                if not snapshot.game.state.moves:
+                    raise LichessProtocolError(
+                        "The finished Lichess game is missing its final move."
+                    )
+                final_uci = snapshot.game.state.moves[-1]
+                try:
+                    final_move = current_board.parse_uci(final_uci)
+                    current_board.push(final_move)
+                except ValueError as error:
+                    raise LichessProtocolError(
+                        "The finished Lichess game's final move is invalid "
+                        "from the polling position."
+                    ) from error
+                if current_board.fen() != final_fen:
+                    raise LichessProtocolError(
+                        "The finished Lichess game's final move does not "
+                        "produce its final position."
+                    )
+                self._polling_moves = (
+                    *self._polling_moves,
+                    final_move.uci(),
+                )
+                self._polling_fen = final_fen
+            state = snapshot.game.state
+            return LichessPollingSnapshot(
+                LichessGameFull(
+                    snapshot.game.game_id,
+                    self._polling_initial_fen,
+                    snapshot.game.white,
+                    snapshot.game.black,
+                    LichessGameState(
+                        self._polling_moves,
+                        final_fen,
+                        state.turn,
+                        state.white_time_ms,
+                        state.black_time_ms,
+                        state.white_increment_ms,
+                        state.black_increment_ms,
+                        state.status,
+                        state.winner,
+                        state.result,
+                        state.white_draw_offer,
+                        state.black_draw_offer,
+                    ),
+                ),
+                snapshot.clocks_available,
+            )
 
     def _polling_snapshot(
         self,

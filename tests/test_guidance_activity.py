@@ -458,6 +458,55 @@ def test_active_manipulation_keeps_opponent_guidance_projected() -> None:
     )
 
 
+def test_offline_move_marking_uses_fixed_one_second_intervals() -> None:
+    move = ((6, 4), (4, 4))
+    window = SimpleNamespace(
+        _camera_only_calibration=False,
+        _calibration_result=object(),
+        _open_projector=MagicMock(return_value=True),
+        _physical_board_square=lambda row, column: (row, column),
+        _projector_window=MagicMock(),
+        _offline_move_marking_generation=0,
+        _offline_move_marking_active=False,
+        _offline_move_marking_blackout_pending=False,
+        _alignment_monitor=MagicMock(),
+        _reference_move_tracker=MagicMock(),
+        _projector_status=MagicMock(),
+    )
+    window._finish_offline_move_marking = lambda generation: (
+        CameraWindow._finish_offline_move_marking(window, generation)
+    )
+    window._finish_offline_move_marking_blackout = lambda generation: (
+        CameraWindow._finish_offline_move_marking_blackout(
+            window,
+            generation,
+        )
+    )
+
+    with patch(
+        "src.chess_camera.camera_app.QTimer.singleShot"
+    ) as single_shot:
+        CameraWindow._project_offline_accepted_move(window, move)
+        assert single_shot.call_args.args[0] == 1000
+        finish_marking = single_shot.call_args.args[1]
+        finish_marking()
+        assert single_shot.call_args.args[0] == 1000
+        finish_blackout = single_shot.call_args.args[1]
+        finish_blackout()
+
+    window._projector_window.show_move.assert_called_once_with(
+        (6, 4),
+        (4, 4),
+        source_is_light=True,
+        destination_is_light=True,
+        include_turn_indicator=True,
+    )
+    window._projector_window.show_black.assert_called_once_with()
+    assert window._offline_move_marking_active is False
+    assert window._offline_move_marking_blackout_pending is False
+    assert window._reference_move_tracker.reset_activity.call_count == 2
+
+
 def test_unchanged_board_restores_pending_lichess_guidance() -> None:
     window = SimpleNamespace(
         _lichess_guidance_reprojection_pending=True,
@@ -502,6 +551,8 @@ def test_guidance_activity_precedes_black_output_gate() -> None:
         _pending_promotion_selection=None,
         _illegal_correction_projection_active=False,
         _illegal_correction_blackout_pending=False,
+        _offline_move_marking_active=False,
+        _offline_move_marking_blackout_pending=False,
         _lichess_guidance_projection_active=True,
         _lichess_guidance_blackout_pending=False,
         _observe_lichess_guidance_activity=MagicMock(),
@@ -516,6 +567,9 @@ def test_guidance_activity_precedes_black_output_gate() -> None:
 def test_black_button_starts_pending_move_observation() -> None:
     window = SimpleNamespace(
         _lichess_guidance_projection_active=True,
+        _offline_move_marking_active=False,
+        _offline_move_marking_blackout_pending=False,
+        _offline_move_marking_generation=0,
         _illegal_correction_activity_detector=MagicMock(),
         _illegal_correction_generation=0,
         _illegal_correction_physical_squares=(),

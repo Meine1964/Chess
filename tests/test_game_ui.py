@@ -5,6 +5,7 @@ from src.chess_camera.camera_app import (
     _accepted_position_message,
     _can_abort_lichess_game,
     _can_start_new_lichess_game,
+    _current_lichess_game_text,
     _format_lichess_clock,
     _illegal_correction_message,
     _lichess_board_state,
@@ -465,6 +466,7 @@ def test_offline_selected_promotion_commits_selected_piece() -> None:
         _persist_game_state=MagicMock(),
         _update_turn_indicator=MagicMock(),
         _piece_status=MagicMock(),
+        _project_offline_accepted_move=MagicMock(),
         _fail_promotion_selection=MagicMock(),
     )
 
@@ -477,6 +479,9 @@ def test_offline_selected_promotion_commits_selected_piece() -> None:
     assert game.position[(0, 0)] == "N"
     assert synchronizer.position[(0, 0)] == "N"
     assert window._pending_promotion_selection is None
+    window._project_offline_accepted_move.assert_called_once_with(
+        ((1, 0), (0, 0))
+    )
 
 
 def test_offline_mode_mismatch_is_preserved_for_explicit_recovery() -> None:
@@ -1349,6 +1354,42 @@ def test_lichess_game_information_formats_completed_game() -> None:
     )
 
 
+def test_current_lichess_game_text_includes_runtime_details() -> None:
+    game = LichessGameFull(
+        "game1234",
+        "unused",
+        LichessPlayer("white", "Local", 1510),
+        LichessPlayer("black", "Remote", 1490),
+        LichessGameState(
+            (),
+            "unused",
+            "white",
+            65000,
+            0,
+            0,
+            0,
+            "mate",
+            "white",
+            "1-0",
+        ),
+    )
+
+    assert _current_lichess_game_text(
+        game,
+        clocks_available=True,
+        synchronization_status="Final move awaiting physical confirmation.",
+    ) == (
+        "Game ID: game1234\n"
+        "Black: Remote (1490)\n"
+        "Black clock: 0:00\n"
+        "White: Local (1510)\n"
+        "White clock: 1:05\n"
+        "Status: mate; result 1-0\n"
+        "Physical synchronization: "
+        "Final move awaiting physical confirmation."
+    )
+
+
 def test_ongoing_game_label_identifies_selection() -> None:
     game = OngoingGame(
         "jgWZLWs6",
@@ -1615,6 +1656,7 @@ def test_first_accepted_black_move_determines_offline_turn() -> None:
         _persist_move_reference=MagicMock(),
         _persist_game_state=MagicMock(),
         _update_turn_indicator=MagicMock(),
+        _project_offline_accepted_move=MagicMock(),
     )
 
     CameraWindow._update_reference_move_tracking(window)
@@ -1628,6 +1670,7 @@ def test_first_accepted_black_move_determines_offline_turn() -> None:
     assert window._legal_game.status.turn == "white"
     assert synchronizer.position[(2, 0)] == "p"
     window._persist_game_state.assert_called_once_with()
+    window._project_offline_accepted_move.assert_called_once_with(move)
 
 
 def test_routine_tracker_transition_does_not_write_diagnostics() -> None:
