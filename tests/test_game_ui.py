@@ -1405,6 +1405,188 @@ def test_agreed_draw_keeps_stopped_projected_clocks_and_replaces_turn_dot(
     )
 
 
+def test_resignation_keeps_stopped_projected_clocks_and_shows_result() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    game = LichessGameFull(
+        "resigned1",
+        "unused",
+        LichessPlayer("white", "Local", 1510),
+        LichessPlayer("black", "Remote", 1490),
+        LichessGameState(
+            (),
+            "unused",
+            "white",
+            284000,
+            600000,
+            0,
+            0,
+            "resign",
+            "black",
+            "0-1",
+        ),
+    )
+    window = SimpleNamespace(
+        _lichess_clocks_available=True,
+        _lichess_clock_snapshot_monotonic=None,
+        _calibration_result=object(),
+        _board_orientation_needs_detection=False,
+        _piece_side_orientation_needs_detection=False,
+        _projector_window=MagicMock(),
+        _board_quarter_turns=1,
+    )
+
+    CameraWindow._update_projected_lichess_clocks(window, game)
+
+    window._projector_window.set_edge_clocks.assert_called_once_with(
+        "04:44",
+        "10:00",
+        board_quarter_turns=1,
+        result="0-1",
+        expired_player=None,
+    )
+
+
+def test_successful_resignation_immediately_sets_authoritative_result() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    state = LichessGameState(
+        (),
+        "unused",
+        "white",
+        284000,
+        600000,
+        0,
+        0,
+        "started",
+        None,
+        "*",
+    )
+    game = LichessGameFull(
+        "resigned1",
+        "unused",
+        LichessPlayer("white", "Local", 1510),
+        LichessPlayer("black", "Remote", 1490),
+        state,
+    )
+    window = SimpleNamespace(
+        _lichess_game_id="resigned1",
+        _lichess_player_color="white",
+        _latest_lichess_state=state,
+        _latest_lichess_game=game,
+        _lichess_clocks_available=True,
+        _resign_requested_game_id=None,
+        _pending_lichess_game_action="resign",
+        _lichess_status=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
+        _update_lichess_game_control_buttons=MagicMock(),
+        _update_lichess_board=MagicMock(),
+        _update_lichess_game_information=MagicMock(),
+    )
+    window._apply_successful_lichess_resignation = lambda game_id: (
+        CameraWindow._apply_successful_lichess_resignation(window, game_id)
+    )
+    window._apply_authoritative_lichess_terminal_result = (
+        lambda game_id, **kwargs: (
+            CameraWindow._apply_authoritative_lichess_terminal_result(
+                window,
+                game_id,
+                **kwargs,
+            )
+        )
+    )
+
+    CameraWindow._lichess_game_action_succeeded(
+        window,
+        "resigned1",
+        "resign",
+    )
+
+    assert window._latest_lichess_state.status == "resign"
+    assert window._latest_lichess_state.winner == "black"
+    assert window._latest_lichess_state.result == "0-1"
+    assert window._latest_lichess_game.state is window._latest_lichess_state
+    window._update_lichess_game_information.assert_called_once_with(
+        window._latest_lichess_game,
+        clocks_available=True,
+    )
+    window._lichess_status.setText.assert_called_once_with(
+        "Lichess resignation accepted; result 0-1."
+    )
+    assert (
+        window._record_runtime_diagnostic.call_args.args[0]
+        == "lichess-game-action-succeeded"
+    )
+
+
+def test_successful_draw_acceptance_immediately_sets_draw_result() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    state = LichessGameState(
+        (),
+        "unused",
+        "black",
+        284000,
+        600000,
+        0,
+        0,
+        "started",
+        None,
+        "*",
+        black_draw_offer=True,
+    )
+    game = LichessGameFull(
+        "drawn1",
+        "unused",
+        LichessPlayer("white", "Local", 1510),
+        LichessPlayer("black", "Remote", 1490),
+        state,
+    )
+    window = SimpleNamespace(
+        _lichess_game_id="drawn1",
+        _latest_lichess_state=state,
+        _latest_lichess_game=game,
+        _lichess_clocks_available=True,
+        _responded_draw_offer_game_id=None,
+        _pending_lichess_game_action="accept-draw",
+        _lichess_status=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
+        _update_lichess_game_control_buttons=MagicMock(),
+        _update_lichess_board=MagicMock(),
+        _update_lichess_game_information=MagicMock(),
+    )
+    window._apply_authoritative_lichess_terminal_result = (
+        lambda game_id, **kwargs: (
+            CameraWindow._apply_authoritative_lichess_terminal_result(
+                window,
+                game_id,
+                **kwargs,
+            )
+        )
+    )
+
+    CameraWindow._lichess_game_action_succeeded(
+        window,
+        "drawn1",
+        "accept-draw",
+    )
+
+    assert window._latest_lichess_state.status == "draw"
+    assert window._latest_lichess_state.winner is None
+    assert window._latest_lichess_state.result == "1/2-1/2"
+    assert window._latest_lichess_game.state is window._latest_lichess_state
+    window._update_lichess_game_information.assert_called_once_with(
+        window._latest_lichess_game,
+        clocks_available=True,
+    )
+    window._lichess_status.setText.assert_called_once_with(
+        "Lichess draw offer accepted; result 1/2-1/2."
+    )
+
+
 def test_lichess_turn_indicator_reports_completed_game() -> None:
     state = LichessGameState(
         (),

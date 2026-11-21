@@ -258,10 +258,25 @@ independent of geometry may still require later brightness equalization.
 
 Projected clocks shall remain hidden until a complete White-side orientation
 and a calibrated projector grid are available. They shall also remain hidden
-when clocks are unavailable, the Lichess game is terminal for a reason other
-than time forfeit, or calibration and diagnostic patterns own the projector
-output. Locally displayed zero shall not project or imply an authoritative
-timeout result.
+when clocks are unavailable or calibration and diagnostic patterns own the
+projector output. Any authoritative terminal result shall keep both clocks at
+their last reported values, remove the projected turn dot, and show the result
+in the edge gap. Locally displayed zero shall not project or imply an
+authoritative timeout result.
+
+When Lichess accepts a resignation request, that successful response is
+immediate terminal authority; the application shall not wait for the resigned
+game to remain present in the ongoing-games list. It shall infer the result
+from the resigning local player (`0-1` for White, `1-0` for Black), stop the
+local clocks, update local terminal state, and project the result. A later
+official terminal snapshot may confirm or enrich this state.
+
+Likewise, when Lichess accepts the local player's acceptance of an opponent
+draw offer, that successful response is immediate authority for status `draw`
+and result `1/2-1/2`. The application shall stop the clocks and project the
+draw without waiting for another polling snapshot. Submitting a draw offer is
+not terminal and shall continue to wait for the opponent's authoritative
+response.
 
 For an authoritative `outoftime` result, both on-screen and projected clocks
 shall remain visible and stop advancing. The losing player's clock shall be

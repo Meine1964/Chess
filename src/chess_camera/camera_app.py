@@ -6346,7 +6346,18 @@ class CameraWindow(QMainWindow):
             message = "Lichess draw offer submitted."
         elif action == "accept-draw":
             self._responded_draw_offer_game_id = game_id
-            message = "Lichess draw offer accepted; awaiting final game state."
+            applied = self._apply_authoritative_lichess_terminal_result(
+                game_id,
+                status="draw",
+                winner=None,
+                result="1/2-1/2",
+            )
+            message = (
+                "Lichess draw offer accepted; result 1/2-1/2."
+                if applied
+                else "Lichess draw offer accepted; awaiting final game "
+                "state."
+            )
         elif action == "decline-draw":
             self._responded_draw_offer_game_id = game_id
             message = "Lichess draw offer declined."
@@ -6355,8 +6366,12 @@ class CameraWindow(QMainWindow):
             message = "Lichess abort submitted; awaiting final game state."
         else:
             self._resign_requested_game_id = game_id
+            result = self._apply_successful_lichess_resignation(game_id)
             message = (
-                "Lichess resignation submitted; awaiting final game state."
+                f"Lichess resignation accepted; result {result}."
+                if result is not None
+                else "Lichess resignation submitted; awaiting final game "
+                "state."
             )
         self._pending_lichess_game_action = None
         self._lichess_status.setText(message)
@@ -6366,6 +6381,68 @@ class CameraWindow(QMainWindow):
             details={"game_id": game_id, "action": action},
         )
         self._update_lichess_game_control_buttons()
+
+    def _apply_successful_lichess_resignation(
+        self,
+        game_id: str,
+    ) -> Literal["1-0", "0-1"] | None:
+        state = self._latest_lichess_state
+        game = self._latest_lichess_game
+        player_color = self._lichess_player_color
+        if (
+            game_id != self._lichess_game_id
+            or state is None
+            or game is None
+            or game.game_id != game_id
+            or player_color not in ("white", "black")
+        ):
+            return None
+        winner: PlayerColor = (
+            "black" if player_color == "white" else "white"
+        )
+        result: Literal["1-0", "0-1"] = (
+            "1-0" if winner == "white" else "0-1"
+        )
+        applied = self._apply_authoritative_lichess_terminal_result(
+            game_id,
+            status="resign",
+            winner=winner,
+            result=result,
+        )
+        return result if applied else None
+
+    def _apply_authoritative_lichess_terminal_result(
+        self,
+        game_id: str,
+        *,
+        status: str,
+        winner: PlayerColor | None,
+        result: Literal["1-0", "0-1", "1/2-1/2"],
+    ) -> bool:
+        state = self._latest_lichess_state
+        game = self._latest_lichess_game
+        if (
+            game_id != self._lichess_game_id
+            or state is None
+            or game is None
+            or game.game_id != game_id
+        ):
+            return False
+        terminal_state = replace(
+            state,
+            status=status,
+            winner=winner,
+            result=result,
+        )
+        terminal_game = replace(game, state=terminal_state)
+        self._latest_lichess_state = terminal_state
+        self._latest_lichess_game = terminal_game
+        self._update_lichess_board(terminal_state)
+        self._update_lichess_game_information(
+            terminal_game,
+            clocks_available=self._lichess_clocks_available,
+        )
+        return True
 
     def _lichess_game_action_rejected(
         self,
@@ -6866,18 +6943,16 @@ class CameraWindow(QMainWindow):
             and game.state.status == "outoftime"
             and game.state.winner in ("white", "black")
         )
-        agreed_draw = (
+        terminal_result = (
             game is not None
-            and game.state.status == "draw"
-            and game.state.result == "1/2-1/2"
+            and game.state.result in ("1-0", "0-1", "1/2-1/2")
         )
         clocks_visible = (
             game is not None
             and self._lichess_clocks_available
             and (
                 self._lichess_clock_snapshot_monotonic is not None
-                or timeout_result
-                or agreed_draw
+                or terminal_result
             )
             and self._calibration_result is not None
             and not self._board_orientation_needs_detection
@@ -6900,8 +6975,11 @@ class CameraWindow(QMainWindow):
             expired_player = (
                 "black" if game.state.winner == "white" else "white"
             )
-        elif agreed_draw:
-            result = "1/2-1/2"
+        elif terminal_result:
+            result = cast(
+                Literal["1-0", "0-1", "1/2-1/2"],
+                game.state.result,
+            )
         self._projector_window.set_edge_clocks(
             _format_projected_lichess_clock(white_time_ms),
             _format_projected_lichess_clock(black_time_ms),
