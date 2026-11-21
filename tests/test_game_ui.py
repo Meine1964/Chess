@@ -2073,6 +2073,93 @@ def test_routine_tracker_transition_does_not_write_diagnostics() -> None:
     window._record_runtime_diagnostic.assert_not_called()
 
 
+def test_alignment_remap_waits_for_physical_move_evaluation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import MethodType, SimpleNamespace
+    from unittest.mock import MagicMock
+
+    scheduled_callbacks: list[object] = []
+    monkeypatch.setattr(
+        "src.chess_camera.camera_app.QTimer.singleShot",
+        lambda _delay, callback: scheduled_callbacks.append(callback),
+    )
+    mapping = object()
+    window = SimpleNamespace(
+        _calibration_result=object(),
+        _reference_move_tracker=SimpleNamespace(initialized=True),
+        _pending_alignment_mapping=None,
+        _pending_alignment_mapping_generation=0,
+        _pending_alignment_mapping_verified=False,
+        _verified_calibration_result=None,
+        _projector_status=MagicMock(),
+        _pending_lichess_local_move=None,
+        _pending_promotion_selection=None,
+        _last_rejected_move=None,
+        _last_runtime_tracker_state="candidate",
+        _apply_alignment_mapping_update=MagicMock(),
+    )
+    window._finish_pending_alignment_mapping = MethodType(
+        CameraWindow._finish_pending_alignment_mapping,
+        window,
+    )
+    window._alignment_mapping_conflicts_with_move_evaluation = MethodType(
+        CameraWindow._alignment_mapping_conflicts_with_move_evaluation,
+        window,
+    )
+
+    CameraWindow._alignment_mapping_updated(window, mapping, 4.7)
+
+    assert window._pending_alignment_mapping == (mapping, 4.7)
+    assert len(scheduled_callbacks) == 1
+
+    CameraWindow._alignment_mapping_verified(window, mapping)
+    assert window._pending_alignment_mapping_verified
+    assert window._verified_calibration_result is None
+
+    first_callback = scheduled_callbacks.pop()
+    first_callback()
+
+    window._apply_alignment_mapping_update.assert_not_called()
+    assert len(scheduled_callbacks) == 1
+
+    window._last_runtime_tracker_state = "watching"
+    window._pending_lichess_local_move = ((6, 4), (4, 4))
+    retry_callback = scheduled_callbacks.pop()
+    retry_callback()
+
+    window._apply_alignment_mapping_update.assert_not_called()
+    assert len(scheduled_callbacks) == 1
+
+    window._pending_lichess_local_move = None
+    submission_finished_callback = scheduled_callbacks.pop()
+    submission_finished_callback()
+
+    window._apply_alignment_mapping_update.assert_called_once_with(
+        mapping,
+        4.7,
+    )
+    assert window._pending_alignment_mapping is None
+    assert window._verified_calibration_result is window._calibration_result
+
+
+def test_alignment_remap_applies_immediately_without_move_reference() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    mapping = object()
+    apply_update = MagicMock()
+    window = SimpleNamespace(
+        _calibration_result=object(),
+        _reference_move_tracker=SimpleNamespace(initialized=False),
+        _apply_alignment_mapping_update=apply_update,
+    )
+
+    CameraWindow._alignment_mapping_updated(window, mapping, 8.0)
+
+    apply_update.assert_called_once_with(mapping, 8.0)
+
+
 def test_illegal_first_move_keeps_offline_turn_undetermined() -> None:
     from types import SimpleNamespace
     from unittest.mock import MagicMock

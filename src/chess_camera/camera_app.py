@@ -141,6 +141,19 @@ _SAVE_DIAGNOSTICS_SETTING = "diagnostics/save_snapshots"
 _LICHESS_GAME_SETTING = "lichess/selected_game_id"
 _PROMOTION_MODE_SETTING = "chess/promotion_mode"
 _AUTOMATIC_START_RESET_SETTING = "chess/automatic_start_reset"
+_ALIGNMENT_REMAP_DELAY_MILLISECONDS = 750
+_ALIGNMENT_REMAP_RETRY_MILLISECONDS = 250
+_ALIGNMENT_REMAP_PROTECTED_TRACKER_STATES = frozenset(
+    {
+        "candidate",
+        "pending-capture",
+        "pending-castling",
+        "pending-en-passant",
+        "accepted",
+        "illegal-removal",
+        "illegal-relocation",
+    }
+)
 _PROJECT_TURN_INDICATOR_SETTING = "chess/project_turn_indicator"
 _WINDOW_GEOMETRY_SETTING = "window/main_geometry"
 _WINDOW_SCREEN_SETTING = "window/main_screen"
@@ -1176,6 +1189,11 @@ class CameraWindow(QMainWindow):
         self._camera_geometry_ready = False
         self._calibration_result: CalibrationResult | None = None
         self._verified_calibration_result: CalibrationResult | None = None
+        self._pending_alignment_mapping: (
+            tuple[MappingResult, float] | None
+        ) = None
+        self._pending_alignment_mapping_generation = 0
+        self._pending_alignment_mapping_verified = False
         self._remembered_board_square: tuple[int, int] | None = None
         self._selected_board_square: tuple[int, int] | None = None
         self._pending_board_square: tuple[int, int] | None = None
@@ -3068,6 +3086,7 @@ class CameraWindow(QMainWindow):
         self,
         result: CalibrationResult,
     ) -> None:
+        CameraWindow._cancel_pending_alignment_mapping(self)
         self._camera_only_calibration = False
         self._camera_geometry_ready = True
         self._calibration_result = result
@@ -3113,6 +3132,7 @@ class CameraWindow(QMainWindow):
         self,
         result: CalibrationResult,
     ) -> None:
+        CameraWindow._cancel_pending_alignment_mapping(self)
         self._camera_only_calibration = True
         self._camera_geometry_ready = False
         self._calibration_result = result
@@ -3148,6 +3168,7 @@ class CameraWindow(QMainWindow):
         )
 
     def _invalidate_calibration(self) -> None:
+        CameraWindow._cancel_pending_alignment_mapping(self)
         self._camera_only_calibration = False
         self._camera_geometry_ready = False
         self._calibration_result = None
@@ -3208,6 +3229,68 @@ class CameraWindow(QMainWindow):
     ) -> None:
         if self._calibration_result is None:
             return
+        if self._reference_move_tracker.initialized:
+            self._pending_alignment_mapping = (mapping, displacement)
+            self._pending_alignment_mapping_generation += 1
+            self._pending_alignment_mapping_verified = False
+            generation = self._pending_alignment_mapping_generation
+            self._projector_status.setText(
+                f"Board movement of {displacement:.1f} camera pixels detected; "
+                "waiting for physical move evaluation before remapping."
+            )
+            QTimer.singleShot(
+                _ALIGNMENT_REMAP_DELAY_MILLISECONDS,
+                lambda: self._finish_pending_alignment_mapping(generation),
+            )
+            return
+        self._apply_alignment_mapping_update(mapping, displacement)
+
+    def _finish_pending_alignment_mapping(
+        self,
+        generation: int,
+    ) -> None:
+        if (
+            generation != self._pending_alignment_mapping_generation
+            or self._pending_alignment_mapping is None
+            or self._calibration_result is None
+        ):
+            return
+        if self._alignment_mapping_conflicts_with_move_evaluation():
+            QTimer.singleShot(
+                _ALIGNMENT_REMAP_RETRY_MILLISECONDS,
+                lambda: self._finish_pending_alignment_mapping(generation),
+            )
+            return
+        mapping, displacement = self._pending_alignment_mapping
+        self._pending_alignment_mapping = None
+        self._apply_alignment_mapping_update(mapping, displacement)
+        if self._pending_alignment_mapping_verified:
+            self._verified_calibration_result = self._calibration_result
+            self._pending_alignment_mapping_verified = False
+
+    def _alignment_mapping_conflicts_with_move_evaluation(self) -> bool:
+        return (
+            self._pending_lichess_local_move is not None
+            or self._pending_promotion_selection is not None
+            or self._last_rejected_move is not None
+            or self._last_runtime_tracker_state
+            in _ALIGNMENT_REMAP_PROTECTED_TRACKER_STATES
+        )
+
+    def _cancel_pending_alignment_mapping(self) -> None:
+        self._pending_alignment_mapping = None
+        self._pending_alignment_mapping_generation = (
+            getattr(self, "_pending_alignment_mapping_generation", 0) + 1
+        )
+        self._pending_alignment_mapping_verified = False
+
+    def _apply_alignment_mapping_update(
+        self,
+        mapping: MappingResult,
+        displacement: float,
+    ) -> None:
+        if self._calibration_result is None:
+            return
         self._calibration_result = replace(
             self._calibration_result,
             mapping=mapping,
@@ -3247,6 +3330,14 @@ class CameraWindow(QMainWindow):
     def _alignment_mapping_verified(self, _mapping: MappingResult) -> None:
         if self._calibration_result is None:
             return
+        if self._pending_alignment_mapping is not None:
+            self._pending_alignment_mapping_verified = True
+            if self._alignment_mapping_conflicts_with_move_evaluation():
+                return
+            mapping, displacement = self._pending_alignment_mapping
+            self._pending_alignment_mapping = None
+            self._apply_alignment_mapping_update(mapping, displacement)
+            self._pending_alignment_mapping_verified = False
         self._verified_calibration_result = self._calibration_result
 
     def _camera_grid_checked(self) -> None:

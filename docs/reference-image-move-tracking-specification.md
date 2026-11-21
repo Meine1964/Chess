@@ -534,16 +534,27 @@ Board alignment shall remain independent of move inference.
 
 When alignment monitoring updates the camera grid:
 
-1. Pause activity and move evaluation.
-2. Rectify the current frame with the new grid.
-3. Register any small residual canonical translation against the accepted
+1. Treat the updated grid as pending while a physical move may still be under
+   evaluation. Alignment monitoring shall not reset a candidate, supported
+   multi-stage move, accepted move awaiting submission, or illegal-move
+   correction before that outcome is handled.
+2. Commit the pending grid after the current move evaluation reaches a safe
+   boundary. When no move evaluation is active, a bounded delay may commit the
+   grid so genuine whole-board movement continues to be followed.
+3. Pause activity and move evaluation once for the committed grid.
+4. Rectify the current frame with the new grid.
+5. Register any small residual canonical translation against the accepted
    reference.
-4. Suppress thin grid-edge residuals before obstruction analysis.
-5. Resume `watching` with the existing accepted canonical reference.
+6. Suppress thin grid-edge residuals before obstruction analysis.
+7. Resume `watching` with the existing accepted canonical reference.
 
 A camera-grid change shall never clear or replace the logical piece position.
 
 Geometry changes themselves shall not be treated as piece movement.
+
+Repeated near-threshold grid fits shall not starve physical move recognition.
+When alignment and move observations overlap, the localized chess-move
+evaluation has priority over committing the pending global remap.
 
 If a settled one-piece relocation has dominant source/destination evidence and
 a valid released-piece footprint, broad residuals confined to the outer board

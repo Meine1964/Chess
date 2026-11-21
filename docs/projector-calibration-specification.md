@@ -516,12 +516,21 @@ After calibration is completed or restored, the application:
    indicators, or reconciliation marks.
 3. Compares all 81 normalized current camera-grid points with the calibrated
    grid.
-4. Remaps the 9x9 projector grid after approximately 1.5 camera pixels of
-   movement and immediately redraws any active square.
-5. Transfers the calibrated local correction field to the moved board using a
+4. Proposes a remap of the 9x9 projector grid after approximately 1.5 camera
+   pixels of movement. When reference move tracking is active, the application
+   defers committing that proposal long enough for a concurrent localized
+   physical move to be classified. Candidate, supported multi-stage, accepted,
+   submitting, and illegal-correction move states retain priority until their
+   outcome is handled.
+5. Commits the pending remap at the next safe move-tracking boundary, or after
+   a bounded delay when no move outcome is active, and immediately redraws any
+   active square. Genuine whole-board movement therefore remains automatic,
+   while repeated detector fits cannot continually erase physical-move
+   evidence.
+6. Transfers the calibrated local correction field to the moved board using a
    smooth quadratic camera-space model.
-6. Geometrically warps the stored black reference with the board motion.
-7. While an unoccupied selected square is projected, locates its illuminated
+7. Geometrically warps the stored black reference with the board motion.
+8. While an unoccupied selected square is projected, locates its illuminated
    region and compares its centroid with the expected physical-square center.
    Occupancy shall be checked with the selected UI `(row, column)` coordinate,
    which is the key type used by the authoritative accepted position, rather
@@ -529,18 +538,18 @@ After calibration is completed or restored, the application:
    continue camera-grid drift monitoring but shall not use the illuminated
    centroid as projector-plane evidence, because projection onto a raised
    piece is displaced by parallax.
-8. Accepts in-plane board movement when the updated square remains aligned.
-9. Requires two consecutive projected-square or remapping failures before
+9. Accepts in-plane board movement when the updated square remains aligned.
+10. Requires two consecutive projected-square or remapping failures before
    invalidation.
-10. Silently retains the last confirmed mapping while a hand, piece, or other
+11. Silently retains the last confirmed mapping while a hand, piece, or other
    temporary obstruction prevents board detection. A missed detection never
    constitutes evidence of board movement or calibration loss.
-11. After a positive remap, follows the board immediately but waits for five
+12. After a positive remap, follows the board immediately but waits for five
    consecutive visible stable-board checks before resuming optical failure
    counting.
-12. Classifies failure after a camera-grid remap as camera calibration loss and
+13. Classifies failure after a camera-grid remap as camera calibration loss and
     failure with a stable camera grid as projector calibration loss.
-13. Makes the projector black and changes the corresponding persistent UI
+14. Makes the projector black and changes the corresponding persistent UI
     indicator to red after confirmed calibration loss. The last optically
     verified mesh remains available only as diagnostic evidence; it shall not
     remain usable for square projection after calibration loss.
