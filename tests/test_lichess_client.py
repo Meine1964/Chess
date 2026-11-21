@@ -160,6 +160,7 @@ def test_submit_move_requires_positive_confirmation() -> None:
     ("method_name", "path"),
     (
         ("offer_draw", "/api/board/game/p8Jy2ayw/draw/yes"),
+        ("decline_draw", "/api/board/game/p8Jy2ayw/draw/no"),
         ("resign_game", "/api/board/game/p8Jy2ayw/resign"),
     ),
 )
@@ -243,6 +244,10 @@ def test_stream_read_timeout_is_a_reconnectable_connection_error() -> None:
 
 
 def test_game_stream_reconstructs_position_and_clocks() -> None:
+    initial_state = _state("e2e4")
+    initial_state["wdraw"] = True
+    updated_state = _state("e2e4 e7e5")
+    updated_state["bdraw"] = True
     game_full = {
         "type": "gameFull",
         "id": "qP8XaFtN",
@@ -250,14 +255,14 @@ def test_game_stream_reconstructs_position_and_clocks() -> None:
         "initialFen": "startpos",
         "white": {"name": "Kenneth", "rating": 566},
         "black": {"name": "Salma", "rating": 662},
-        "state": _state("e2e4"),
+        "state": initial_state,
     }
     transport = FakeTransport(
         {
             "/api/board/game/stream/qP8XaFtN": (
                 _line(game_full),
                 b"\n",
-                _line(_state("e2e4 e7e5")),
+                _line(updated_state),
                 _line({"type": "chatLine", "text": "hello"}),
             )
         }
@@ -273,9 +278,11 @@ def test_game_stream_reconstructs_position_and_clocks() -> None:
     assert full.white.name == "Kenneth"
     assert full.black.color == "black"
     assert full.state.moves == ("e2e4",)
+    assert full.state.white_draw_offer
     assert isinstance(state, LichessGameState)
     assert state.moves == ("e2e4", "e7e5")
     assert state.turn == "white"
+    assert state.black_draw_offer
     assert state.white_time_ms == 299000
     board = chess.Board()
     board.push_uci("e2e4")

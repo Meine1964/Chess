@@ -693,9 +693,10 @@ not force an unnecessary manual selection.
 **Game-control bar slice:** Implemented and automated-test validated. The
 Lichess panel shows Lichess-style takeback, draw, resign, and new-game icon
 buttons. Takeback remains disabled and intentionally unsupported. Draw offers
-and confirmed resignations use asynchronous Board API operations with explicit
-pending, rejected, and uncertain states. The new-game button retains the
-implemented website-assisted behavior.
+and responses plus confirmed resignations use asynchronous Board API operations
+with explicit pending, rejected, and uncertain states. Incoming offers expose
+accept and decline buttons when authoritative stream state provides the offer
+flags. The new-game button retains the implemented website-assisted behavior.
 
 For the first playable version, challenge creation may remain on the Lichess
 website. The application may initially detect and join an already active game.

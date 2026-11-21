@@ -80,6 +80,8 @@ class LichessGameState:
     status: str
     winner: PlayerColor | None
     result: str
+    white_draw_offer: bool = False
+    black_draw_offer: bool = False
 
 
 @dataclass(frozen=True)
@@ -426,6 +428,13 @@ class LichessReadOnlyClient:
             "draw offer",
         )
 
+    def decline_draw(self, game_id: str) -> None:
+        self._submit_game_action(
+            game_id,
+            "draw/no",
+            "draw-offer decline",
+        )
+
     def resign_game(self, game_id: str) -> None:
         self._submit_game_action(
             game_id,
@@ -607,6 +616,8 @@ def _parse_game_state(
         status,
         winner,
         _game_result(status, winner),
+        _optional_boolean(payload, "wdraw"),
+        _optional_boolean(payload, "bdraw"),
     )
 
 
@@ -655,6 +666,18 @@ def _required_mapping(
     if not isinstance(value, dict):
         raise LichessProtocolError(f"Lichess event field '{key}' is invalid.")
     return cast(Mapping[str, object], value)
+
+
+def _optional_boolean(
+    payload: Mapping[str, object],
+    key: str,
+) -> bool:
+    value = payload.get(key, False)
+    if not isinstance(value, bool):
+        raise LichessProtocolError(
+            f"Lichess event field '{key}' is invalid."
+        )
+    return value
 
 
 def _required_string(payload: Mapping[str, object], key: str) -> str:

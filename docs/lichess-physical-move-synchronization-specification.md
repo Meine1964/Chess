@@ -896,11 +896,11 @@ promotion slices are implemented:
 - Underpromotion explicitly enters reconciliation until computer-based piece
   selection is implemented.
 
-The validated automated suite contains 273 passing tests. Live ordinary-move,
+The validated automated suite contains 275 passing tests. Live ordinary-move,
 polling, reconciliation, and guidance acceptance has been exercised on the
 target camera/projector setup. Lichess capture, castling, en passant, and
 auto-queen behavior is automated-test validated and awaits live acceptance.
 The dedicated player, clock, status, and result display is automated-test
-validated and awaits live acceptance. Draw-offer and resignation controls are
-automated-test validated and await live acceptance. Underpromotion remains a
-staged limitation.
+validated and awaits live acceptance. Draw-offer, draw-response, and
+resignation controls are automated-test validated and await live acceptance.
+Underpromotion remains a staged limitation.

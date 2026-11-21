@@ -39,12 +39,19 @@ be enabled only for an active selected game with an authenticated Lichess
 client and while no other game-control request is pending.
 
 The draw button shall submit a draw offer through the Board API and disable
-after Lichess confirms the request. The resign button shall require explicit
-confirmation before submitting a resignation. Both operations shall execute
-outside the UI thread, disable game-control buttons while pending, report
-server rejection explicitly, and report an uncertain outcome when the
-connection fails before confirmation. Resignation shall remain disabled after
-submission until authoritative terminal game state arrives.
+while the local player's offer remains active. When authoritative stream state
+reports an opponent draw offer, the offer button shall be replaced by explicit
+accept and decline buttons. Accept and decline shall use the Board API and
+disappear when authoritative state clears the offer. Read-only polling does not
+expose Lichess draw-offer flags, so incoming-offer controls are unavailable in
+polling mode.
+
+The resign button shall require explicit confirmation before submitting a
+resignation. All game-control operations shall execute outside the UI thread,
+disable game-control buttons while pending, report server rejection explicitly,
+and report an uncertain outcome when the connection fails before confirmation.
+Resignation shall remain disabled after submission until authoritative terminal
+game state arrives.
 
 The new-game button shall be available while no Lichess game is loaded and
 after the loaded game has finished, but not during active play or while the
@@ -203,7 +210,7 @@ interaction rows.
 ## 7. Validation Status
 
 The implemented menu bar exposes File, Camera, Game, Projector, and
-Calibration menus. The complete automated suite contains 273 passing tests,
+Calibration menus. The complete automated suite contains 275 passing tests,
 including menu structure, transactional selector-copy behavior, existing UI
 state transitions, reconciliation controls, and the readable interaction-font
 minimum. Token-status coverage confirms configured and missing environment

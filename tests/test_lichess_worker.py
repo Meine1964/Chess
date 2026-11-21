@@ -17,6 +17,7 @@ from src.chess_camera.lichess_client import (
 )
 from src.chess_camera.lichess_worker import (
     LichessConnectionWorker,
+    LichessGameAction,
     LichessGameActionWorker,
     LichessMoveSubmissionWorker,
 )
@@ -235,12 +236,21 @@ class GameActionClient:
     def resign_game(self, game_id: str) -> None:
         self.actions.append(("resign", game_id))
 
+    def decline_draw(self, game_id: str) -> None:
+        self.actions.append(("decline-draw", game_id))
+
 
 def test_game_action_worker_submits_draw_and_resignation() -> None:
     client = GameActionClient()
     succeeded: list[tuple[str, str]] = []
 
-    for action in ("offer-draw", "resign"):
+    actions: tuple[LichessGameAction, ...] = (
+        "offer-draw",
+        "accept-draw",
+        "decline-draw",
+        "resign",
+    )
+    for action in actions:
         worker = LichessGameActionWorker(
             cast(LichessReadOnlyClient, client),
             "game1234",
@@ -255,10 +265,14 @@ def test_game_action_worker_submits_draw_and_resignation() -> None:
 
     assert client.actions == [
         ("offer-draw", "game1234"),
+        ("offer-draw", "game1234"),
+        ("decline-draw", "game1234"),
         ("resign", "game1234"),
     ]
     assert succeeded == [
         ("game1234", "offer-draw"),
+        ("game1234", "accept-draw"),
+        ("game1234", "decline-draw"),
         ("game1234", "resign"),
     ]
 

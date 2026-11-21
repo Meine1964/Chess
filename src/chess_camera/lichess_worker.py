@@ -94,7 +94,12 @@ class LichessMoveSubmissionWorker(QObject):
         )
 
 
-LichessGameAction = Literal["offer-draw", "resign"]
+LichessGameAction = Literal[
+    "offer-draw",
+    "accept-draw",
+    "decline-draw",
+    "resign",
+]
 
 
 class LichessGameActionWorker(QObject):
@@ -117,8 +122,10 @@ class LichessGameActionWorker(QObject):
     @Slot()
     def run(self) -> None:
         try:
-            if self._action == "offer-draw":
+            if self._action in ("offer-draw", "accept-draw"):
                 self._client.offer_draw(self._game_id)
+            elif self._action == "decline-draw":
+                self._client.decline_draw(self._game_id)
             else:
                 self._client.resign_game(self._game_id)
         except LichessHTTPError as error:

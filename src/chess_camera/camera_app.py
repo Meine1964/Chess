@@ -247,6 +247,10 @@ def _lichess_game_information(
         )
     else:
         status = f"Status: {state.status}; result {state.result}"
+    if state.white_draw_offer:
+        status += "; White offers a draw"
+    if state.black_draw_offer:
+        status += "; Black offers a draw"
     return (
         player_text(game.black),
         f"Black clock: {black_clock}",
@@ -264,6 +268,15 @@ def _can_start_new_lichess_game(
         or state.result != "*"
         or state.status not in ("created", "started")
     )
+
+
+def _lichess_draw_offer_flags(
+    state: LichessGameState,
+    player_color: PlayerColor,
+) -> tuple[bool, bool]:
+    if player_color == "white":
+        return state.white_draw_offer, state.black_draw_offer
+    return state.black_draw_offer, state.white_draw_offer
 
 
 def _lichess_game_state_message(state: LichessGameState) -> str:
@@ -677,6 +690,8 @@ class CameraWindow(QMainWindow):
         self._lichess_game_action_worker: LichessGameActionWorker | None = None
         self._pending_lichess_game_action: LichessGameAction | None = None
         self._draw_offer_game_id: str | None = None
+        self._responded_draw_offer_game_id: str | None = None
+        self._lichess_draw_offer_state_available = False
         self._resign_requested_game_id: str | None = None
         self._pending_lichess_local_move: (
             tuple[tuple[int, int], tuple[int, int]] | None
@@ -845,6 +860,30 @@ class CameraWindow(QMainWindow):
             enabled=False,
         )
         self._lichess_draw_button.clicked.connect(self._offer_lichess_draw)
+        self._lichess_accept_draw_button = QToolButton(self)
+        _configure_lichess_control_button(
+            self._lichess_accept_draw_button,
+            "✓",
+            "Accept draw offer",
+            "Accept draw offer",
+            enabled=False,
+        )
+        self._lichess_accept_draw_button.setVisible(False)
+        self._lichess_accept_draw_button.clicked.connect(
+            self._accept_lichess_draw
+        )
+        self._lichess_decline_draw_button = QToolButton(self)
+        _configure_lichess_control_button(
+            self._lichess_decline_draw_button,
+            "✕",
+            "Decline draw offer",
+            "Decline draw offer",
+            enabled=False,
+        )
+        self._lichess_decline_draw_button.setVisible(False)
+        self._lichess_decline_draw_button.clicked.connect(
+            self._decline_lichess_draw
+        )
         self._lichess_resign_button = QToolButton(self)
         _configure_lichess_control_button(
             self._lichess_resign_button,
@@ -1088,6 +1127,12 @@ class CameraWindow(QMainWindow):
         lichess_controls_layout.addStretch(1)
         lichess_controls_layout.addWidget(self._lichess_takeback_button)
         lichess_controls_layout.addWidget(self._lichess_draw_button)
+        lichess_controls_layout.addWidget(
+            self._lichess_accept_draw_button
+        )
+        lichess_controls_layout.addWidget(
+            self._lichess_decline_draw_button
+        )
         lichess_controls_layout.addWidget(self._lichess_resign_button)
         lichess_controls_layout.addWidget(
             self._start_new_lichess_game_button
@@ -4006,6 +4051,8 @@ class CameraWindow(QMainWindow):
         self._lichess_game_controller = None
         self._last_projected_lichess_uci = None
         self._draw_offer_game_id = None
+        self._responded_draw_offer_game_id = None
+        self._lichess_draw_offer_state_available = False
         self._resign_requested_game_id = None
         self._lichess_game_selector.blockSignals(True)
         self._lichess_game_selector.clear()
@@ -4040,6 +4087,12 @@ class CameraWindow(QMainWindow):
 
     def _offer_lichess_draw(self) -> None:
         self._start_lichess_game_action("offer-draw")
+
+    def _accept_lichess_draw(self) -> None:
+        self._start_lichess_game_action("accept-draw")
+
+    def _decline_lichess_draw(self) -> None:
+        self._start_lichess_game_action("decline-draw")
 
     def _confirm_lichess_resignation(self) -> None:
         answer = QMessageBox.question(
@@ -4100,6 +4153,12 @@ class CameraWindow(QMainWindow):
         if action == "offer-draw":
             self._draw_offer_game_id = game_id
             message = "Lichess draw offer submitted."
+        elif action == "accept-draw":
+            self._responded_draw_offer_game_id = game_id
+            message = "Lichess draw offer accepted; awaiting final game state."
+        elif action == "decline-draw":
+            self._responded_draw_offer_game_id = game_id
+            message = "Lichess draw offer declined."
         else:
             self._resign_requested_game_id = game_id
             message = (
@@ -4157,16 +4216,66 @@ class CameraWindow(QMainWindow):
             self._lichess_game_action_thread is None
             and self._pending_lichess_game_action is None
         )
+        own_draw_offer = False
+        opponent_draw_offer = False
+        if (
+            self._lichess_draw_offer_state_available
+            and self._latest_lichess_state is not None
+            and self._lichess_player_color is not None
+        ):
+            own_draw_offer, opponent_draw_offer = (
+                _lichess_draw_offer_flags(
+                    self._latest_lichess_state,
+                    self._lichess_player_color,
+                )
+            )
+        self._lichess_draw_button.setVisible(not opponent_draw_offer)
+        self._lichess_accept_draw_button.setVisible(opponent_draw_offer)
+        self._lichess_decline_draw_button.setVisible(opponent_draw_offer)
         self._lichess_draw_button.setEnabled(
             active
             and idle
+            and not own_draw_offer
             and self._draw_offer_game_id != self._lichess_game_id
+        )
+        self._lichess_accept_draw_button.setEnabled(
+            active
+            and idle
+            and opponent_draw_offer
+            and self._responded_draw_offer_game_id != self._lichess_game_id
+        )
+        self._lichess_decline_draw_button.setEnabled(
+            active
+            and idle
+            and opponent_draw_offer
+            and self._responded_draw_offer_game_id != self._lichess_game_id
         )
         self._lichess_resign_button.setEnabled(
             active
             and idle
             and self._resign_requested_game_id != self._lichess_game_id
         )
+
+    def _update_authoritative_draw_offer_state(
+        self,
+        state: LichessGameState,
+    ) -> None:
+        if (
+            not self._lichess_draw_offer_state_available
+            or self._lichess_player_color is None
+            or self._lichess_game_id is None
+        ):
+            return
+        own_draw_offer, opponent_draw_offer = _lichess_draw_offer_flags(
+            state,
+            self._lichess_player_color,
+        )
+        if own_draw_offer:
+            self._draw_offer_game_id = self._lichess_game_id
+        elif self._pending_lichess_game_action != "offer-draw":
+            self._draw_offer_game_id = None
+        if not opponent_draw_offer:
+            self._responded_draw_offer_game_id = None
 
     def _lichess_ongoing_games_received(self, value: object) -> None:
         if not isinstance(value, tuple) or not all(
@@ -4308,6 +4417,8 @@ class CameraWindow(QMainWindow):
                 self._latest_lichess_game = None
                 self._last_projected_lichess_uci = None
                 self._draw_offer_game_id = None
+                self._responded_draw_offer_game_id = None
+                self._lichess_draw_offer_state_available = False
                 self._resign_requested_game_id = None
                 self._clear_lichess_game_information(
                     "Loading Lichess game information."
@@ -4336,6 +4447,7 @@ class CameraWindow(QMainWindow):
         if isinstance(event, LichessPollingSnapshot):
             self._awaiting_new_lichess_game = False
             self._new_lichess_game_existing_ids = None
+            self._lichess_draw_offer_state_available = False
             self._update_lichess_board(event.game.state)
             self._update_lichess_synchronization(event.game)
             self._update_lichess_game_information(
@@ -4352,8 +4464,10 @@ class CameraWindow(QMainWindow):
         elif isinstance(event, LichessGameFull):
             self._awaiting_new_lichess_game = False
             self._new_lichess_game_existing_ids = None
+            self._lichess_draw_offer_state_available = True
             self._update_lichess_board(event.state)
             self._update_lichess_synchronization(event)
+            self._update_authoritative_draw_offer_state(event.state)
             self._update_lichess_game_information(
                 event,
                 clocks_available=True,
@@ -4371,6 +4485,7 @@ class CameraWindow(QMainWindow):
         elif isinstance(event, LichessGameState):
             self._update_lichess_board(event)
             self._update_lichess_synchronization_state(event)
+            self._update_authoritative_draw_offer_state(event)
             if self._latest_lichess_game is not None:
                 self._update_lichess_game_information(
                     self._latest_lichess_game,

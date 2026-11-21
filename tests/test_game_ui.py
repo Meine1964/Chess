@@ -200,8 +200,13 @@ def test_draw_and_resign_controls_enable_for_active_game() -> None:
         _lichess_game_action_thread=None,
         _pending_lichess_game_action=None,
         _draw_offer_game_id=None,
+        _responded_draw_offer_game_id=None,
+        _lichess_draw_offer_state_available=True,
+        _lichess_player_color="white",
         _resign_requested_game_id=None,
         _lichess_draw_button=draw_button,
+        _lichess_accept_draw_button=MagicMock(),
+        _lichess_decline_draw_button=MagicMock(),
         _lichess_resign_button=resign_button,
     )
 
@@ -209,6 +214,53 @@ def test_draw_and_resign_controls_enable_for_active_game() -> None:
 
     draw_button.setEnabled.assert_called_once_with(True)
     resign_button.setEnabled.assert_called_once_with(True)
+
+
+def test_incoming_draw_offer_shows_accept_and_decline_controls() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    state = LichessGameState(
+        (),
+        "unused",
+        "white",
+        60000,
+        60000,
+        0,
+        0,
+        "started",
+        None,
+        "*",
+        False,
+        True,
+    )
+    draw_button = MagicMock()
+    accept_button = MagicMock()
+    decline_button = MagicMock()
+    window = SimpleNamespace(
+        _lichess_client=object(),
+        _lichess_game_id="game1234",
+        _latest_lichess_state=state,
+        _lichess_game_action_thread=None,
+        _pending_lichess_game_action=None,
+        _draw_offer_game_id=None,
+        _responded_draw_offer_game_id=None,
+        _lichess_draw_offer_state_available=True,
+        _lichess_player_color="white",
+        _resign_requested_game_id=None,
+        _lichess_draw_button=draw_button,
+        _lichess_accept_draw_button=accept_button,
+        _lichess_decline_draw_button=decline_button,
+        _lichess_resign_button=MagicMock(),
+    )
+
+    CameraWindow._update_lichess_game_control_buttons(window)
+
+    draw_button.setVisible.assert_called_once_with(False)
+    accept_button.setVisible.assert_called_once_with(True)
+    decline_button.setVisible.assert_called_once_with(True)
+    accept_button.setEnabled.assert_called_once_with(True)
+    decline_button.setEnabled.assert_called_once_with(True)
 
 
 def test_polling_message_reports_unavailable_correspondence_clocks() -> None:
