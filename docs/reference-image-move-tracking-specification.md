@@ -349,6 +349,13 @@ source/destination evidence. Recognized captured-piece-first, king-first, and
 captured-pawn-first evidence shall remain pending against the original
 reference until the signature completes.
 
+For an ordinary permitted relocation, the destination may use the same reduced
+evidence floor as the vacated source only when piece-color classification
+independently confirms that the source is empty and the destination contains
+the moving piece's color. An uncertain or wrong-color destination shall retain
+the normal evidence floor. This exception supports low-contrast quiet moves
+without globally lowering movement or ambiguity thresholds.
+
 If more squares remain materially changed than the active signature permits
 after normalization and boundary suppression, the observation shall normally
 be ambiguous. A
@@ -401,16 +408,17 @@ An accepted move shall be applied atomically:
 7. Return to `watching`.
 
 Offline legal play shall project the accepted source and destination without a
-fixed timeout. A dedicated board-and-halo activity detector shall remove that
-projection as soon as the next player's hand enters, restore idle-dark output
-including the optional next-turn dot, and allow ordinary move tracking to
-continue through that manipulation. If the settled board still matches the
+fixed timeout and shall display the optional next-turn dot concurrently once
+the authoritative turn is known. A dedicated board-and-halo activity detector
+shall remove the square projection as soon as the next player's hand enters,
+restore idle-dark output with the same dot, and allow ordinary move tracking
+to continue through that manipulation. If the settled board still matches the
 accepted reference on two consecutive black-frame observations, the same
-accepted-square projection shall reappear. The activity detector shall arm
-only after the restored projection has stabilized, preventing its light
+accepted-square projection and dot shall reappear. The activity detector shall
+arm only after the restored projection has stabilized, preventing its light
 transition from causing a blackout/reprojection loop. Diagnostic movement may
 retain temporary accepted-square projection, and illegal correction may
-retain its red projection.
+retain its red projection; neither shall expose the turn dot.
 
 Illegal-relocation correction shall project both the authoritative source and
 observed destination in red until a board-and-halo activity detector confirms

@@ -47,6 +47,41 @@ def test_matches_legal_move_with_weaker_vacated_source_evidence() -> None:
     assert match.signature.uci == "e2e4"
 
 
+def test_color_confirmed_quiet_move_uses_lower_destination_floor() -> None:
+    game = LegalGame(
+        "rnbqkb1r/pppppppp/8/8/3Pn3/8/PPP2PPP/"
+        "RNBQKBNR w KQkq - 0 3"
+    )
+    scores = _scores(((6, 2), 0.072), ((4, 2), 0.069))
+    colors = {
+        (6, 2): PieceColorClassification("empty", 0.02, 0.16),
+        (4, 2): PieceColorClassification("white", 0.04, 0.11),
+    }
+
+    without_colors = match_legal_move_signature(
+        scores,
+        game.physical_move_signatures,
+    )
+    with_colors = match_legal_move_signature(
+        scores,
+        game.physical_move_signatures,
+        piece_colors=colors,
+    )
+    wrong_destination = match_legal_move_signature(
+        scores,
+        game.physical_move_signatures,
+        piece_colors={
+            **colors,
+            (4, 2): PieceColorClassification("black", 0.04, 0.11),
+        },
+    )
+
+    assert without_colors.signature is None
+    assert with_colors.signature is not None
+    assert with_colors.signature.uci == "c2c4"
+    assert wrong_destination.signature is None
+
+
 def test_rejects_legal_move_when_source_change_is_only_noise() -> None:
     game = LegalGame()
 

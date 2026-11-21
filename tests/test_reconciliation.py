@@ -70,3 +70,24 @@ def test_same_color_piece_identity_is_accepted_by_occupancy() -> None:
     )
 
     assert result.matches
+
+
+def test_confident_piece_colors_correct_false_occupancy_labels() -> None:
+    position = {
+        (0, 0): "r",
+        (6, 2): "P",
+        (7, 7): "R",
+    }
+
+    result = compare_physical_occupancy(
+        position,
+        frozenset({(0, 0), (3, 3)}),
+        {
+            (0, 0): "black",
+            (3, 3): "empty",
+            (6, 2): "white",
+            (7, 7): "white",
+        },
+    )
+
+    assert result.matches

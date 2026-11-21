@@ -302,6 +302,14 @@ Discrepancies are:
 - A square occupied in both positions where appearance classification
   confidently reports the opposite piece color.
 
+Stable occupancy and appearance classification shall be combined before
+creating discrepancies. A confident White or Black appearance shall establish
+that a square is occupied even when the unsupervised occupancy detector calls
+it empty. A confident empty appearance shall establish that it is empty even
+when the occupancy detector calls it occupied. Uncertain appearance shall
+leave the stable occupancy result unchanged. This prevents clearly visible
+pieces from producing widespread false red reconciliation markers.
+
 All discrepancy squares shall be marked red simultaneously on the physical UI
 board and, when available, on the projected board. Uncertain color
 classification shall not create a discrepancy. A same-color incorrect piece
@@ -892,6 +900,13 @@ The preferred implementation surfaces are:
 
 The state machine shall be unit-tested without Qt, a camera, a projector, or
 network access.
+
+When an active Lichess game acquires physical-board authority, it shall cancel
+any transient Offline starting-position reset, saved-position restoration, or
+automatic-reset recovery request left from startup or mode selection. Those
+Offline requests shall not take priority over Lichess reference tracking or
+leave the camera loop waiting for a standard setup. Cancelling transient
+recovery shall not alter the accepted Lichess position or reference.
 
 ## 19. First-Slice Acceptance Tests
 

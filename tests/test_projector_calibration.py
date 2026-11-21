@@ -871,6 +871,7 @@ def test_reconciliation_adopts_current_lichess_position_and_history() -> None:
         _persist_move_reference=MagicMock(),
         _black_projector=MagicMock(),
         _occupancy_detector=MagicMock(),
+        _cancel_offline_recovery_for_lichess=MagicMock(),
     )
     window._complete_physical_reconciliation = (
         lambda target_position, lichess_game, completion_message: (
@@ -1127,6 +1128,7 @@ def test_lichess_attachment_mismatch_starts_live_reconciliation() -> None:
         _piece_synchronizer=synchronizer,
         _lichess_sync_status=MagicMock(),
         _record_runtime_diagnostic=MagicMock(),
+        _cancel_offline_recovery_for_lichess=MagicMock(),
         _start_automatic_lichess_reconciliation=start_reconciliation,
     )
 
@@ -1134,6 +1136,76 @@ def test_lichess_attachment_mismatch_starts_live_reconciliation() -> None:
 
     assert window._latest_lichess_game == game
     start_reconciliation.assert_called_once_with()
+
+
+def test_lichess_attachment_accepts_matching_current_server_position() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+    from src.chess_camera.chess_position import PiecePositionSynchronizer
+    from src.chess_camera.legal_game import LegalGame
+    from src.chess_camera.lichess_client import (
+        LichessGameFull,
+        LichessGameState,
+        LichessPlayer,
+    )
+
+    server_game = LegalGame()
+    moves = ("e2e4", "e7e5", "g1f3")
+    for uci in moves:
+        server_game.apply_move(
+            (8 - int(uci[1]), ord(uci[0]) - ord("a")),
+            (8 - int(uci[3]), ord(uci[2]) - ord("a")),
+        )
+    state = LichessGameState(
+        moves,
+        server_game.fen,
+        "black",
+        0,
+        0,
+        0,
+        0,
+        "started",
+        None,
+        "*",
+    )
+    game = LichessGameFull(
+        "current1",
+        "startpos",
+        LichessPlayer("white", "Local", 1500),
+        LichessPlayer("black", "Remote", 1500),
+        state,
+    )
+    synchronizer = PiecePositionSynchronizer()
+    synchronizer.restore(server_game.position)
+    start_reconciliation = MagicMock()
+    window = SimpleNamespace(
+        _latest_lichess_game=None,
+        _lichess_game_id=game.game_id,
+        _lichess_player_color="white",
+        _lichess_opponent_name="Remote",
+        _lichess_game_controller=None,
+        _reference_move_tracker=SimpleNamespace(initialized=True),
+        _piece_synchronizer=synchronizer,
+        _lichess_sync_status=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
+        _cancel_offline_recovery_for_lichess=MagicMock(),
+        _start_automatic_lichess_reconciliation=start_reconciliation,
+        _pending_lichess_local_uci=None,
+        _last_projected_lichess_uci=None,
+    )
+    window._update_lichess_synchronization_state = lambda current: (
+        CameraWindow._update_lichess_synchronization_state(window, current)
+    )
+
+    CameraWindow._update_lichess_synchronization(window, game)
+
+    start_reconciliation.assert_not_called()
+    assert window._lichess_game_controller is not None
+    assert window._lichess_game_controller.server_moves == moves
+    assert window._lichess_game_controller.state == "synchronized"
+    assert window._lichess_game_controller.physical_fen == server_game.fen
 
 
 def test_automatic_reconciliation_waits_for_safe_live_inputs() -> None:

@@ -107,6 +107,7 @@ class ProjectorWindow(QWidget):
         ] | None = None
         self._reconciliation_squares: tuple[tuple[int, int], ...] = ()
         self._move_squares: tuple[tuple[int, int, bool], ...] = ()
+        self._show_turn_indicator_with_move = False
         self._promotion_edge: PromotionEdge | None = None
         self._promotion_viewer_edge: PromotionEdge | None = None
         self._promotion_piece: PromotionPiece | None = None
@@ -209,17 +210,21 @@ class ProjectorWindow(QWidget):
         *,
         source_is_light: bool,
         destination_is_light: bool,
+        include_turn_indicator: bool = False,
     ) -> None:
         self.show_move_squares(
             (
                 (*source, source_is_light),
                 (*destination, destination_is_light),
-            )
+            ),
+            include_turn_indicator=include_turn_indicator,
         )
 
     def show_move_squares(
         self,
         squares: tuple[tuple[int, int, bool], ...],
+        *,
+        include_turn_indicator: bool = False,
     ) -> None:
         if self._projector_grid is None:
             raise RuntimeError("No calibrated projector grid is available.")
@@ -231,6 +236,7 @@ class ProjectorWindow(QWidget):
                     "Projected move squares must be inside the 8x8 board."
                 )
         self._move_squares = tuple(dict.fromkeys(squares))
+        self._show_turn_indicator_with_move = include_turn_indicator
         self._display_mode = "move"
         self.update()
 
@@ -479,7 +485,13 @@ class ProjectorWindow(QWidget):
                     self._promotion_viewer_edge,
                 )
         if (
-            self._display_mode == "black"
+            (
+                self._display_mode == "black"
+                or (
+                    self._display_mode == "move"
+                    and self._show_turn_indicator_with_move
+                )
+            )
             and self._projector_grid is not None
             and self._turn_indicator_corner is not None
         ):

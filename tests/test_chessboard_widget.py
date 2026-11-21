@@ -1,9 +1,10 @@
 import os
 from pathlib import Path
 from typing import cast
+from unittest.mock import MagicMock
 
 import pytest
-from PySide6.QtCore import QPointF, QSettings
+from PySide6.QtCore import QPointF, QSettings, Qt
 from PySide6.QtGui import QAction, QColor
 from PySide6.QtWidgets import QApplication, QComboBox, QMainWindow, QToolButton
 
@@ -17,7 +18,10 @@ from src.chess_camera.chessboard_widget import (
     rotate_square,
     square_at_position,
 )
-from src.chess_camera.chess_position import standard_position
+from src.chess_camera.chess_position import (
+    position_fen_with_inferred_rights,
+    standard_position,
+)
 from src.chess_camera.legal_game import LegalGame
 from src.chess_camera.lichess_client import OngoingGame
 
@@ -64,6 +68,122 @@ def test_widget_stores_validated_occupied_squares(
     assert widget.occupied_squares == frozenset({(0, 0), (3, 4), (7, 7)})
     with pytest.raises(ValueError, match="inside the 8x8 board"):
         widget.set_occupied_squares({(8, 0)})
+
+
+def test_position_fen_infers_permissive_physical_metadata() -> None:
+    assert position_fen_with_inferred_rights(standard_position()) == (
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR "
+        "w KQkq - 0 1"
+    )
+    assert position_fen_with_inferred_rights(
+        {
+            (0, 4): "k",
+            (3, 3): "p",
+            (3, 4): "P",
+            (7, 4): "K",
+            (7, 7): "R",
+        }
+    ) == (
+        "4k3/8/8/3pP3/8/8/8/4K2R w K d6 0 1"
+    )
+    assert position_fen_with_inferred_rights(
+        {
+            (0, 4): "k",
+            (4, 3): "P",
+            (4, 4): "p",
+            (7, 4): "K",
+        },
+        turn="black",
+    ) == (
+        "4k3/8/8/8/3Pp3/8/8/4K3 b - d3 0 1"
+    )
+    assert position_fen_with_inferred_rights(
+        {
+            (0, 4): "k",
+            (3, 2): "p",
+            (3, 3): "P",
+            (3, 5): "p",
+            (3, 6): "P",
+            (7, 4): "K",
+        }
+    ).split()[3] == "-"
+    assert position_fen_with_inferred_rights(
+        {(0, 0): "k", (7, 7): "K"}
+    ) == (
+        "k7/8/8/8/8/8/8/7K w - - 0 1"
+    )
+    with pytest.raises(ValueError, match="inside the 8x8 board"):
+        position_fen_with_inferred_rights({(8, 0): "K"})
+
+
+def test_widget_context_actions_emit_copy_requests(
+    application: QApplication,
+) -> None:
+    widget = ChessboardWidget()
+    copy_fen = MagicMock()
+    copy_board = MagicMock()
+    widget.copy_fen_requested.connect(copy_fen)
+    widget.copy_board_requested.connect(copy_board)
+    actions = {action.text(): action for action in widget.actions()}
+
+    actions["Copy FEN"].trigger()
+    actions["Copy Board"].trigger()
+
+    copy_fen.assert_called_once_with()
+    copy_board.assert_called_once_with()
+    assert (
+        widget.contextMenuPolicy()
+        == Qt.ContextMenuPolicy.ActionsContextMenu
+    )
+
+
+def test_rendered_board_pixmap_excludes_layout_margins(
+    application: QApplication,
+) -> None:
+    widget = ChessboardWidget()
+    widget.resize(400, 320)
+    widget.set_pieces(standard_position())
+    widget.show()
+    application.processEvents()
+
+    pixmap = widget.rendered_board_pixmap()
+
+    assert pixmap.width() == 320
+    assert pixmap.height() == 320
+    widget.close()
+
+
+def test_board_copy_handlers_use_physical_defaults_and_lichess_authority(
+    application: QApplication,
+) -> None:
+    from types import SimpleNamespace
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    physical = ChessboardWidget()
+    physical.set_pieces(standard_position())
+    lichess = ChessboardWidget()
+    lichess.set_pieces({(0, 0): "k", (7, 7): "K"})
+    authoritative_fen = "8/8/8/8/8/8/4k3/4K3 b - - 17 42"
+    status_bar = MagicMock()
+    window = SimpleNamespace(
+        _board_widget=physical,
+        _lichess_board_widget=lichess,
+        _lichess_game_controller=SimpleNamespace(
+            server_fen=authoritative_fen
+        ),
+        statusBar=MagicMock(return_value=status_bar),
+    )
+
+    CameraWindow._copy_physical_board_fen(window)
+    assert application.clipboard().text() == (
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR "
+        "w KQkq - 0 1"
+    )
+
+    CameraWindow._copy_lichess_board_fen(window)
+    assert application.clipboard().text() == authoritative_fen
+    assert status_bar.showMessage.call_count == 2
 
 
 def test_widget_renders_black_dot_at_occupied_square_center(

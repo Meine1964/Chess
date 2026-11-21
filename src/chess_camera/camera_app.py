@@ -5,7 +5,7 @@ import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import cv2
 import numpy as np
@@ -65,7 +65,9 @@ from .chess_position import (
     PieceCode,
     PiecePositionSynchronizer,
     Position,
+    position_fen_with_inferred_rights,
     square_name,
+    standard_position,
     starting_occupied_squares,
 )
 from .chessboard_widget import ChessboardWidget, rotate_square
@@ -161,6 +163,7 @@ _LICHESS_AI_CLOCK_SETTING = "lichess/ai_clock"
 _PIECE_POSITION_SETTING = "pieces/accepted_position"
 _GAME_MODE_SETTING = "game/mode"
 _LEGAL_GAME_FEN_SETTING = "game/offline_fen"
+_OFFLINE_TURN_INFERENCE_SETTING = "game/offline_turn_inference_pending"
 _BOARD_ORIENTATION_SETTING = "board/automatic_clockwise_quarter_turns"
 _INTERACTION_FONT_POINT_SIZE = 12
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -186,6 +189,34 @@ def _turn_indicator_state(
     if status.turn == "white":
         return "#ffffff", "White to move"
     return "#000000", "Black to move"
+
+
+def _inferred_offline_games(
+    position: Position,
+) -> tuple[LegalGame, LegalGame]:
+    return (
+        LegalGame(
+            position_fen_with_inferred_rights(position, turn="white")
+        ),
+        LegalGame(
+            position_fen_with_inferred_rights(position, turn="black")
+        ),
+    )
+
+
+def _inferred_offline_game_for_source(
+    position: Position,
+    source: tuple[int, int],
+) -> LegalGame | None:
+    piece = position.get(source)
+    if piece is None:
+        return None
+    turn: Literal["white", "black"] = (
+        "white" if piece.isupper() else "black"
+    )
+    return LegalGame(
+        position_fen_with_inferred_rights(position, turn=turn)
+    )
 
 
 def _illegal_correction_message(
@@ -960,6 +991,8 @@ class CameraWindow(QMainWindow):
         self._piece_synchronizer = PiecePositionSynchronizer()
         self._legal_game = LegalGame()
         self._game_mode: GameMode = "diagnostic"
+        self._offline_turn_inference_pending = False
+        self._pending_offline_games: tuple[LegalGame, LegalGame] | None = None
         self._pending_offline_restore_game: LegalGame | None = None
         self._offline_mode_recovery_error: str | None = None
         self._offline_restore_requested = False
@@ -1079,7 +1112,18 @@ class CameraWindow(QMainWindow):
         self._board_widget.setMinimumSize(240, 240)
         self._lichess_board_widget = ChessboardWidget()
         self._lichess_board_widget.setMinimumSize(280, 280)
-        self._lichess_board_widget.setEnabled(False)
+        self._board_widget.copy_fen_requested.connect(
+            self._copy_physical_board_fen
+        )
+        self._board_widget.copy_board_requested.connect(
+            self._copy_physical_board_image
+        )
+        self._lichess_board_widget.copy_fen_requested.connect(
+            self._copy_lichess_board_fen
+        )
+        self._lichess_board_widget.copy_board_requested.connect(
+            self._copy_lichess_board_image
+        )
         self._restore_piece_position()
         self._restore_game_mode()
         self._board_widget.setEnabled(False)
@@ -2734,6 +2778,34 @@ class CameraWindow(QMainWindow):
             message,
         )
 
+    def _copy_physical_board_fen(self) -> None:
+        fen = position_fen_with_inferred_rights(self._board_widget.pieces)
+        QGuiApplication.clipboard().setText(fen)
+        self.statusBar().showMessage("Physical position FEN copied.", 3000)
+
+    def _copy_physical_board_image(self) -> None:
+        QGuiApplication.clipboard().setPixmap(
+            self._board_widget.rendered_board_pixmap()
+        )
+        self.statusBar().showMessage("Physical board image copied.", 3000)
+
+    def _copy_lichess_board_fen(self) -> None:
+        fen = (
+            self._lichess_game_controller.server_fen
+            if self._lichess_game_controller is not None
+            else position_fen_with_inferred_rights(
+                self._lichess_board_widget.pieces
+            )
+        )
+        QGuiApplication.clipboard().setText(fen)
+        self.statusBar().showMessage("Lichess position FEN copied.", 3000)
+
+    def _copy_lichess_board_image(self) -> None:
+        QGuiApplication.clipboard().setPixmap(
+            self._lichess_board_widget.rendered_board_pixmap()
+        )
+        self.statusBar().showMessage("Lichess board image copied.", 3000)
+
     def _board_square_clicked(self, row: int, column: int) -> None:
         clicked_square = f"{chr(ord('a') + column)}{8 - row}"
         if (
@@ -3353,6 +3425,21 @@ class CameraWindow(QMainWindow):
             if lichess_controller is None
             else lichess_controller.physical_position
         )
+        offline_signatures = self._legal_game.physical_move_signatures
+        if (
+            lichess_controller is None
+            and self._game_mode == "offline-game"
+            and getattr(self, "_offline_turn_inference_pending", False)
+        ):
+            pending_games = self._pending_offline_games
+            if pending_games is None:
+                pending_games = _inferred_offline_games(tracking_position)
+                self._pending_offline_games = pending_games
+            offline_signatures = tuple(
+                signature
+                for game in pending_games
+                for signature in game.physical_move_signatures
+            )
         try:
             update = self._reference_move_tracker.observe(
                 self._latest_frame,
@@ -3364,7 +3451,7 @@ class CameraWindow(QMainWindow):
                     if lichess_signature is not None
                     else lichess_controller.local_move_signatures
                     if lichess_controller is not None
-                    else self._legal_game.physical_move_signatures
+                    else offline_signatures
                     if self._game_mode == "offline-game"
                     else ()
                 ),
@@ -3464,8 +3551,12 @@ class CameraWindow(QMainWindow):
             self._reference_move_tracker.reset_activity()
             self._last_rejected_move = update.move
             self._board_widget.set_illegal_source(square)
+            correction_game = CameraWindow._offline_correction_game(
+                self,
+                update.move,
+            )
             self._piece_status.setText(
-                _illegal_correction_message(update.move, self._legal_game)
+                _illegal_correction_message(update.move, correction_game)
             )
             self._project_illegal_move_correction(update.move)
             return
@@ -3473,8 +3564,12 @@ class CameraWindow(QMainWindow):
             self._reference_move_tracker.reset_activity()
             self._last_rejected_move = update.move
             self._board_widget.set_illegal_source(update.move[0])
+            correction_game = CameraWindow._offline_correction_game(
+                self,
+                update.move,
+            )
             self._piece_status.setText(
-                _illegal_correction_message(update.move, self._legal_game)
+                _illegal_correction_message(update.move, correction_game)
             )
             self._project_illegal_move_correction(update.move)
             return
@@ -3482,6 +3577,8 @@ class CameraWindow(QMainWindow):
             return
         source, destination = update.move
         legal_move: LegalMoveResult | None = None
+        offline_move_game: LegalGame | None = None
+        inferred_offline_turn = False
         lichess_pending = (
             lichess_controller is not None
             and lichess_signature is not None
@@ -3536,10 +3633,19 @@ class CameraWindow(QMainWindow):
                 )
                 return
         elif self._game_mode == "offline-game":
+            offline_move_game = self._legal_game
+            if getattr(self, "_offline_turn_inference_pending", False):
+                inferred_game = _inferred_offline_game_for_source(
+                    tracking_position,
+                    source,
+                )
+                if inferred_game is not None:
+                    offline_move_game = inferred_game
+                    inferred_offline_turn = True
             local_signature = next(
                 (
                     signature
-                    for signature in self._legal_game.legal_move_signatures
+                    for signature in offline_move_game.legal_move_signatures
                     if (
                         signature.source,
                         signature.destination,
@@ -3554,10 +3660,12 @@ class CameraWindow(QMainWindow):
                 and local_signature.kind
                 in ("promotion", "capture-promotion")
             ):
+                if inferred_offline_turn:
+                    self._legal_game = offline_move_game
                 self._start_promotion_selection(update.move)
                 return
             try:
-                legal_move = self._legal_game.apply_move(
+                legal_move = offline_move_game.apply_move(
                     source,
                     destination,
                 )
@@ -3566,7 +3674,10 @@ class CameraWindow(QMainWindow):
                 self._last_rejected_move = update.move
                 self._board_widget.set_illegal_source(source)
                 self._piece_status.setText(
-                    _illegal_correction_message(update.move, self._legal_game)
+                    _illegal_correction_message(
+                        update.move,
+                        offline_move_game,
+                    )
                 )
                 self._project_illegal_move_correction(update.move)
                 return
@@ -3588,13 +3699,17 @@ class CameraWindow(QMainWindow):
             self._reference_move_tracker.commit_accepted(update.move)
         except ValueError as error:
             self._piece_synchronizer.restore(previous_position)
-            if legal_move is not None and not lichess_pending:
-                self._legal_game.rollback()
+            if offline_move_game is not None and legal_move is not None:
+                offline_move_game.rollback()
             self._reference_move_tracker.reset_activity()
             self._piece_status.setText(
                 f"Reference move rejected: {error}"
             )
             return
+        if inferred_offline_turn and offline_move_game is not None:
+            self._legal_game = offline_move_game
+            self._offline_turn_inference_pending = False
+            self._pending_offline_games = None
         self._board_widget.set_pieces(position_update.position)
         self._board_widget.set_occupied_squares(position_update.position)
         self._board_widget.set_illegal_source(None)
@@ -3631,6 +3746,20 @@ class CameraWindow(QMainWindow):
                 self._project_accepted_move(update.move)
             else:
                 self._project_offline_accepted_move(update.move)
+
+    def _offline_correction_game(
+        self,
+        move: tuple[tuple[int, int], tuple[int, int]],
+    ) -> LegalGame:
+        if not getattr(self, "_offline_turn_inference_pending", False):
+            return self._legal_game
+        return (
+            _inferred_offline_game_for_source(
+                self._piece_synchronizer.position,
+                move[0],
+            )
+            or self._legal_game
+        )
 
     def _start_promotion_selection(
         self,
@@ -3972,6 +4101,9 @@ class CameraWindow(QMainWindow):
             )
             return
         self._pending_promotion_selection = None
+        if getattr(self, "_offline_turn_inference_pending", False):
+            self._offline_turn_inference_pending = False
+            self._pending_offline_games = None
         self._board_widget.set_pieces(position_update.position)
         self._board_widget.set_occupied_squares(position_update.position)
         self._board_widget.set_illegal_source(None)
@@ -4271,6 +4403,8 @@ class CameraWindow(QMainWindow):
             return
         self._piece_synchronizer.reset()
         self._legal_game.reset()
+        self._offline_turn_inference_pending = False
+        self._pending_offline_games = None
         if self._activate_offline_after_reset:
             self._automatic_start_reset_recovery = False
             self._activate_offline_after_reset = False
@@ -4286,10 +4420,12 @@ class CameraWindow(QMainWindow):
             occupied,
         )
         self._board_widget.set_pieces(update.position)
+        self._board_widget.set_occupied_squares(occupied)
         self._persist_piece_position(update.position)
         self._persist_game_state()
         self._board_widget.set_illegal_source(None)
         self._last_rejected_move = None
+        self._illegal_correction_last_projected_move = None
         self._board_widget.set_last_move(None)
         self._piece_status.setText(update.message)
         if self._latest_frame is None or self._calibration_result is None:
@@ -4360,6 +4496,7 @@ class CameraWindow(QMainWindow):
                 self._physical_board_square(*destination),
                 source_is_light=(sum(source) % 2 == 0),
                 destination_is_light=(sum(destination) % 2 == 0),
+                include_turn_indicator=True,
             )
         except (RuntimeError, ValueError) as error:
             self._projector_status.setText(
@@ -5025,6 +5162,7 @@ class CameraWindow(QMainWindow):
             self._piece_synchronizer.restore(target_position)
             self._legal_game = LegalGame(lichess_game.state.fen)
             self._lichess_game_controller = adopted_controller
+            self._cancel_offline_recovery_for_lichess()
             self._board_widget.set_pieces(target_position)
             self._board_widget.set_occupied_squares(target_position)
             self._persist_piece_position(target_position)
@@ -5162,10 +5300,26 @@ class CameraWindow(QMainWindow):
             return
         self._legal_game = restored
         self._game_mode = "offline-game"
+        self._offline_turn_inference_pending = _stored_boolean(
+            self._settings.value(
+                _OFFLINE_TURN_INFERENCE_SETTING,
+                False,
+            ),
+            False,
+        )
+        self._pending_offline_games = (
+            _inferred_offline_games(self._piece_synchronizer.position)
+            if self._offline_turn_inference_pending
+            else None
+        )
 
     def _persist_game_state(self) -> None:
         self._settings.setValue(_GAME_MODE_SETTING, self._game_mode)
         self._settings.setValue(_LEGAL_GAME_FEN_SETTING, self._legal_game.fen)
+        self._settings.setValue(
+            _OFFLINE_TURN_INFERENCE_SETTING,
+            getattr(self, "_offline_turn_inference_pending", False),
+        )
         self._settings.sync()
 
     def _game_mode_changed(self, index: int) -> None:
@@ -5241,8 +5395,8 @@ class CameraWindow(QMainWindow):
             QMessageBox.ButtonRole.ActionRole,
         )
         setup_button = dialog.addButton(
-            "Remain in board setup",
-            QMessageBox.ButtonRole.DestructiveRole,
+            "Start Offline game from current position",
+            QMessageBox.ButtonRole.ActionRole,
         )
         cancel_button = dialog.addButton(
             QMessageBox.StandardButton.Cancel
@@ -5268,7 +5422,7 @@ class CameraWindow(QMainWindow):
                     "starting position."
                 )
         elif clicked is setup_button:
-            self._activate_board_setup_mode()
+            self._start_offline_game_from_current_position()
         else:
             self._game_mode_selector.blockSignals(True)
             self._game_mode_selector.setCurrentIndex(
@@ -5283,6 +5437,8 @@ class CameraWindow(QMainWindow):
         self._offline_restore_requested = False
         self._automatic_start_reset_recovery = False
         self._activate_offline_after_reset = False
+        self._offline_turn_inference_pending = False
+        self._pending_offline_games = None
         self._game_mode = "diagnostic"
         self._game_mode_selector.blockSignals(True)
         self._game_mode_selector.setCurrentIndex(0)
@@ -5292,10 +5448,53 @@ class CameraWindow(QMainWindow):
         self._board_widget.set_reconciliation_squares(())
         self._last_rejected_move = None
         self._settings.setValue(_GAME_MODE_SETTING, "diagnostic")
+        self._settings.setValue(_OFFLINE_TURN_INFERENCE_SETTING, False)
         self._settings.sync()
         self._update_turn_indicator()
         self._piece_status.setText(
             "Board setup / diagnostic mode accepts unambiguous relocations."
+        )
+
+    def _start_offline_game_from_current_position(self) -> None:
+        position = self._piece_synchronizer.position
+        if not position:
+            self._piece_status.setText(
+                "Cannot start an Offline game before a physical position "
+                "has been accepted."
+            )
+            return
+        is_standard_position = position == standard_position()
+        pending_games = (
+            None
+            if is_standard_position
+            else _inferred_offline_games(position)
+        )
+        self._pending_offline_restore_game = None
+        self._offline_mode_recovery_error = None
+        self._offline_restore_requested = False
+        self._automatic_start_reset_recovery = False
+        self._activate_offline_after_reset = False
+        self._legal_game = (
+            LegalGame() if pending_games is None else pending_games[0]
+        )
+        self._pending_offline_games = pending_games
+        self._offline_turn_inference_pending = pending_games is not None
+        self._game_mode = "offline-game"
+        self._game_mode_selector.blockSignals(True)
+        self._game_mode_selector.setCurrentIndex(1)
+        self._game_mode_selector.blockSignals(False)
+        self._sync_game_mode_actions()
+        self._board_widget.set_illegal_source(None)
+        self._board_widget.set_reconciliation_squares(())
+        self._last_rejected_move = None
+        self._reference_move_tracker.reset_activity()
+        self._persist_game_state()
+        self._update_turn_indicator()
+        self._piece_status.setText(
+            "Offline game ready from the standard position; White to move."
+            if is_standard_position
+            else "Offline game ready from the current position; make the "
+            "first move to determine whose turn it is."
         )
 
     def _begin_offline_position_restore(self, target: LegalGame) -> None:
@@ -5303,6 +5502,8 @@ class CameraWindow(QMainWindow):
         self._offline_mode_recovery_error = None
         self._automatic_start_reset_recovery = False
         self._activate_offline_after_reset = False
+        self._offline_turn_inference_pending = False
+        self._pending_offline_games = None
         self._legal_game = target
         self._game_mode = "offline-game"
         self._offline_restore_requested = True
@@ -5319,6 +5520,28 @@ class CameraWindow(QMainWindow):
         )
         self._occupancy_status.setText(
             "Checking physical occupancy against the saved offline game."
+        )
+
+    def _cancel_offline_recovery_for_lichess(self) -> None:
+        if not (
+            self._reset_to_start_requested
+            or self._activate_offline_after_reset
+            or self._automatic_start_reset_recovery
+            or self._offline_restore_requested
+            or self._pending_offline_restore_game is not None
+        ):
+            return
+        self._reset_to_start_requested = False
+        self._activate_offline_after_reset = False
+        self._automatic_start_reset_recovery = False
+        self._offline_restore_requested = False
+        self._pending_offline_restore_game = None
+        self._offline_mode_recovery_error = None
+        self._occupancy_detector.reset()
+        self._reference_move_tracker.reset_activity()
+        self._record_runtime_diagnostic(
+            "lichess-offline-recovery-cancelled",
+            "Active Lichess synchronization cancelled stale Offline recovery.",
         )
 
     def _update_offline_position_restore(
@@ -6060,14 +6283,22 @@ class CameraWindow(QMainWindow):
                 "game metadata."
             )
             return
+        self._cancel_offline_recovery_for_lichess()
         if (
             self._lichess_game_controller is None
             or self._lichess_game_controller.game_id != game.game_id
         ):
-            initial_position = LegalGame(game.initial_fen).position
+            initial_position = (
+                LegalGame()
+                if game.initial_fen == "startpos"
+                else LegalGame(game.initial_fen)
+            ).position
+            current_game = LegalGame(game.state.fen)
+            accepted_position = self._piece_synchronizer.position
             if (
                 not self._reference_move_tracker.initialized
-                or self._piece_synchronizer.position != initial_position
+                or accepted_position
+                not in (initial_position, current_game.position)
             ):
                 self._lichess_sync_status.setText(
                     "Physical reconciliation required: compare the live "
@@ -6085,6 +6316,11 @@ class CameraWindow(QMainWindow):
                 game.initial_fen,
                 self._lichess_player_color,
                 self._lichess_opponent_name,
+                physical_fen=(
+                    current_game.fen
+                    if accepted_position == current_game.position
+                    else None
+                ),
             )
         self._update_lichess_synchronization_state(game.state)
 
@@ -6454,6 +6690,8 @@ class CameraWindow(QMainWindow):
         state = (
             _lichess_turn_indicator_state(self._latest_lichess_state)
             if self._latest_lichess_state is not None
+            else None
+            if getattr(self, "_offline_turn_inference_pending", False)
             else _turn_indicator_state(self._game_mode, self._legal_game)
         )
         if state is None:
@@ -6474,12 +6712,19 @@ class CameraWindow(QMainWindow):
         self._update_projected_turn_indicator()
 
     def _update_projected_turn_indicator(self) -> None:
-        corner = _projected_turn_corner(
-            self._project_turn_indicator,
-            self._game_mode,
-            self._legal_game,
-            self._latest_lichess_state,
-            self._board_quarter_turns,
+        corner = (
+            None
+            if (
+                getattr(self, "_offline_turn_inference_pending", False)
+                and self._latest_lichess_state is None
+            )
+            else _projected_turn_corner(
+                self._project_turn_indicator,
+                self._game_mode,
+                self._legal_game,
+                self._latest_lichess_state,
+                self._board_quarter_turns,
+            )
         )
         self._projector_window.set_turn_indicator(corner)
 

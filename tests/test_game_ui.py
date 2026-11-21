@@ -19,6 +19,7 @@ from src.chess_camera.camera_app import (
     _projected_turn_corner,
     _reference_tracking_status_message,
     _turn_indicator_state,
+    _inferred_offline_game_for_source,
 )
 from src.chess_camera.legal_game import LegalGame
 from src.chess_camera.lichess_client import (
@@ -637,6 +638,46 @@ def test_stable_starting_occupancy_triggers_automatic_reset() -> None:
     )
 
 
+def test_completed_starting_reset_replaces_occupancy_overlay() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.chess_position import (
+        PiecePositionSynchronizer,
+        starting_occupied_squares,
+    )
+
+    occupied = starting_occupied_squares()
+    board_widget = MagicMock()
+    window = SimpleNamespace(
+        _reset_to_start_requested=True,
+        _automatic_start_reset_recovery=False,
+        _activate_offline_after_reset=False,
+        _piece_synchronizer=PiecePositionSynchronizer(),
+        _legal_game=LegalGame(),
+        _update_turn_indicator=MagicMock(),
+        _board_widget=board_widget,
+        _persist_piece_position=MagicMock(),
+        _persist_game_state=MagicMock(),
+        _last_rejected_move=((1, 1), (2, 1)),
+        _illegal_correction_last_projected_move=((1, 1), (2, 1)),
+        _piece_status=MagicMock(),
+        _latest_frame=object(),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(camera_grid=object())
+        ),
+        _reference_move_tracker=MagicMock(),
+        _board_quarter_turns=0,
+        _persist_move_reference=MagicMock(),
+        _occupancy_status=MagicMock(),
+    )
+
+    CameraWindow._complete_starting_position_reset(window, occupied)
+
+    board_widget.set_occupied_squares.assert_called_once_with(occupied)
+    assert window._illegal_correction_last_projected_move is None
+
+
 def test_provisional_starting_occupancy_reports_fast_confirmation() -> None:
     from types import SimpleNamespace
     from unittest.mock import MagicMock
@@ -713,6 +754,77 @@ def test_matching_offline_mode_is_restored() -> None:
     settings.setValue.assert_not_called()
 
 
+def test_pending_turn_inference_is_restored_with_matching_position() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.chess_position import PiecePositionSynchronizer
+
+    position = LegalGame().position
+    position.pop((6, 0))
+    game = _inferred_offline_game_for_source(position, (1, 0))
+    assert game is not None
+    synchronizer = PiecePositionSynchronizer()
+    synchronizer.restore(position)
+    settings = MagicMock()
+    settings.value.side_effect = lambda key, default="": {
+        "game/mode": "offline-game",
+        "game/offline_fen": game.fen,
+        "game/offline_turn_inference_pending": True,
+    }.get(key, default)
+    window = SimpleNamespace(
+        _settings=settings,
+        _piece_synchronizer=synchronizer,
+        _legal_game=LegalGame(),
+        _game_mode="diagnostic",
+        _offline_turn_inference_pending=False,
+        _pending_offline_games=None,
+        _pending_offline_restore_game=None,
+        _offline_mode_recovery_error=None,
+        _automatic_start_reset_recovery=False,
+        _activate_offline_after_reset=False,
+        _automatic_start_reset=True,
+    )
+
+    CameraWindow._restore_game_mode(window)
+
+    assert window._game_mode == "offline-game"
+    assert window._offline_turn_inference_pending is True
+    assert window._pending_offline_games is not None
+
+
+def test_lichess_authority_cancels_stale_offline_recovery() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    window = SimpleNamespace(
+        _reset_to_start_requested=True,
+        _activate_offline_after_reset=True,
+        _automatic_start_reset_recovery=True,
+        _offline_restore_requested=True,
+        _pending_offline_restore_game=LegalGame(),
+        _offline_mode_recovery_error="saved position mismatch",
+        _occupancy_detector=MagicMock(),
+        _reference_move_tracker=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
+    )
+
+    CameraWindow._cancel_offline_recovery_for_lichess(window)
+
+    assert window._reset_to_start_requested is False
+    assert window._activate_offline_after_reset is False
+    assert window._automatic_start_reset_recovery is False
+    assert window._offline_restore_requested is False
+    assert window._pending_offline_restore_game is None
+    assert window._offline_mode_recovery_error is None
+    window._occupancy_detector.reset.assert_called_once_with()
+    window._reference_move_tracker.reset_activity.assert_called_once_with()
+    assert (
+        window._record_runtime_diagnostic.call_args.args[0]
+        == "lichess-offline-recovery-cancelled"
+    )
+
+
 def test_board_setup_choice_preserves_saved_offline_fen() -> None:
     from types import SimpleNamespace
     from unittest.mock import MagicMock, call
@@ -738,11 +850,91 @@ def test_board_setup_choice_preserves_saved_offline_fen() -> None:
 
     assert window._game_mode == "diagnostic"
     assert settings.setValue.call_args_list == [
-        call("game/mode", "diagnostic")
+        call("game/mode", "diagnostic"),
+        call("game/offline_turn_inference_pending", False),
     ]
     settings.remove.assert_not_called()
     settings.sync.assert_called_once_with()
     assert window._pending_offline_restore_game is None
+
+
+def test_start_offline_from_current_position_waits_for_first_move() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.chess_position import PiecePositionSynchronizer
+
+    game = LegalGame()
+    game.apply_move((6, 4), (4, 4))
+    synchronizer = PiecePositionSynchronizer()
+    synchronizer.restore(game.position)
+    window = SimpleNamespace(
+        _piece_synchronizer=synchronizer,
+        _pending_offline_restore_game=LegalGame(),
+        _offline_mode_recovery_error="mismatch",
+        _offline_restore_requested=True,
+        _automatic_start_reset_recovery=True,
+        _activate_offline_after_reset=True,
+        _legal_game=LegalGame(),
+        _pending_offline_games=None,
+        _offline_turn_inference_pending=False,
+        _game_mode="diagnostic",
+        _game_mode_selector=MagicMock(),
+        _sync_game_mode_actions=MagicMock(),
+        _board_widget=MagicMock(),
+        _last_rejected_move=((6, 4), (4, 4)),
+        _reference_move_tracker=MagicMock(),
+        _persist_game_state=MagicMock(),
+        _update_turn_indicator=MagicMock(),
+        _piece_status=MagicMock(),
+    )
+
+    CameraWindow._start_offline_game_from_current_position(window)
+
+    assert window._game_mode == "offline-game"
+    assert window._offline_turn_inference_pending is True
+    assert window._pending_offline_games is not None
+    window._persist_game_state.assert_called_once_with()
+    window._piece_status.setText.assert_called_once_with(
+        "Offline game ready from the current position; make the first move "
+        "to determine whose turn it is."
+    )
+
+
+def test_start_offline_from_standard_position_keeps_white_to_move() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.chess_position import PiecePositionSynchronizer
+
+    synchronizer = PiecePositionSynchronizer()
+    synchronizer.restore(LegalGame().position)
+    window = SimpleNamespace(
+        _piece_synchronizer=synchronizer,
+        _pending_offline_restore_game=None,
+        _offline_mode_recovery_error=None,
+        _offline_restore_requested=False,
+        _automatic_start_reset_recovery=False,
+        _activate_offline_after_reset=False,
+        _legal_game=LegalGame(),
+        _pending_offline_games=None,
+        _offline_turn_inference_pending=True,
+        _game_mode="diagnostic",
+        _game_mode_selector=MagicMock(),
+        _sync_game_mode_actions=MagicMock(),
+        _board_widget=MagicMock(),
+        _last_rejected_move=None,
+        _reference_move_tracker=MagicMock(),
+        _persist_game_state=MagicMock(),
+        _update_turn_indicator=MagicMock(),
+        _piece_status=MagicMock(),
+    )
+
+    CameraWindow._start_offline_game_from_current_position(window)
+
+    assert window._offline_turn_inference_pending is False
+    assert window._pending_offline_games is None
+    assert window._legal_game.status.turn == "white"
 
 
 def test_saved_offline_position_restore_commits_after_occupancy_match() -> None:
@@ -1237,6 +1429,30 @@ def test_turn_indicator_tracks_authoritative_side_to_move() -> None:
     )
 
 
+def test_turn_indicator_is_hidden_while_offline_turn_is_unknown() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    indicator = MagicMock()
+    turn_text = MagicMock()
+    window = SimpleNamespace(
+        _latest_lichess_state=None,
+        _offline_turn_inference_pending=True,
+        _game_mode="offline-game",
+        _legal_game=LegalGame(),
+        _turn_indicator=indicator,
+        _turn_text=turn_text,
+        _update_projected_turn_indicator=MagicMock(),
+    )
+
+    CameraWindow._update_turn_indicator(window)
+
+    indicator.hide.assert_called_once_with()
+    indicator.show.assert_not_called()
+    turn_text.setText.assert_called_once_with("Not enforced")
+    window._update_projected_turn_indicator.assert_called_once_with()
+
+
 def test_turn_indicator_reports_completed_game() -> None:
     game = LegalGame()
     for source, destination in (
@@ -1328,6 +1544,114 @@ def test_illegal_relocation_projects_source_and_destination_red() -> None:
     window._board_widget.set_illegal_source.assert_called_once_with(move[0])
     window._project_illegal_move_correction.assert_called_once_with(move)
     assert window._last_rejected_move == move
+
+
+def test_first_accepted_black_move_determines_offline_turn() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.chess_position import PiecePositionSynchronizer
+
+    position = LegalGame().position
+    position.pop((6, 0))
+    synchronizer = PiecePositionSynchronizer()
+    synchronizer.restore(position)
+    move = ((1, 0), (2, 0))
+    tracker = MagicMock()
+    tracker.observe.return_value = ReferenceTrackerUpdate(
+        "accepted",
+        move,
+        "Accepted a7-a6.",
+    )
+    tracker.rejected_move_is_restored.return_value = False
+    window = SimpleNamespace(
+        _latest_frame=object(),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(camera_grid=object())
+        ),
+        _pending_lichess_local_move=None,
+        _lichess_game_controller=None,
+        _piece_synchronizer=synchronizer,
+        _legal_game=_inferred_offline_game_for_source(position, (7, 4)),
+        _game_mode="offline-game",
+        _offline_turn_inference_pending=True,
+        _pending_offline_games=None,
+        _reference_move_tracker=tracker,
+        _board_quarter_turns=0,
+        _occupancy_status=MagicMock(),
+        _last_runtime_tracker_state="watching",
+        _record_runtime_diagnostic=MagicMock(),
+        _restore_pending_lichess_guidance_after_no_change=MagicMock(),
+        _restore_offline_accepted_projection_after_no_change=MagicMock(),
+        _last_rejected_move=None,
+        _illegal_correction_last_projected_move=None,
+        _board_widget=MagicMock(),
+        _piece_status=MagicMock(),
+        _project_illegal_move_correction=MagicMock(),
+        _promotion_mode="auto-queen",
+        _persist_piece_position=MagicMock(),
+        _persist_move_reference=MagicMock(),
+        _persist_game_state=MagicMock(),
+        _update_turn_indicator=MagicMock(),
+        _project_offline_accepted_move=MagicMock(),
+    )
+
+    CameraWindow._update_reference_move_tracking(window)
+
+    observed_signatures = tracker.observe.call_args.args[4]
+    observed_uci = {signature.uci for signature in observed_signatures}
+    assert "e2e4" in observed_uci
+    assert "e7e5" in observed_uci
+    assert window._offline_turn_inference_pending is False
+    assert window._pending_offline_games is None
+    assert window._legal_game.status.turn == "white"
+    assert synchronizer.position[(2, 0)] == "p"
+    window._persist_game_state.assert_called_once_with()
+
+
+def test_illegal_first_move_keeps_offline_turn_undetermined() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    move = ((1, 0), (4, 0))
+    tracker = MagicMock()
+    tracker.observe.return_value = ReferenceTrackerUpdate(
+        "illegal-relocation",
+        move,
+        "Illegal relocation a7-a4.",
+    )
+    tracker.rejected_move_is_restored.return_value = False
+    position = LegalGame().position
+    window = SimpleNamespace(
+        _latest_frame=object(),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(camera_grid=object())
+        ),
+        _pending_lichess_local_move=None,
+        _lichess_game_controller=None,
+        _piece_synchronizer=SimpleNamespace(position=position),
+        _legal_game=LegalGame(),
+        _game_mode="offline-game",
+        _offline_turn_inference_pending=True,
+        _pending_offline_games=None,
+        _reference_move_tracker=tracker,
+        _board_quarter_turns=0,
+        _occupancy_status=MagicMock(),
+        _last_runtime_tracker_state="watching",
+        _record_runtime_diagnostic=MagicMock(),
+        _restore_pending_lichess_guidance_after_no_change=MagicMock(),
+        _restore_offline_accepted_projection_after_no_change=MagicMock(),
+        _last_rejected_move=None,
+        _board_widget=MagicMock(),
+        _piece_status=MagicMock(),
+        _project_illegal_move_correction=MagicMock(),
+    )
+
+    CameraWindow._update_reference_move_tracking(window)
+
+    assert window._offline_turn_inference_pending is True
+    assert "Black to move" in window._piece_status.setText.call_args.args[0]
+    window._project_illegal_move_correction.assert_called_once_with(move)
 
 
 def test_accepted_position_message_includes_authoritative_turn() -> None:

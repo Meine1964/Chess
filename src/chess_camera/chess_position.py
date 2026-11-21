@@ -80,6 +80,81 @@ def square_name(square: Square) -> str:
     return f"{chr(ord('a') + column)}{8 - row}"
 
 
+def position_fen_with_inferred_rights(
+    position: Mapping[Square, PieceCode],
+    *,
+    turn: Literal["white", "black"] = "white",
+) -> str:
+    ranks: list[str] = []
+    for row in range(8):
+        rank: list[str] = []
+        empty_count = 0
+        for column in range(8):
+            piece = position.get((row, column))
+            if piece is None:
+                empty_count += 1
+                continue
+            if piece not in "KQRBNPkqrbnp":
+                raise ValueError(f"Unknown piece code: {piece}")
+            if empty_count:
+                rank.append(str(empty_count))
+                empty_count = 0
+            rank.append(piece)
+        if empty_count:
+            rank.append(str(empty_count))
+        ranks.append("".join(rank))
+    for row, column in position:
+        if not 0 <= row < 8 or not 0 <= column < 8:
+            raise ValueError("Piece squares must be inside the 8x8 board.")
+    castling = "".join(
+        right
+        for right, king_square, king, rook_square, rook in (
+            ("K", (7, 4), "K", (7, 7), "R"),
+            ("Q", (7, 4), "K", (7, 0), "R"),
+            ("k", (0, 4), "k", (0, 7), "r"),
+            ("q", (0, 4), "k", (0, 0), "r"),
+        )
+        if position.get(king_square) == king
+        and position.get(rook_square) == rook
+    )
+    en_passant_candidates: set[Square] = set()
+    if turn == "white":
+        pawn_row = 3
+        origin_row = 1
+        target_row = 2
+        moved_pawn = "p"
+        capturing_pawn = "P"
+    else:
+        pawn_row = 4
+        origin_row = 6
+        target_row = 5
+        moved_pawn = "P"
+        capturing_pawn = "p"
+    for column in range(8):
+        if (
+            position.get((pawn_row, column)) != moved_pawn
+            or position.get((origin_row, column)) is not None
+            or position.get((target_row, column)) is not None
+        ):
+            continue
+        if any(
+            position.get((pawn_row, adjacent)) == capturing_pawn
+            for adjacent in (column - 1, column + 1)
+            if 0 <= adjacent < 8
+        ):
+            en_passant_candidates.add((target_row, column))
+    en_passant = (
+        square_name(next(iter(en_passant_candidates)))
+        if len(en_passant_candidates) == 1
+        else "-"
+    )
+    active_color = "w" if turn == "white" else "b"
+    return (
+        f"{'/'.join(ranks)} {active_color} "
+        f"{castling or '-'} {en_passant} 0 1"
+    )
+
+
 class PiecePositionSynchronizer:
     def __init__(self) -> None:
         self._position: Position | None = None

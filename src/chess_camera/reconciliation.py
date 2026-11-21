@@ -47,6 +47,14 @@ def compare_physical_occupancy(
     physically_occupied: frozenset[Square],
     observed_colors: Mapping[Square, PieceColorLabel] | None = None,
 ) -> ReconciliationResult:
+    effective_occupied = set(physically_occupied)
+    if observed_colors is not None:
+        for square, label in observed_colors.items():
+            if label in ("white", "black"):
+                effective_occupied.add(square)
+            elif label == "empty":
+                effective_occupied.discard(square)
+    physically_occupied = frozenset(effective_occupied)
     expected = frozenset(position)
     missing = tuple(sorted(expected - physically_occupied))
     unexpected = tuple(sorted(physically_occupied - expected))

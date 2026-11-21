@@ -179,6 +179,19 @@ def test_projector_renders_patterns_and_calibrated_squares(
     assert move_image.pixelColor(145, 64).red() == 0
     assert move_image.pixelColor(295, 169).red() == 0
 
+    window.show_move(
+        (2, 2),
+        (4, 5),
+        source_is_light=True,
+        destination_is_light=False,
+        include_turn_indicator=True,
+    )
+    application.processEvents()
+    offline_move_image = window.grab().toImage()
+    assert offline_move_image.pixelColor(115, 64) == PROJECTED_LEGAL_MOVE
+    assert offline_move_image.pixelColor(205, 99) == PROJECTED_LEGAL_MOVE
+    assert offline_move_image.pixelColor(295, 169).red() > 150
+
     window.show_black()
     application.processEvents()
     restored_turn_image = window.grab().toImage()

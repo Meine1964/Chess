@@ -1,8 +1,9 @@
 from collections.abc import Collection, Mapping
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import (
+    QAction,
     QColor,
     QMouseEvent,
     QPaintEvent,
@@ -59,6 +60,8 @@ def square_at_position(
 
 class ChessboardWidget(QWidget):
     square_clicked = Signal(int, int)
+    copy_fen_requested = Signal()
+    copy_board_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -81,6 +84,20 @@ class ChessboardWidget(QWidget):
         self.setToolTip(
             "Run or load projector calibration, then click a square to "
             "illuminate the matching physical square."
+        )
+        self._copy_fen_action = QAction("Copy FEN", self)
+        self._copy_fen_action.triggered.connect(
+            self.copy_fen_requested.emit
+        )
+        self._copy_board_action = QAction("Copy Board", self)
+        self._copy_board_action.triggered.connect(
+            self.copy_board_requested.emit
+        )
+        self.addActions(
+            (self._copy_fen_action, self._copy_board_action)
+        )
+        self.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.ActionsContextMenu
         )
 
     @property
@@ -212,6 +229,18 @@ class ChessboardWidget(QWidget):
     @property
     def pieces(self) -> Position:
         return self._pieces.copy()
+
+    def rendered_board_pixmap(self) -> QPixmap:
+        pixmap = self.grab()
+        board_size = min(pixmap.width(), pixmap.height())
+        return pixmap.copy(
+            QRect(
+                (pixmap.width() - board_size) // 2,
+                (pixmap.height() - board_size) // 2,
+                board_size,
+                board_size,
+            )
+        )
 
     def set_pieces(
         self,

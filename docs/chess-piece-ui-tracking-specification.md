@@ -177,6 +177,23 @@ partially loaded.
 
 ## 5. UI Rendering
 
+Both the Physical position and Lichess position boards shall expose an
+extensible right-click context menu with:
+
+- **Copy FEN**: copy the complete current FEN to the system clipboard. The
+  Physical board shall serialize its displayed pieces with White as the
+  default side to move, castling rights for every king and corresponding rook
+  still on their home squares, one en-passant target when the placement makes
+  exactly one target physically plausible for that side, and default move
+  counters (`0 1`). The Lichess board shall use the authoritative server FEN
+  when connected and otherwise infer the same metadata from its displayed
+  pieces.
+- **Copy Board**: copy the square rendered board, including its current pieces
+  and visible overlays but excluding layout margins, as an image.
+
+The menu shall remain available on the display-only Lichess board; enabling
+the context menu shall not make its squares selectable.
+
 ### 5.1 Rendering order
 
 For each square, the widget shall draw:
@@ -195,17 +212,20 @@ reset to the standard starting position shall clear the highlight.
 
 In Offline legal mode, the projector shall illuminate the accepted source and
 destination without a fixed timeout. The illumination shall remain steady
-while the board is unobstructed and shall be removed as soon as the next
-player's hand enters the board or its one-square halo. The projector shall
-then return immediately to idle-dark output with the next-turn dot and observe
-the new move. The player shall not have to wait for accepted-move illumination
-to expire. If the hand leaves without changing any piece, black-frame
-comparison shall confirm on two consecutive observations that the board still
-matches the accepted reference before the same accepted-move illumination
-reappears. The restored projection shall be allowed to settle before its hand
-detector is armed so the projected squares cannot trigger a repeated
-blackout/reprojection cycle. Red illegal-move correction projection remains
-unchanged.
+while the board is unobstructed and shall include the next-turn dot as soon as
+the authoritative turn is known. The dot lies outside the camera-evidence
+board and therefore shall coexist with this accepted-move illumination. The
+illumination shall be removed as soon as the next player's hand enters the
+board or its one-square halo. The projector shall then return immediately to
+idle-dark output with the same next-turn dot and observe the new move. The
+player shall not have to wait for accepted-move illumination to expire. If the
+hand leaves without changing any piece, black-frame comparison shall confirm
+on two consecutive observations that the board still matches the accepted
+reference before the same accepted-move illumination reappears. The restored
+projection shall be allowed to settle before its hand detector is armed so the
+projected squares cannot trigger a repeated blackout/reprojection cycle. Red
+illegal-move correction projection and every other actionable projector mode
+shall continue to suppress the turn dot.
 
 If that next manipulation produces a clear relocation which does not match
 any legal physical move signature, including a move by the wrong side, the
@@ -427,6 +447,11 @@ legal mode, persist that state, and be ready for White's first move. If the
 verified occupancy is not the standard starting position, the application
 shall show a modal recovery choice:
 
+Successful explicit or automatic reset shall replace the board widget's
+logical pieces and camera-occupancy overlay atomically with the verified
+standard squares. Occupancy-only dots from the preceding physical position
+shall not remain visible after reset.
+
 When automatic starting-position reset is enabled, the same stable occupancy
 check shall run passively while the projector is black and no Lichess game is
 active, including in Board setup / diagnostic mode. Physically arranging the
@@ -444,8 +469,24 @@ completion within one second after the board becomes clear.
 - **Reset to starting position** verifies the standard physical setup, resets
   the legal game and accepted physical/reference state together, activates
   Offline legal mode, and persists the resulting state.
-- **Remain in board setup** explicitly activates and persists Board setup /
-  diagnostic mode without altering the saved physical position.
+- **Start Offline game from current position** makes the accepted physical
+  position the Offline legal position without rearranging the board. The side
+  to move remains undetermined until the first accepted move. During that
+  pending state, the application shall recognize legal moves for either side,
+  hide both turn indicators, and retain the pending state across restart.
+  The first accepted move selects its source piece's color as the side to move
+  and advances the resulting legal game. An illegal first move shall be
+  rejected with ordinary red correction guidance and shall leave the turn
+  undetermined. The standard starting position is the exception: it starts
+  immediately with White to move.
+
+For an Offline game started from the current position, the provisional legal
+position shall grant castling rights for each king and corresponding rook
+occupying their home squares. For each candidate side to move, it shall retain
+an en-passant target only when the placement identifies exactly one physically
+plausible preceding two-square pawn move that can now be captured; ambiguous
+or absent candidates shall use no target. Once the first move is accepted,
+ordinary authoritative move history controls both rights.
 
 Cancelling this choice shall preserve both the current active mode and all
 persisted mode, FEN, physical-position, and reference data.
@@ -457,6 +498,8 @@ rules selector:
 - Black fill with a dark border means Black to move.
 - Gray means the authoritative legal game is complete.
 - The indicator is hidden in Board setup / diagnostic mode.
+- The indicator is also hidden while an Offline game is waiting for its first
+  move to determine the side to move.
 
 The indicator is driven only by the authoritative legal position. Camera,
 alignment, occupancy, and correction messages shall not change it. Its tooltip
@@ -470,8 +513,8 @@ Black. Calibrated board orientation shall rotate the logical corners to the
 physical board. The dot shall remain outside the 8x8 camera-evidence area,
 yield to every actionable projector mode, and return only with idle board-black
 output. In that idle state the dot shall be steady and remain visible through
-camera observation while the playing grid stays dark. Board setup / diagnostic
-mode and completed games shall project no turn dot.
+camera observation while the playing grid stays dark. Board setup / diagnostic mode, completed games, and an Offline game waiting
+for first-move turn inference shall project no turn dot.
 
 ## 14. Recovery and Reset
 

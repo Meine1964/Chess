@@ -273,8 +273,10 @@ interaction rows.
     correction guidance until the physical board matches it.
   - **Reset to starting position:** verify the standard physical setup, reset
     both logical and physical game state, and then activate Offline legal game.
-  - **Remain in board setup:** activate Board setup / diagnostic and persist
-    that explicit choice.
+  - **Start Offline game from current position:** retain the accepted physical
+    position, infer home-square castling rights and any unique physically
+    plausible en-passant target, and activate Offline play without choosing a
+    side to move until the first accepted move identifies it.
 - Closing or cancelling the mismatch dialog shall make no mode or persisted
   state change. Merely detecting a mismatch shall never rewrite the persisted
   mode.
