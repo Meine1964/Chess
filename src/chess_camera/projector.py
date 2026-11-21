@@ -53,6 +53,7 @@ PROJECTED_ON_LIGHT_SQUARE = QColor("#007fff")
 PROJECTED_ON_DARK_SQUARE = QColor("#00ffff")
 PROJECTED_LEGAL_MOVE = QColor("#ffffff")
 PROJECTED_ILLEGAL_MOVE = QColor("#ff0000")
+_MAX_EDGE_STROKE_COMPENSATION = 1.5
 PROMOTION_GLYPHS: dict[PromotionPiece, str] = {
     "n": "♞",
     "b": "♝",
@@ -546,34 +547,48 @@ class ProjectorWindow(QWidget):
             and self._white_clock_text is not None
             and self._black_clock_text is not None
         ):
+            white_clock_polygon = self._edge_clock_polygon(
+                self._projector_grid,
+                6,
+                8,
+                board_quarter_turns=self._clock_board_quarter_turns,
+            )
+            black_clock_polygon = self._edge_clock_polygon(
+                self._projector_grid,
+                0,
+                2,
+                board_quarter_turns=self._clock_board_quarter_turns,
+            )
+            result_polygon = (
+                self._edge_result_polygon(
+                    self._projector_grid,
+                    board_quarter_turns=self._clock_board_quarter_turns,
+                )
+                if self._result_text is not None
+                else None
+            )
+            edge_polygons = [white_clock_polygon, black_clock_polygon]
+            if result_polygon is not None:
+                edge_polygons.append(result_polygon)
+            stroke_scales = self._edge_stroke_compensation(edge_polygons)
             self._draw_edge_clock(
                 painter,
-                self._edge_clock_polygon(
-                    self._projector_grid,
-                    6,
-                    8,
-                    board_quarter_turns=self._clock_board_quarter_turns,
-                ),
+                white_clock_polygon,
                 self._white_clock_text,
+                stroke_scale=stroke_scales[0],
             )
             self._draw_edge_clock(
                 painter,
-                self._edge_clock_polygon(
-                    self._projector_grid,
-                    0,
-                    2,
-                    board_quarter_turns=self._clock_board_quarter_turns,
-                ),
+                black_clock_polygon,
                 self._black_clock_text,
+                stroke_scale=stroke_scales[1],
             )
-            if self._result_text is not None:
+            if self._result_text is not None and result_polygon is not None:
                 self._draw_edge_result(
                     painter,
-                    self._edge_result_polygon(
-                        self._projector_grid,
-                        board_quarter_turns=self._clock_board_quarter_turns,
-                    ),
+                    result_polygon,
                     self._result_text,
+                    stroke_scale=stroke_scales[2],
                 )
                 if self._expired_player is not None:
                     start_row, end_row = (
@@ -717,6 +732,8 @@ class ProjectorWindow(QWidget):
         painter: QPainter,
         polygon: NDArray[np.float32],
         text: str,
+        *,
+        stroke_scale: tuple[float, float] = (1.0, 1.0),
     ) -> None:
         canonical_width = 256.0
         canonical_height = 128.0
@@ -740,8 +757,8 @@ class ProjectorWindow(QWidget):
                 for center_y in (canonical_height * 0.38, canonical_height * 0.68):
                     painter.drawEllipse(
                         QPointF(center_x, center_y),
-                        radius,
-                        radius,
+                        radius * stroke_scale[0],
+                        radius * stroke_scale[1],
                     )
                 continue
             ProjectorWindow._draw_seven_segment_digit(
@@ -753,6 +770,7 @@ class ProjectorWindow(QWidget):
                     canonical_height * 0.84,
                 ),
                 character,
+                thickness_scale=stroke_scale,
             )
         painter.restore()
 
@@ -761,9 +779,16 @@ class ProjectorWindow(QWidget):
         painter: QPainter,
         polygon: NDArray[np.float32],
         result: ProjectedResult,
+        *,
+        stroke_scale: tuple[float, float] = (1.0, 1.0),
     ) -> None:
         if result != "1/2-1/2":
-            ProjectorWindow._draw_edge_clock(painter, polygon, result)
+            ProjectorWindow._draw_edge_clock(
+                painter,
+                polygon,
+                result,
+                stroke_scale=stroke_scale,
+            )
             return
         canonical_width = 256.0
         canonical_height = 128.0
@@ -792,13 +817,15 @@ class ProjectorWindow(QWidget):
                 QRectF(numerator_left, 8.0, numerator_width, 45.0),
                 "1",
                 thickness=7.0,
+                thickness_scale=stroke_scale,
             )
+            fraction_bar_height = 6.0 * stroke_scale[1]
             painter.drawRect(
                 QRectF(
                     left + cell_width * 0.16,
-                    61.0,
+                    64.0 - fraction_bar_height / 2,
                     cell_width * 0.68,
-                    6.0,
+                    fraction_bar_height,
                 )
             )
             ProjectorWindow._draw_seven_segment_digit(
@@ -806,6 +833,7 @@ class ProjectorWindow(QWidget):
                 QRectF(digit_left, 75.0, digit_width, 45.0),
                 "2",
                 thickness=7.0,
+                thickness_scale=stroke_scale,
             )
         dash_left = margin + cell_width
         ProjectorWindow._draw_seven_segment_digit(
@@ -817,8 +845,49 @@ class ProjectorWindow(QWidget):
                 canonical_height * 0.84,
             ),
             "-",
+            thickness_scale=stroke_scale,
         )
         painter.restore()
+
+    @staticmethod
+    def _edge_stroke_compensation(
+        polygons: list[NDArray[np.float32]],
+        *,
+        canonical_width: float = 256.0,
+        canonical_height: float = 128.0,
+    ) -> list[tuple[float, float]]:
+        if not polygons:
+            raise ValueError("At least one edge polygon is required.")
+        densities: list[tuple[float, float]] = []
+        for polygon in polygons:
+            if polygon.shape != (4, 2):
+                raise ValueError("Each edge polygon must have shape (4, 2).")
+            horizontal_density = (
+                float(np.linalg.norm(polygon[1] - polygon[0]))
+                + float(np.linalg.norm(polygon[2] - polygon[3]))
+            ) / (2.0 * canonical_width)
+            vertical_density = (
+                float(np.linalg.norm(polygon[3] - polygon[0]))
+                + float(np.linalg.norm(polygon[2] - polygon[1]))
+            ) / (2.0 * canonical_height)
+            if horizontal_density <= 0.0 or vertical_density <= 0.0:
+                raise ValueError("Edge polygons must have positive area.")
+            densities.append((horizontal_density, vertical_density))
+        reference_horizontal = max(density[0] for density in densities)
+        reference_vertical = max(density[1] for density in densities)
+        return [
+            (
+                min(
+                    reference_horizontal / horizontal_density,
+                    _MAX_EDGE_STROKE_COMPENSATION,
+                ),
+                min(
+                    reference_vertical / vertical_density,
+                    _MAX_EDGE_STROKE_COMPENSATION,
+                ),
+            )
+            for horizontal_density, vertical_density in densities
+        ]
 
     @staticmethod
     def _draw_expiration_flag(
@@ -893,63 +962,67 @@ class ProjectorWindow(QWidget):
         digit: str,
         *,
         thickness: float | None = None,
+        thickness_scale: tuple[float, float] = (1.0, 1.0),
     ) -> None:
         segments = _SEVEN_SEGMENT_DIGITS[digit]
         width = bounds.width()
         height = bounds.height()
         if thickness is None:
             thickness = min(width * 0.22, height * 0.09)
-        horizontal_width = width - thickness * 2
-        vertical_height = height / 2 - thickness * 1.5
+        vertical_thickness = thickness * thickness_scale[0]
+        horizontal_thickness = thickness * thickness_scale[1]
+        horizontal_width = width - vertical_thickness * 2
+        vertical_height = height / 2 - horizontal_thickness * 1.5
         rectangles = {
             "a": QRectF(
-                bounds.left() + thickness,
+                bounds.left() + vertical_thickness,
                 bounds.top(),
                 horizontal_width,
-                thickness,
+                horizontal_thickness,
             ),
             "b": QRectF(
-                bounds.right() - thickness,
-                bounds.top() + thickness,
-                thickness,
+                bounds.right() - vertical_thickness,
+                bounds.top() + horizontal_thickness,
+                vertical_thickness,
                 vertical_height,
             ),
             "c": QRectF(
-                bounds.right() - thickness,
-                bounds.center().y() + thickness / 2,
-                thickness,
+                bounds.right() - vertical_thickness,
+                bounds.center().y() + horizontal_thickness / 2,
+                vertical_thickness,
                 vertical_height,
             ),
             "d": QRectF(
-                bounds.left() + thickness,
-                bounds.bottom() - thickness,
+                bounds.left() + vertical_thickness,
+                bounds.bottom() - horizontal_thickness,
                 horizontal_width,
-                thickness,
+                horizontal_thickness,
             ),
             "e": QRectF(
                 bounds.left(),
-                bounds.center().y() + thickness / 2,
-                thickness,
+                bounds.center().y() + horizontal_thickness / 2,
+                vertical_thickness,
                 vertical_height,
             ),
             "f": QRectF(
                 bounds.left(),
-                bounds.top() + thickness,
-                thickness,
+                bounds.top() + horizontal_thickness,
+                vertical_thickness,
                 vertical_height,
             ),
             "g": QRectF(
-                bounds.left() + thickness,
-                bounds.center().y() - thickness / 2,
+                bounds.left() + vertical_thickness,
+                bounds.center().y() - horizontal_thickness / 2,
                 horizontal_width,
-                thickness,
+                horizontal_thickness,
             ),
         }
+        corner_radius = min(vertical_thickness, horizontal_thickness) * 0.35
         for segment in segments:
             painter.drawRoundedRect(
                 rectangles[segment],
-                thickness * 0.35,
-                thickness * 0.35,
+                corner_radius,
+                corner_radius,
             )
 
     @staticmethod

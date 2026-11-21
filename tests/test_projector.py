@@ -3,6 +3,7 @@ import os
 import numpy as np
 import pytest
 from PySide6.QtCore import QPointF, Qt
+from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import QApplication
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -199,6 +200,64 @@ def test_edge_clock_content_transform_precedes_perspective_warp() -> None:
     assert center.y() == pytest.approx(150.0)
     assert original_top.x() == pytest.approx(58.75)
     assert original_top.y() == pytest.approx(150.0)
+
+
+def test_edge_clock_compensates_lower_projector_pixel_density() -> None:
+    dense_polygon = np.asarray(
+        ((10, 10), (266, 10), (266, 138), (10, 138)),
+        dtype=np.float32,
+    )
+    sparse_polygon = np.asarray(
+        ((320, 20), (512, 20), (512, 116), (320, 116)),
+        dtype=np.float32,
+    )
+
+    dense_scale, sparse_scale = ProjectorWindow._edge_stroke_compensation(
+        [dense_polygon, sparse_polygon]
+    )
+
+    assert dense_scale == pytest.approx((1.0, 1.0))
+    assert sparse_scale == pytest.approx((4 / 3, 4 / 3))
+    capped_scale = ProjectorWindow._edge_stroke_compensation(
+        [
+            dense_polygon,
+            np.asarray(
+                ((320, 20), (448, 20), (448, 84), (320, 84)),
+                dtype=np.float32,
+            ),
+        ]
+    )[1]
+    assert capped_scale == pytest.approx((1.5, 1.5))
+
+    image = QImage(540, 160, QImage.Format.Format_ARGB32)
+    image.fill(Qt.GlobalColor.black)
+    painter = QPainter(image)
+    ProjectorWindow._draw_edge_clock(
+        painter,
+        dense_polygon,
+        "1",
+        stroke_scale=dense_scale,
+    )
+    ProjectorWindow._draw_edge_clock(
+        painter,
+        sparse_polygon,
+        "1",
+        stroke_scale=sparse_scale,
+    )
+    painter.end()
+
+    dense_columns = {
+        x
+        for x in range(10, 267)
+        if any(image.pixelColor(x, y).red() > 150 for y in range(10, 139))
+    }
+    sparse_columns = {
+        x
+        for x in range(320, 513)
+        if any(image.pixelColor(x, y).red() > 150 for y in range(20, 117))
+    }
+
+    assert abs(len(dense_columns) - len(sparse_columns)) <= 1
 
 
 def test_projector_renders_seven_segment_clocks_outside_board(
