@@ -620,6 +620,15 @@ or advanced after an accepted move, and whenever the supplied logical
 position differs. Cached classification shall produce the same labels,
 distances, and margins as classification from a freshly built model.
 
+Before complete legal-signature residual analysis, the tracker shall apply a
+conservative change-score prefilter. A signature may be excluded from that
+expensive path only when its source or destination lacks even the lowest
+change evidence that the complete matcher could accept. Partial capture,
+castling, en-passant, promotion, removal, and illegal-relocation analysis
+shall continue to receive the full authoritative signature set. Prefiltering
+shall therefore change processing cost, never the accepted or rejected
+result.
+
 ## 20. Tests
 
 ### 20.1 Initialization

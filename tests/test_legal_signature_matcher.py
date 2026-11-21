@@ -8,6 +8,7 @@ from src.chess_camera.legal_signature_matcher import (
     match_pending_castling_relocation,
     match_pending_capture,
     match_pending_en_passant,
+    prefilter_complete_signatures,
 )
 from src.chess_camera.piece_color_classifier import PieceColorClassification
 
@@ -30,6 +31,41 @@ def test_matches_unique_ordinary_legal_signature() -> None:
     assert match.signature is not None
     assert match.signature.uci == "e2e4"
     assert match.signature.kind == "ordinary"
+
+
+def test_complete_signature_prefilter_keeps_only_plausible_moves() -> None:
+    game = LegalGame()
+
+    candidates = prefilter_complete_signatures(
+        _scores(
+            ((6, 4), 0.07),
+            ((4, 4), 0.07),
+        ),
+        game.physical_move_signatures,
+    )
+
+    assert tuple(signature.uci for signature in candidates) == ("e2e4",)
+
+
+def test_complete_signature_prefilter_preserves_partial_action_set() -> None:
+    game = LegalGame("4k3/8/8/8/1n6/P7/8/4K3 w - - 0 1")
+    signatures = game.physical_move_signatures
+
+    candidates = prefilter_complete_signatures(
+        _scores(((4, 1), 0.2)),
+        signatures,
+    )
+
+    assert candidates == ()
+    pending = match_pending_capture(
+        _scores(((4, 1), 0.2)),
+        signatures,
+        {
+            (5, 0): PieceColorClassification("white", 0.01, 0.2),
+            (4, 1): PieceColorClassification("empty", 0.01, 0.2),
+        },
+    )
+    assert pending.destination == (4, 1)
 
 
 def test_matches_legal_move_with_weaker_vacated_source_evidence() -> None:

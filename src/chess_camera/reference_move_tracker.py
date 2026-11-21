@@ -14,6 +14,7 @@ from .legal_signature_matcher import (
     match_pending_castling_relocation,
     match_pending_capture,
     match_pending_en_passant,
+    prefilter_complete_signatures,
 )
 from .piece_color_classifier import (
     PieceColorClassification,
@@ -256,6 +257,11 @@ class ReferenceMoveTracker:
                 normalized,
                 position,
             )
+            complete_signatures = prefilter_complete_signatures(
+                scores,
+                physical_signatures,
+                minimum_square_change=self._minimum_square_change,
+            )
             explained_residuals = {
                 signature.uci: tuple(
                     square
@@ -282,11 +288,11 @@ class ReferenceMoveTracker:
                         piece_colors,
                     )
                 )
-                for signature in physical_signatures
+                for signature in complete_signatures
             }
             legal_match = match_legal_move_signature(
                 scores,
-                physical_signatures,
+                complete_signatures,
                 explained_residuals=explained_residuals,
                 piece_colors=piece_colors,
                 minimum_square_change=self._minimum_square_change,

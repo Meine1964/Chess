@@ -52,6 +52,26 @@ class PendingEnPassantMatch:
     message: str
 
 
+def prefilter_complete_signatures(
+    change_scores: FloatArray,
+    signatures: Sequence[LegalMoveSignature],
+    *,
+    minimum_square_change: float = 0.08,
+) -> tuple[LegalMoveSignature, ...]:
+    scores = np.asarray(change_scores, dtype=np.float32)
+    if scores.shape != (8, 8):
+        raise ValueError("Change scores must describe an 8x8 board.")
+    if minimum_square_change <= 0:
+        raise ValueError("The movement threshold must be positive.")
+    relaxed_threshold = minimum_square_change * LEGAL_SOURCE_CHANGE_RATIO
+    return tuple(
+        signature
+        for signature in signatures
+        if float(scores[signature.source]) >= relaxed_threshold
+        and float(scores[signature.destination]) >= relaxed_threshold
+    )
+
+
 def match_legal_move_signature(
     change_scores: FloatArray,
     signatures: Sequence[LegalMoveSignature],
