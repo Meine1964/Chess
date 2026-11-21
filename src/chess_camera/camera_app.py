@@ -181,6 +181,10 @@ class _PendingPromotionSelection:
 _LICHESS_AI_LEVEL_SETTING = "lichess/ai_level"
 _LICHESS_AI_COLOR_SETTING = "lichess/ai_color"
 _LICHESS_AI_CLOCK_SETTING = "lichess/ai_clock"
+_LICHESS_AI_CLOCK_ENABLED_SETTING = "lichess/ai_clock_enabled"
+_LICHESS_AI_CLOCK_MINUTES_SETTING = "lichess/ai_clock_minutes"
+_LICHESS_AI_CLOCK_LIMIT_SETTING = "lichess/ai_clock_limit_seconds"
+_LICHESS_AI_CLOCK_INCREMENT_SETTING = "lichess/ai_clock_increment_seconds"
 _PIECE_POSITION_SETTING = "pieces/accepted_position"
 _GAME_MODE_SETTING = "game/mode"
 _LEGAL_GAME_FEN_SETTING = "game/offline_fen"
@@ -203,6 +207,56 @@ _INTEGRATED_CAMERA_TERMS = (
     "integrated",
     "internal",
     "user facing",
+)
+_LICHESS_CLOCK_LIMITS_SECONDS = (
+    0,
+    15,
+    30,
+    45,
+    60,
+    90,
+    120,
+    180,
+    240,
+    300,
+    360,
+    420,
+    480,
+    540,
+    600,
+    660,
+    720,
+    780,
+    840,
+    900,
+    960,
+    1020,
+    1080,
+    1140,
+    1200,
+    1500,
+    1800,
+    2100,
+    2400,
+    2700,
+    3600,
+    4500,
+    5400,
+    6300,
+    7200,
+    8100,
+    9000,
+    9900,
+    10800,
+)
+_LICHESS_CLOCK_INCREMENTS_SECONDS = (
+    *range(0, 21),
+    25,
+    30,
+    35,
+    40,
+    45,
+    60,
 )
 
 
@@ -716,6 +770,79 @@ def _stored_integer(value: object, default: int) -> int:
     return default
 
 
+def _stored_lichess_ai_clock(
+    settings: QSettings,
+) -> tuple[bool, int, int]:
+    legacy_clock = str(
+        settings.value(_LICHESS_AI_CLOCK_SETTING, "10+5")
+    )
+    legacy_defaults = {
+        "unlimited": (False, 600, 5),
+        "10+0": (True, 600, 0),
+        "10+5": (True, 600, 5),
+        "15+10": (True, 900, 10),
+    }.get(legacy_clock, (True, 600, 5))
+    enabled = _stored_boolean(
+        settings.value(
+            _LICHESS_AI_CLOCK_ENABLED_SETTING, legacy_defaults[0]
+        ),
+        legacy_defaults[0],
+    )
+    stored_minutes = _stored_integer(
+        settings.value(_LICHESS_AI_CLOCK_MINUTES_SETTING, -1),
+        -1,
+    )
+    migrated_limit = (
+        stored_minutes * 60
+        if stored_minutes * 60 in _LICHESS_CLOCK_LIMITS_SECONDS
+        else legacy_defaults[1]
+    )
+    limit = _stored_integer(
+        settings.value(_LICHESS_AI_CLOCK_LIMIT_SETTING, migrated_limit),
+        migrated_limit,
+    )
+    if limit not in _LICHESS_CLOCK_LIMITS_SECONDS:
+        limit = legacy_defaults[1]
+    increment = _stored_integer(
+        settings.value(
+            _LICHESS_AI_CLOCK_INCREMENT_SETTING,
+            legacy_defaults[2],
+        ),
+        legacy_defaults[2],
+    )
+    if increment not in _LICHESS_CLOCK_INCREMENTS_SECONDS:
+        increment = legacy_defaults[2]
+    return enabled, limit, increment
+
+
+def _lichess_clock_limit_label(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds} seconds"
+    minutes = seconds / 60
+    displayed = (
+        str(int(minutes))
+        if minutes.is_integer()
+        else f"{minutes:g}"
+    )
+    return f"{displayed} minutes"
+
+
+def _populate_lichess_increment_choices(
+    limit: QComboBox,
+    increment: QComboBox,
+    selected_increment: int,
+) -> None:
+    increment.blockSignals(True)
+    increment.clear()
+    for seconds in _LICHESS_CLOCK_INCREMENTS_SECONDS:
+        if limit.currentData() == 0 and seconds == 0:
+            continue
+        increment.addItem(f"{seconds} seconds", seconds)
+    selected_index = increment.findData(selected_increment)
+    increment.setCurrentIndex(max(0, selected_index))
+    increment.blockSignals(False)
+
+
 def _persistent_choice_options(
     available: Sequence[tuple[str, str]],
     remembered_id: str,
@@ -927,22 +1054,14 @@ class LichessGameSelectionDialog(QDialog):
 
 
 class LichessAiGameDialog(QDialog):
-    _CLOCKS: tuple[
-        tuple[str, str, int | None, int | None],
-        ...,
-    ] = (
-        ("Unlimited", "unlimited", None, None),
-        ("10 minutes + 0 seconds", "10+0", 600, 0),
-        ("10 minutes + 5 seconds", "10+5", 600, 5),
-        ("15 minutes + 10 seconds", "15+10", 900, 10),
-    )
-
     def __init__(
         self,
         *,
         level: int = 4,
         color: AiChallengeColor = "white",
-        clock_key: str = "10+5",
+        clock_enabled: bool = True,
+        clock_limit_seconds: int = 600,
+        clock_increment_seconds: int = 5,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -959,23 +1078,44 @@ class LichessAiGameDialog(QDialog):
             self._color.addItem(label, value)
         color_index = self._color.findData(color)
         self._color.setCurrentIndex(max(0, color_index))
-        self._clock = QComboBox()
-        for label, key, limit, increment in self._CLOCKS:
-            self._clock.addItem(label, (key, limit, increment))
-        clock_index = next(
-            (
-                index
-                for index, (_label, key, _limit, _increment)
-                in enumerate(self._CLOCKS)
-                if key == clock_key
-            ),
-            2,
+        self._clock_enabled = QCheckBox("Use a clock")
+        self._clock_enabled.setChecked(clock_enabled)
+        self._clock_limit = QComboBox()
+        self._clock_limit.setObjectName("lichessClockLimit")
+        for seconds in _LICHESS_CLOCK_LIMITS_SECONDS:
+            self._clock_limit.addItem(
+                _lichess_clock_limit_label(seconds), seconds
+            )
+        limit_index = self._clock_limit.findData(clock_limit_seconds)
+        self._clock_limit.setCurrentIndex(max(0, limit_index))
+        self._clock_increment = QComboBox()
+        self._clock_increment.setObjectName("lichessClockIncrement")
+        _populate_lichess_increment_choices(
+            self._clock_limit,
+            self._clock_increment,
+            clock_increment_seconds
         )
-        self._clock.setCurrentIndex(clock_index)
+        self._clock_limit.currentIndexChanged.connect(
+            lambda _index: _populate_lichess_increment_choices(
+                self._clock_limit,
+                self._clock_increment,
+                cast(int, self._clock_increment.currentData()),
+            )
+        )
+        self._clock_enabled.toggled.connect(
+            self._clock_limit.setEnabled
+        )
+        self._clock_enabled.toggled.connect(
+            self._clock_increment.setEnabled
+        )
+        self._clock_limit.setEnabled(clock_enabled)
+        self._clock_increment.setEnabled(clock_enabled)
         form = QFormLayout()
         form.addRow("AI level:", self._level)
         form.addRow("Your color:", self._color)
-        form.addRow("Clock:", self._clock)
+        form.addRow(self._clock_enabled)
+        form.addRow("Initial time:", self._clock_limit)
+        form.addRow("Increment:", self._clock_increment)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
             | QDialogButtonBox.StandardButton.Cancel
@@ -990,13 +1130,16 @@ class LichessAiGameDialog(QDialog):
     @property
     def configuration(
         self,
-    ) -> tuple[int, AiChallengeColor, str, int | None, int | None]:
+    ) -> tuple[int, AiChallengeColor, int | None, int | None]:
         color = cast(AiChallengeColor, self._color.currentData())
-        clock_key, limit, increment = cast(
-            tuple[str, int | None, int | None],
-            self._clock.currentData(),
+        if not self._clock_enabled.isChecked():
+            return self._level.value(), color, None, None
+        return (
+            self._level.value(),
+            color,
+            cast(int, self._clock_limit.currentData()),
+            cast(int, self._clock_increment.currentData()),
         )
-        return self._level.value(), color, clock_key, limit, increment
 
 
 class CameraWindow(QMainWindow):
@@ -2094,19 +2237,45 @@ class CameraWindow(QMainWindow):
         )
         ai_color_index = ai_color.findData(stored_ai_color)
         ai_color.setCurrentIndex(max(0, ai_color_index))
-        ai_clock = QComboBox()
-        for label, key, _limit, _increment in LichessAiGameDialog._CLOCKS:
-            ai_clock.addItem(label, key)
-        stored_ai_clock = str(
-            self._settings.value(_LICHESS_AI_CLOCK_SETTING, "10+5")
+        (
+            stored_ai_clock_enabled,
+            stored_ai_clock_limit,
+            stored_ai_clock_increment,
+        ) = _stored_lichess_ai_clock(self._settings)
+        ai_clock_enabled = QCheckBox("Use a clock")
+        ai_clock_enabled.setChecked(stored_ai_clock_enabled)
+        ai_clock_limit = QComboBox()
+        ai_clock_limit.setObjectName("lichessDefaultClockLimit")
+        for seconds in _LICHESS_CLOCK_LIMITS_SECONDS:
+            ai_clock_limit.addItem(
+                _lichess_clock_limit_label(seconds), seconds
+            )
+        ai_clock_limit.setCurrentIndex(
+            ai_clock_limit.findData(stored_ai_clock_limit)
         )
-        ai_clock_index = ai_clock.findData(stored_ai_clock)
-        ai_clock.setCurrentIndex(
-            ai_clock_index if ai_clock_index >= 0 else 2
+        ai_clock_increment = QComboBox()
+        ai_clock_increment.setObjectName("lichessDefaultClockIncrement")
+        _populate_lichess_increment_choices(
+            ai_clock_limit,
+            ai_clock_increment,
+            stored_ai_clock_increment,
         )
+        ai_clock_limit.currentIndexChanged.connect(
+            lambda _index: _populate_lichess_increment_choices(
+                ai_clock_limit,
+                ai_clock_increment,
+                cast(int, ai_clock_increment.currentData()),
+            )
+        )
+        ai_clock_enabled.toggled.connect(ai_clock_limit.setEnabled)
+        ai_clock_enabled.toggled.connect(ai_clock_increment.setEnabled)
+        ai_clock_limit.setEnabled(stored_ai_clock_enabled)
+        ai_clock_increment.setEnabled(stored_ai_clock_enabled)
         ai_defaults_layout.addRow("AI level:", ai_level)
         ai_defaults_layout.addRow("Your color:", ai_color)
-        ai_defaults_layout.addRow("Clock:", ai_clock)
+        ai_defaults_layout.addRow(ai_clock_enabled)
+        ai_defaults_layout.addRow("Initial time:", ai_clock_limit)
+        ai_defaults_layout.addRow("Increment:", ai_clock_increment)
         ai_defaults.setLayout(ai_defaults_layout)
         lichess_layout.addWidget(ai_defaults)
         lichess_layout.addStretch(1)
@@ -2165,11 +2334,8 @@ class CameraWindow(QMainWindow):
             ):
                 self._configure_offline_clock(*offline_clock_values)
             selected_ai_color = ai_color.currentData()
-            selected_ai_clock = ai_clock.currentData()
             if not isinstance(selected_ai_color, str):
                 raise RuntimeError("AI color has no stored identity.")
-            if not isinstance(selected_ai_clock, str):
-                raise RuntimeError("AI clock has no stored identity.")
             self._settings.setValue(
                 _LICHESS_AI_LEVEL_SETTING,
                 ai_level.value(),
@@ -2179,8 +2345,16 @@ class CameraWindow(QMainWindow):
                 selected_ai_color,
             )
             self._settings.setValue(
-                _LICHESS_AI_CLOCK_SETTING,
-                selected_ai_clock,
+                _LICHESS_AI_CLOCK_ENABLED_SETTING,
+                ai_clock_enabled.isChecked(),
+            )
+            self._settings.setValue(
+                _LICHESS_AI_CLOCK_LIMIT_SETTING,
+                ai_clock_limit.currentData(),
+            )
+            self._settings.setValue(
+                _LICHESS_AI_CLOCK_INCREMENT_SETTING,
+                ai_clock_increment.currentData(),
             )
             self._settings.sync()
 
@@ -5984,7 +6158,10 @@ class CameraWindow(QMainWindow):
         self._settings.sync()
 
     def _restore_saved_offline_clock(self) -> None:
-        initial_time_ms = self._offline_clock.initial_time_ms
+        initial_time_ms = (
+            self._offline_clock.initial_time_ms
+            + self._offline_clock.increment_ms
+        )
         white_time_ms = max(
             0,
             _stored_integer(
@@ -6003,16 +6180,17 @@ class CameraWindow(QMainWindow):
                 initial_time_ms,
             ),
         )
+        has_started = _stored_boolean(
+            self._settings.value(
+                _OFFLINE_CLOCK_HAS_STARTED_SETTING, False
+            ),
+            False,
+        )
         self._offline_clock.restore(
             white_time_ms,
             black_time_ms,
             self._legal_game.status.turn,
-            has_started=_stored_boolean(
-                self._settings.value(
-                    _OFFLINE_CLOCK_HAS_STARTED_SETTING, False
-                ),
-                False,
-            ),
+            has_started=has_started,
         )
 
     def _game_mode_changed(self, index: int) -> None:
@@ -6357,22 +6535,25 @@ class CameraWindow(QMainWindow):
             if stored_color in ("white", "black", "random")
             else "white"
         )
+        (
+            clock_enabled,
+            clock_limit,
+            clock_increment,
+        ) = _stored_lichess_ai_clock(self._settings)
         dialog = LichessAiGameDialog(
             level=_stored_integer(
                 self._settings.value(_LICHESS_AI_LEVEL_SETTING, 4),
                 4,
             ),
             color=color,
-            clock_key=str(
-                self._settings.value(_LICHESS_AI_CLOCK_SETTING, "10+5")
-            ),
+            clock_enabled=clock_enabled,
+            clock_limit_seconds=clock_limit,
+            clock_increment_seconds=clock_increment,
             parent=self,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        level, color, _clock_key, clock_limit, clock_increment = (
-            dialog.configuration
-        )
+        level, color, clock_limit, clock_increment = dialog.configuration
         if self._lichess_worker is None:
             self._toggle_lichess_connection()
             if self._lichess_worker is None:

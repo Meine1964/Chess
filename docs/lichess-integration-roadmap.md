@@ -686,10 +686,17 @@ updates retain player identity from the latest full snapshot.
 
 **Start-new-game slice:** Implemented and automated-test validated. The
 Lichess-panel button creates AI games natively through a setup dialog for AI
-level, player color, and clock. Persistent defaults are managed in File >
-Settings > Lichess, while dialog changes apply to one game. The exact returned
-game ID is followed automatically. Random-human seeks and named-user
-challenges remain deferred.
+level, player color, clock enablement, initial minutes, and increment seconds.
+Persistent defaults are managed with separate fixed-choice initial-time and
+increment controls in File > Settings > Lichess, while dialog changes apply to
+one game. Initial-time choices mirror Lichess's complete real-time setup range
+from zero through 180 minutes, including 15-, 30-, and 45-second values and 90
+minutes. Increment choices mirror the Lichess range through the AI API's
+authoritative 60-second maximum. Zero initial time requires a positive
+increment, so the controls do not offer the invalid `0+0` combination. There
+is no custom-value entry. Existing saved clock presets and numeric settings
+migrate to equivalent choices. The exact returned game ID is followed
+automatically. Random-human seeks and named-user challenges remain deferred.
 
 **Game-control bar slice:** Implemented and automated-test validated. The
 Lichess panel shows Lichess-style takeback, draw, resign, and new-game icon

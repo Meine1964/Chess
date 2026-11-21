@@ -671,11 +671,40 @@ def test_ai_game_dialog_uses_requested_development_defaults(
     dialog = LichessAiGameDialog(
         level=4,
         color="white",
-        clock_key="10+5",
+        clock_enabled=True,
+        clock_limit_seconds=600,
+        clock_increment_seconds=5,
     )
 
-    assert dialog.configuration == (4, "white", "10+5", 600, 5)
+    assert dialog.configuration == (4, "white", 600, 5)
+    clock_limit = dialog.findChild(QComboBox, "lichessClockLimit")
+    clock_increment = dialog.findChild(
+        QComboBox, "lichessClockIncrement"
+    )
+    assert clock_limit is not None
+    assert clock_increment is not None
+    assert clock_limit.findData(0) >= 0
+    assert clock_limit.findData(5400) >= 0
+    assert clock_limit.findData(10800) >= 0
+    assert clock_limit.findText("Custom") == -1
+    clock_limit.setCurrentIndex(clock_limit.findData(0))
+    assert clock_increment.findData(0) == -1
+    assert dialog.configuration == (4, "white", 0, 5)
     dialog.close()
+
+
+def test_legacy_lichess_clock_preset_migrates_to_separate_values(
+    tmp_path: Path,
+) -> None:
+    from src.chess_camera.camera_app import _stored_lichess_ai_clock
+
+    settings = QSettings(
+        str(tmp_path / "settings.ini"),
+        QSettings.Format.IniFormat,
+    )
+    settings.setValue("lichess/ai_clock", "15+10")
+
+    assert _stored_lichess_ai_clock(settings) == (True, 900, 10)
 
 
 def test_lichess_ai_defaults_apply_and_cancel_transactionally(
@@ -735,20 +764,47 @@ def test_lichess_ai_defaults_apply_and_cancel_transactionally(
             for group in dialog.findChildren(QGroupBox)
             if group.title() == "New AI game defaults"
         )
-        level = defaults.findChild(QSpinBox)
+        level = next(
+            spin
+            for spin in defaults.findChildren(QSpinBox)
+            if not spin.objectName()
+        )
+        clock_limit = defaults.findChild(
+            QComboBox, "lichessDefaultClockLimit"
+        )
+        clock_increment = defaults.findChild(
+            QComboBox, "lichessDefaultClockIncrement"
+        )
         combos = defaults.findChildren(QComboBox)
         color = next(combo for combo in combos if combo.findData("random") >= 0)
-        clock = next(combo for combo in combos if combo.findData("15+10") >= 0)
+        clock_enabled = next(
+            checkbox
+            for checkbox in defaults.findChildren(QCheckBox)
+            if checkbox.text() == "Use a clock"
+        )
         assert level is not None
+        assert clock_limit is not None
+        assert clock_increment is not None
         if invocation == 0:
-            assert (level.value(), color.currentData(), clock.currentData()) == (
+            assert (
+                level.value(),
+                color.currentData(),
+                clock_enabled.isChecked(),
+                clock_limit.currentData(),
+                clock_increment.currentData(),
+            ) == (
                 4,
                 "white",
-                "10+5",
+                True,
+                600,
+                5,
             )
             level.setValue(6)
             color.setCurrentIndex(color.findData("black"))
-            clock.setCurrentIndex(clock.findData("15+10"))
+            clock_limit.setCurrentIndex(clock_limit.findData(5400))
+            clock_increment.setCurrentIndex(
+                clock_increment.findData(30)
+            )
             buttons = dialog.findChild(QDialogButtonBox)
             assert buttons is not None
             apply_button = buttons.button(
@@ -759,7 +815,7 @@ def test_lichess_ai_defaults_apply_and_cancel_transactionally(
         else:
             level.setValue(2)
             color.setCurrentIndex(color.findData("random"))
-            clock.setCurrentIndex(clock.findData("unlimited"))
+            clock_enabled.setChecked(False)
         invocation += 1
         return QDialog.DialogCode.Rejected
 
@@ -770,7 +826,21 @@ def test_lichess_ai_defaults_apply_and_cancel_transactionally(
 
     assert window._settings.value("lichess/ai_level", type=int) == 6
     assert window._settings.value("lichess/ai_color") == "black"
-    assert window._settings.value("lichess/ai_clock") == "15+10"
+    assert (
+        window._settings.value("lichess/ai_clock_enabled", type=bool) is True
+    )
+    assert (
+        window._settings.value(
+            "lichess/ai_clock_limit_seconds", type=int
+        )
+        == 5400
+    )
+    assert (
+        window._settings.value(
+            "lichess/ai_clock_increment_seconds", type=int
+        )
+        == 30
+    )
     window.deleteLater()
 
 

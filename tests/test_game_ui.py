@@ -2176,7 +2176,8 @@ def test_first_offline_move_starts_next_players_clock() -> None:
     snapshot = clock.snapshot()
     assert snapshot.active_player == "black"
     assert snapshot.running is True
-    assert snapshot.white_time_ms == 600_000
+    assert snapshot.white_time_ms == 605_000
+    assert snapshot.black_time_ms == 605_000
 
 
 def test_offline_clock_timeout_projects_result_and_expired_player() -> None:

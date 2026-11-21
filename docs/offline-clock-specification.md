@@ -17,7 +17,8 @@ clocks without requiring a Lichess game or external clock.
 ## Lifecycle
 
 - Entering or restoring Offline play initializes both clocks from the
-  configured initial time and leaves them paused.
+  configured initial time plus increment and leaves them paused. For example,
+  `10+5` initially displays `10:05` for both players.
 - Start runs the clock of the side to move in the authoritative Offline legal
   game.
 - If the clock has not yet been started after creating or resetting an
@@ -38,7 +39,8 @@ The clock shall switch only after the same accepted physical action that
 advances the authoritative Offline `LegalGame`.
 
 - Commit elapsed time against the mover.
-- Add the configured increment to the mover.
+- Include one increment in each player's initial display, then add the
+  configured increment to the mover at the end of each timed accepted move.
 - Start the next side's clock from the accepted legal-game turn.
 - Ordinary moves, captures, castling, en passant, and confirmed promotions use
   the same switch rule.
@@ -104,5 +106,5 @@ Implemented in the Offline game UI and projector integration.
 
 Validation:
 
-- Focused Offline clock and game UI suite: 79 passed.
-- Full repository quality gate: 413 passed.
+- Focused Offline clock and game UI suite: 80 passed.
+- Full repository quality gate: 415 passed.

@@ -34,8 +34,8 @@ class OfflineClock:
         self._initial_time_ms = initial_time_ms
         self._increment_ms = increment_ms
         self._clock = clock
-        self._white_time_ms = initial_time_ms
-        self._black_time_ms = initial_time_ms
+        self._white_time_ms = initial_time_ms + increment_ms
+        self._black_time_ms = initial_time_ms + increment_ms
         self._active_player: PlayerColor = "white"
         self._running_since: float | None = None
         self._has_started = False
@@ -82,8 +82,9 @@ class OfflineClock:
         )
 
     def reset(self, active_player: PlayerColor) -> OfflineClockSnapshot:
-        self._white_time_ms = self._initial_time_ms
-        self._black_time_ms = self._initial_time_ms
+        displayed_initial_time = self._initial_time_ms + self._increment_ms
+        self._white_time_ms = displayed_initial_time
+        self._black_time_ms = displayed_initial_time
         self._active_player = active_player
         self._running_since = None
         self._has_started = False

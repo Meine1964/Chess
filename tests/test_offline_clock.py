@@ -17,16 +17,16 @@ def test_offline_clock_switches_and_adds_increment() -> None:
     clock.now = 5.0
     snapshot = game_clock.accept_move("black")
 
-    assert snapshot.white_time_ms == 57_000
-    assert snapshot.black_time_ms == 60_000
+    assert snapshot.white_time_ms == 59_000
+    assert snapshot.black_time_ms == 62_000
     assert snapshot.active_player == "black"
     assert snapshot.running is True
 
     clock.now = 8.5
     snapshot = game_clock.pause()
 
-    assert snapshot.white_time_ms == 57_000
-    assert snapshot.black_time_ms == 56_500
+    assert snapshot.white_time_ms == 59_000
+    assert snapshot.black_time_ms == 58_500
     assert snapshot.running is False
 
 
@@ -35,8 +35,8 @@ def test_first_accepted_move_starts_next_players_clock() -> None:
 
     snapshot = game_clock.accept_move("black")
 
-    assert snapshot.white_time_ms == 60_000
-    assert snapshot.black_time_ms == 60_000
+    assert snapshot.white_time_ms == 62_000
+    assert snapshot.black_time_ms == 62_000
     assert snapshot.active_player == "black"
     assert snapshot.running is True
     assert snapshot.has_started is True
@@ -49,10 +49,26 @@ def test_move_after_pause_switches_but_remains_paused() -> None:
 
     snapshot = game_clock.accept_move("black")
 
-    assert snapshot.white_time_ms == 60_000
-    assert snapshot.black_time_ms == 60_000
+    assert snapshot.white_time_ms == 62_000
+    assert snapshot.black_time_ms == 62_000
     assert snapshot.active_player == "black"
     assert snapshot.running is False
+
+
+def test_increment_is_added_at_the_end_of_each_timed_move() -> None:
+    clock = FakeClock()
+    game_clock = OfflineClock(60_000, 2_000, clock=clock)
+    game_clock.accept_move("black")
+    clock.now = 1.0
+    game_clock.accept_move("white")
+    clock.now = 2.0
+
+    snapshot = game_clock.accept_move("black")
+
+    assert snapshot.white_time_ms == 63_000
+    assert snapshot.black_time_ms == 63_000
+    assert snapshot.active_player == "black"
+    assert snapshot.running is True
 
 
 def test_offline_clock_timeout_stops_and_sets_result() -> None:
@@ -73,7 +89,12 @@ def test_offline_clock_timeout_stops_and_sets_result() -> None:
 def test_offline_clock_restores_paused() -> None:
     game_clock = OfflineClock(60_000, 0)
 
-    game_clock.restore(42_000, 31_000, "black", has_started=True)
+    game_clock.restore(
+        42_000,
+        31_000,
+        "black",
+        has_started=True,
+    )
     snapshot = game_clock.snapshot()
 
     assert snapshot.white_time_ms == 42_000
