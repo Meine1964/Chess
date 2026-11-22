@@ -45,6 +45,23 @@ populated complementary-coded calibration methods unchanged.
   only after two consecutive frames are mutually stable, then average those
   two frames. The required change threshold shall scale down for patterns
   whose projector-space difference inside the board mask is small.
+- **Black resynchronization.** Before the first Gray-code pattern, and before
+  every pair recapture, keep the projector black and wait until the camera
+  shows it. Each change-detection comparison is only valid when the
+  reference image matches what the camera currently sees.
+  - Accept two consecutive frames that each differ from the black reference
+    on at most 2% of the board pixels. Their average becomes the new
+    reference.
+  - After one second without a match (for example after an exposure or
+    room-light change), accept two consecutive mutually stable frames
+    instead. By then the camera pipeline shows the black projector.
+  - The capture watchdog bounds the wait.
+  - Field evidence: rough fitting blocks the event loop, so camera frames
+    still showing the coded discovery pattern were delivered after the
+    first Gray-code pattern appeared. They differed from the old black
+    reference and were accepted. Every later capture then showed the
+    previous pattern: the X bit 1 pair was exactly inverted (93% contrast,
+    0.4% agreement), and the recaptures kept the lag.
 - If two successive cropped projector patterns are identical inside the board
   mask, reuse the previous camera capture without projecting or waiting for a
   redundant image.
@@ -79,10 +96,13 @@ After each inverse capture, check the normal/inverse pair before using it:
   agreement is at least 70%. A stale or mis-synchronized frame gives roughly
   50% agreement or a collapsed contrast. The 70% threshold leaves room for
   dark or occupied squares, whose contrast and parallax lower agreement.
-- **Recapture** a failing pair (normal and inverse) at most twice. This
-  re-takes a single image pair and does not repeat the calibration.
-- **Fail** if the pair still fails: end the calibration with an error that
-  names the axis, the bit, and the measured contrast and agreement.
+- **Recapture** a failing pair (normal and inverse) at most twice, each time
+  after black resynchronization. This re-takes a single image pair and does
+  not repeat the calibration.
+- **Fail** if the pair still fails: end the attempt with an error that names
+  the axis, the bit, and the measured contrast and agreement. Contrast below
+  30% is a projector-focus failure; otherwise the attempt is retried (see
+  "Failure instructions and automatic retry").
 
 ### Capture diagnostics
 
@@ -96,6 +116,37 @@ After each inverse capture, check the normal/inverse pair before using it:
 - On failure, also save the weakest pair as
   `runtime-calibration-gray-weakest-normal.png` and
   `runtime-calibration-gray-weakest-inverse.png`.
+- Record the black resynchronization as a `black-sync` capture entry whose
+  mode is `matched` or `settled`.
+- When coded discovery fails, save the rejected discovery frame as
+  `runtime-calibration-coded.png`.
+
+### Failure instructions and automatic retry
+
+Every failure has a category. The category decides whether the attempt is
+repeated automatically and which instruction the player sees.
+
+| Category | Typical cause | Automatic retry | Instruction |
+|---|---|---|---|
+| Board not visible | Board not detected with the projector black, or an outer board corner lies outside the camera image | No | Point the camera so the whole board, including its border, is visible. |
+| Board outside projection | The board grid extends beyond the projector display | No | Move the board or aim the projector so the projected image covers the whole board. |
+| Clear pieces | Board lattice hidden, insufficient plane support, or too few usable validation squares | No | Clear the red-outlined squares in the camera view, or the red squares on the board. |
+| Projector focus | A Gray-code pair keeps less than 30% contrast | No | Focus the projector, keep shadows off the board, and dim strong room light. |
+| Camera | No fresh camera frames in time, or the camera resolution changed | Yes | Check the camera connection and close other programs that use the camera. |
+| Unreliable capture | Anything else: few coded markers, Gray-code agreement, mapping fit, or validation error | Yes | Keep hands and moving objects away, keep the camera and board still, and check that the projection is sharp. |
+
+- A retryable failure starts a fresh attempt from the black reference after
+  one second, at most three attempts in total. The status line reports the
+  failed attempt and the retry.
+- Each retried failure is recorded as a `calibration-attempt-failed`
+  diagnostic with the attempt's images. The final event lists the earlier
+  attempt failures.
+- Cancelling the calibration also cancels a pending retry.
+- When calibration finally fails, show the instruction first, then the
+  technical details. Both startup and manual calibration show it in a
+  warning dialog and in the projector status line.
+- Every instruction ends with "then start Board-cropped calibration
+  again."
 - Cancellation, timeout, camera-resolution change, insufficient markers,
   invalid rough geometry, Gray-code decode failure, or validation failure
   shall immediately return the projector to black.
@@ -261,22 +312,24 @@ support was computed, so the player can see what the calibration could use:
   rough discovery mapping.
 - The map stays on until the next calibration starts or another projector
   output replaces it. It is never shown after a successful calibration.
-- The calibration is not repeated automatically.
+- Clearing failures are not repeated automatically; only camera and
+  unreliable-capture failures are retried (see Failure instructions and
+  automatic retry).
 
 ### Failure instructions
 
-Every board-cropped failure ends the status text (or the dialog of a manual
-calibration) with a corrective action:
+Every board-cropped failure shows an instruction that matches its category
+(see Failure instructions and automatic retry), followed by the details:
 
-- With red squares: "Green squares were usable. Remove the pieces from the
-  red squares, then start Board-cropped calibration again."
-- With a map but no red squares: "Green squares were usable for calibration.
-  Keep hands and shadows off the board, then start Board-cropped calibration
-  again."
-- When pieces hide the board lattice: "Clear the squares outlined in red in
-  the camera view, then start Board-cropped calibration again."
-- Otherwise, without a map: "Keep hands and shadows off the board, then start
-  Board-cropped calibration again."
+- With a map and red squares, or a clear-pieces failure with a map: "Too
+  many pieces block the calibration. Green squares were usable; remove the
+  pieces from the red squares, then start Board-cropped calibration again."
+- When pieces hide the board lattice: "Too many pieces hide the board. Clear
+  the squares outlined in red in the camera view, then start Board-cropped
+  calibration again."
+- Otherwise the category instruction, prefixed by "Green squares were usable
+  for calibration." when a map is shown, and by "Calibration failed after N
+  attempts." when automatic retries were made.
 
 ### Diagnostics
 
@@ -375,6 +428,12 @@ calibration) with a corrective action:
     plus one square, or full-screen without a saved calibration. The camera
     preview outlines the saved board when the camera matches. Calibration
     starts only after OK; Cancel leaves the application uncalibrated.
+16. Camera frames that still show the coded discovery pattern after the
+    first Gray-code pattern appears are not accepted as Gray-code captures,
+    and a recaptured pair is not compared with a stale reference.
+17. Each failure shows the instruction for its category. Camera and
+    unreliable-capture failures are retried automatically up to three
+    attempts in total before the player is asked to act.
 
 ## Implementation Status
 
@@ -428,7 +487,17 @@ calibration, Cancel leaves the app uncalibrated, and a stale dialog is
 ignored. The dialog interaction and the preview outline await hardware
 confirmation.
 
+Black resynchronization, failure categories, automatic retry, and the
+instruction dialog are implemented and validated by automated tests:
+lagging pattern frames are rejected until two frames match the black
+reference, an unreliable failure is retried twice and then reported with
+the earlier attempt failures, a board-not-visible failure is reported
+without retry, each category produces its instruction, and startup failures
+show the instruction dialog. The resynchronization fix for the field
+failures (stale coded frames in the first Gray-code capture) awaits a
+hardware retest.
+
 Validation:
 
-- Projector calibration and projector tests: 120 passed.
-- Full repository quality gate: 495 passed.
+- Projector calibration and projector tests: 128 passed.
+- Full repository quality gate: 503 passed.

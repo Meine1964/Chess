@@ -17,6 +17,14 @@ class CalibrationError(RuntimeError):
     pass
 
 
+class BoardOutsideProjectorError(CalibrationError):
+    """The board is not entirely inside the projected image."""
+
+
+class InsufficientBoardSupportError(CalibrationError):
+    """Pieces leave too few usable squares for calibration."""
+
+
 class BoardLatticeHiddenError(CalibrationError):
     """Pieces hide too many board corners to locate the squares."""
 
@@ -1324,7 +1332,7 @@ def _select_plane_squares(
 
 def require_board_plane_support(selection: PlaneSupportSelection) -> None:
     if not selection.sufficiently_spread:
-        raise CalibrationError(
+        raise InsufficientBoardSupportError(
             f"Only {selection.retained_square_count} board squares are "
             "consistent with the board plane; at least "
             f"{_PLANE_SUPPORT_MINIMUM_SQUARES} spread over every quadrant, "
@@ -1825,7 +1833,7 @@ def _validate_projector_grid(
         or np.min(grid[:, :, 1]) < 0
         or np.max(grid[:, :, 1]) > height - 1
     ):
-        raise CalibrationError(
+        raise BoardOutsideProjectorError(
             "The calculated board grid extends beyond the projector display."
         )
 

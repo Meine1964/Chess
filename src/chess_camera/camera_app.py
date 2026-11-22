@@ -58,6 +58,12 @@ from PySide6.QtWidgets import (
 from .board_detector import BoardDetection, BoardDetector, FloatArray, ImageArray
 from .alignment_monitor import AlignmentMonitor
 from .calibration_controller import (
+    FAILURE_BOARD_NOT_VISIBLE,
+    FAILURE_BOARD_OUTSIDE_PROJECTOR,
+    FAILURE_CAMERA,
+    FAILURE_CLEAR_PIECES,
+    FAILURE_PROJECTOR_FOCUS,
+    FAILURE_UNRELIABLE,
     CalibrationResult,
     ProjectorCalibrationController,
 )
@@ -158,13 +164,42 @@ _AUTOMATIC_START_RESET_SETTING = "chess/automatic_start_reset"
 _ALIGNMENT_REMAP_DELAY_MILLISECONDS = 750
 _ALIGNMENT_REMAP_RETRY_MILLISECONDS = 250
 _STARTUP_CALIBRATION_SETTLE_SECONDS = 2.0
-_CALIBRATION_RETRY_ACTION = (
-    "Keep hands and shadows off the board, then start Board-cropped "
-    "calibration again."
-)
+_CALIBRATION_AGAIN = "then start Board-cropped calibration again."
+_CALIBRATION_FAILURE_INSTRUCTIONS = {
+    FAILURE_BOARD_NOT_VISIBLE: (
+        "The board is not entirely within the camera view. Point the camera "
+        "so the whole board, including its border, is visible and nothing "
+        f"covers it, {_CALIBRATION_AGAIN}"
+    ),
+    FAILURE_BOARD_OUTSIDE_PROJECTOR: (
+        "The board is not entirely inside the projected image. Move the "
+        "board or aim the projector so the projection covers the whole "
+        f"board, {_CALIBRATION_AGAIN}"
+    ),
+    FAILURE_PROJECTOR_FOCUS: (
+        "The projected stripes are too faint or blurred on the board. Focus "
+        "the projector, keep shadows off the board, and dim strong room "
+        f"light, {_CALIBRATION_AGAIN}"
+    ),
+    FAILURE_CAMERA: (
+        "The camera stopped delivering fresh images. Check the camera "
+        "connection and close other programs that use the camera, "
+        f"{_CALIBRATION_AGAIN}"
+    ),
+    FAILURE_UNRELIABLE: (
+        "The camera could not read the projected patterns reliably. Keep "
+        "hands and moving objects away from the board, keep the camera and "
+        "board still, and check that the projection is sharp, "
+        f"{_CALIBRATION_AGAIN}"
+    ),
+}
 _CALIBRATION_CLEAR_ACTION = (
-    "Clear the squares outlined in red in the camera view, then start "
-    "Board-cropped calibration again."
+    "Too many pieces hide the board. Clear the squares outlined in red in "
+    f"the camera view, {_CALIBRATION_AGAIN}"
+)
+_CALIBRATION_CLEAR_MAP_ACTION = (
+    "Too many pieces block the calibration. Green squares were usable; "
+    f"remove the pieces from the red squares, {_CALIBRATION_AGAIN}"
 )
 _BOARD_EDGE_STUCK_DIAGNOSTIC_SECONDS = 3.0
 _BOARD_EDGE_STUCK_REPEAT_SECONDS = 5.0
@@ -1263,6 +1298,9 @@ class CameraWindow(QMainWindow):
         )
         self._calibrator.completed.connect(self._projector_calibration_completed)
         self._calibrator.failed.connect(self._projector_calibration_failed)
+        self._calibrator.attempt_failed.connect(
+            self._projector_calibration_attempt_failed
+        )
         self._alignment_monitor = AlignmentMonitor(
             self._detector,
             interval_milliseconds=200,
@@ -3343,6 +3381,13 @@ class CameraWindow(QMainWindow):
                     )
                 },
             )
+            if self._calibrator.adaptive_cropped_mode:
+                CameraWindow._show_calibration_failure_dialog(
+                    self,
+                    "Projector calibration failed",
+                    f"{message} The previous verified mapping remains active.",
+                    action,
+                )
             return
         if self._calibration_result is not None:
             invalidation_error = self._invalidate_saved_calibration()
@@ -3408,7 +3453,13 @@ class CameraWindow(QMainWindow):
         if self._calibrator.adaptive_cropped_mode:
             map_shown = CameraWindow._show_calibration_support_map(self)
             action = CameraWindow._calibration_failure_action(self, map_shown)
-            message = f"{message} {action}"
+            CameraWindow._show_calibration_failure_dialog(
+                self,
+                "Projector calibration failed",
+                message,
+                action,
+            )
+            return
         QMessageBox.warning(
             self,
             "Projector calibration failed",
@@ -9000,6 +9051,12 @@ class CameraWindow(QMainWindow):
             self._projector_status.text(),
             details={"support_map_shown": map_shown},
         )
+        CameraWindow._show_calibration_failure_dialog(
+            self,
+            "Startup calibration failed",
+            message,
+            action,
+        )
 
     def _show_calibration_support_map(self) -> bool:
         pattern = self._calibrator.support_map
@@ -9021,18 +9078,46 @@ class CameraWindow(QMainWindow):
         return True
 
     def _calibration_failure_action(self, map_shown: bool) -> str:
-        if not map_shown:
-            if CameraWindow._show_camera_clearance_view(self):
-                return _CALIBRATION_CLEAR_ACTION
-            return _CALIBRATION_RETRY_ACTION
-        if self._calibrator.clearance_squares:
-            return (
-                "Green squares were usable. Remove the pieces from the red "
-                "squares, then start Board-cropped calibration again."
+        kind = self._calibrator.failure_kind
+        if not map_shown and CameraWindow._show_camera_clearance_view(self):
+            action = _CALIBRATION_CLEAR_ACTION
+        elif map_shown and (
+            kind == FAILURE_CLEAR_PIECES or self._calibrator.clearance_squares
+        ):
+            action = _CALIBRATION_CLEAR_MAP_ACTION
+        else:
+            action = _CALIBRATION_FAILURE_INSTRUCTIONS.get(
+                kind,
+                _CALIBRATION_FAILURE_INSTRUCTIONS[FAILURE_UNRELIABLE],
             )
-        return (
-            "Green squares were usable for calibration. "
-            f"{_CALIBRATION_RETRY_ACTION}"
+            if map_shown:
+                action = f"Green squares were usable for calibration. {action}"
+        attempts = self._calibrator.adaptive_attempt
+        if attempts > 1:
+            action = f"Calibration failed after {attempts} attempts. {action}"
+        return action
+
+    def _show_calibration_failure_dialog(
+        self,
+        title: str,
+        message: str,
+        action: str,
+    ) -> None:
+        QMessageBox.warning(self, title, f"{action}\n\nDetails: {message}")
+
+    def _projector_calibration_attempt_failed(self, message: str) -> None:
+        self._record_runtime_diagnostic(
+            "calibration-attempt-failed",
+            message,
+            details={
+                "startup": self._startup_calibration_running,
+                **self._calibrator.diagnostic_details,
+            },
+            include_images=True,
+            additional_images={
+                f"calibration-{name}": image
+                for name, image in self._calibrator.diagnostic_captures.items()
+            },
         )
 
     def _alignment_recovery_projection_requested(

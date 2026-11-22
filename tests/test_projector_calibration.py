@@ -943,7 +943,7 @@ def test_failed_experimental_calibration_retains_previous_mapping(
     adaptive_cropped_mode: bool,
 ) -> None:
     from types import SimpleNamespace
-    from unittest.mock import MagicMock
+    from unittest.mock import MagicMock, patch
 
     from src.chess_camera.camera_app import CameraWindow
 
@@ -961,6 +961,8 @@ def test_failed_experimental_calibration_retains_previous_mapping(
             support_map=None,
             camera_clearance_view=None,
             clearance_squares=(),
+            failure_kind="unreliable",
+            adaptive_attempt=1,
         ),
         _startup_calibration_running=False,
         _invalidate_saved_calibration=MagicMock(return_value=None),
@@ -971,7 +973,8 @@ def test_failed_experimental_calibration_retains_previous_mapping(
         _record_runtime_diagnostic=MagicMock(),
     )
 
-    CameraWindow._projector_calibration_failed(window, "failed")
+    with patch("src.chess_camera.camera_app.QMessageBox"):
+        CameraWindow._projector_calibration_failed(window, "failed")
 
     window._invalidate_saved_calibration.assert_not_called()
     window._invalidate_calibration.assert_not_called()
@@ -1138,6 +1141,8 @@ def test_startup_calibration_failure_projects_support_map() -> None:
             diagnostic_captures={},
             support_map=support_map,
             clearance_squares=((2, 3),),
+            failure_kind="clear-pieces",
+            adaptive_attempt=1,
         ),
         _record_runtime_diagnostic=MagicMock(),
         _activate_calibration_result=MagicMock(),
@@ -1150,21 +1155,59 @@ def test_startup_calibration_failure_projects_support_map() -> None:
     with patch("src.chess_camera.camera_app.QMessageBox") as message_box:
         CameraWindow._projector_calibration_failed(window, "too few squares")
 
-    message_box.warning.assert_not_called()
     window._activate_calibration_result.assert_not_called()
     window._invalidate_calibration.assert_called_once_with()
     window._projector_window.show_pattern.assert_called_once_with(support_map)
     status = window._projector_status.setText.call_args.args[0]
-    assert "Remove the pieces from the red squares" in status
+    assert "remove the pieces from the red squares" in status
+    dialog_text = message_box.warning.call_args.args[2]
+    assert dialog_text.startswith("Too many pieces block the calibration.")
+    assert dialog_text.endswith("Details: too few squares")
     assert window._startup_calibration_running is False
     failure = window._record_runtime_diagnostic.call_args_list[0]
     assert failure.kwargs["details"]["startup"] is True
     assert "plane_support" in failure.kwargs["details"]
 
 
-def test_hidden_board_failure_outlines_squares_in_camera_view() -> None:
+@pytest.mark.parametrize(
+    ("kind", "attempts", "expected"),
+    [
+        ("board-not-visible", 1, "not entirely within the camera view"),
+        ("board-outside-projector", 1, "not entirely inside the projected"),
+        ("projector-focus", 1, "Focus the projector"),
+        ("camera", 3, "Calibration failed after 3 attempts."),
+        ("unreliable", 3, "keep the camera and board still"),
+    ],
+)
+def test_calibration_failure_shows_instruction_for_kind(
+    kind: str,
+    attempts: int,
+    expected: str,
+) -> None:
     from types import SimpleNamespace
     from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    window = SimpleNamespace(
+        _calibrator=SimpleNamespace(
+            failure_kind=kind,
+            adaptive_attempt=attempts,
+            camera_clearance_view=None,
+            clearance_squares=(),
+        ),
+        _record_runtime_diagnostic=MagicMock(),
+    )
+
+    action = CameraWindow._calibration_failure_action(window, False)
+
+    assert expected in action
+    assert action.endswith("then start Board-cropped calibration again.")
+
+
+def test_hidden_board_failure_outlines_squares_in_camera_view() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
 
     from src.chess_camera.camera_app import CameraWindow
 
@@ -1175,6 +1218,8 @@ def test_hidden_board_failure_outlines_squares_in_camera_view() -> None:
             support_map=None,
             camera_clearance_view=clearance_view,
             clearance_squares=(),
+            failure_kind="clear-pieces",
+            adaptive_attempt=1,
         ),
         _invalidate_calibration=MagicMock(),
         _set_calibration_indicator=MagicMock(),
@@ -1189,10 +1234,11 @@ def test_hidden_board_failure_outlines_squares_in_camera_view() -> None:
         _display_frame=MagicMock(),
     )
 
-    CameraWindow._report_startup_calibration_failure(
-        window,
-        "Coded discovery failed: Too many pieces cover the board squares.",
-    )
+    with patch("src.chess_camera.camera_app.QMessageBox"):
+        CameraWindow._report_startup_calibration_failure(
+            window,
+            "Coded discovery failed: Too many pieces cover the board squares.",
+        )
 
     window._projector_window.show_pattern.assert_not_called()
     window._display_frame.assert_called_once_with(clearance_view)
@@ -2605,6 +2651,7 @@ def test_adaptive_discovery_fit_failure_stops_without_reflashing() -> None:
     controller._active = True
     controller._collecting = False
     controller._adaptive_cropped_mode = True
+    controller._adaptive_attempt = 3
     controller._adaptive_phase = "discovery"
     controller._projector_size = (320, 180)
     controller._captures["black"] = np.zeros((60, 80), dtype=np.uint8)
@@ -2629,6 +2676,83 @@ def test_adaptive_discovery_fit_failure_stops_without_reflashing() -> None:
     projector.show_pattern.assert_not_called()
     projector.show_black.assert_called_once_with()
 
+
+def test_adaptive_unreliable_failure_retries_then_reports() -> None:
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.calibration_controller import FAILURE_UNRELIABLE
+
+    controller = ProjectorCalibrationController(MagicMock(), MagicMock())
+    scheduled: list[object] = []
+    controller._schedule = lambda _delay, callback: scheduled.append(callback)
+    controller._start_adaptive_attempt = MagicMock()
+    controller._active = True
+    controller._adaptive_cropped_mode = True
+    controller._projector_size = (320, 180)
+    controller._adaptive_attempt = 1
+    attempts: list[str] = []
+    failures: list[str] = []
+    controller.attempt_failed.connect(attempts.append)
+    controller.failed.connect(failures.append)
+
+    for number in range(1, 4):
+        controller._fail(f"glitch {number}")
+        for callback in scheduled:
+            callback()
+        scheduled.clear()
+
+    assert attempts == ["glitch 1", "glitch 2"]
+    assert controller._start_adaptive_attempt.call_count == 2
+    assert failures == ["glitch 3"]
+    assert controller.failure_kind == FAILURE_UNRELIABLE
+    assert controller.diagnostic_details["previous_attempt_failures"] == [
+        "glitch 1",
+        "glitch 2",
+    ]
+
+
+def test_adaptive_board_failure_is_reported_without_retry() -> None:
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.calibration_controller import (
+        FAILURE_BOARD_NOT_VISIBLE,
+    )
+
+    controller = ProjectorCalibrationController(MagicMock(), MagicMock())
+    controller._schedule = lambda _delay, _callback: None
+    controller._active = True
+    controller._adaptive_cropped_mode = True
+    controller._adaptive_attempt = 1
+    attempts: list[str] = []
+    failures: list[str] = []
+    controller.attempt_failed.connect(attempts.append)
+    controller.failed.connect(failures.append)
+
+    controller._fail("board missing", FAILURE_BOARD_NOT_VISIBLE)
+
+    assert attempts == []
+    assert failures == ["board missing"]
+    assert controller.failure_kind == FAILURE_BOARD_NOT_VISIBLE
+
+
+def test_adaptive_black_sync_rejects_lagging_pattern_frames() -> None:
+    from unittest.mock import MagicMock
+
+    controller = ProjectorCalibrationController(MagicMock(), MagicMock())
+    black = np.full((60, 80), 20, dtype=np.uint8)
+    controller._captures["black"] = black
+    controller._detection = _detection()
+    controller._adaptive_black_sync = True
+    lagging = black.copy()
+    lagging[:, 40:] = 200
+
+    assert controller._accept_adaptive_black_frame(lagging) is None
+    assert controller._accept_adaptive_black_frame(lagging) is None
+    assert controller._accept_adaptive_black_frame(black.copy()) is None
+    accepted = controller._accept_adaptive_black_frame(black.copy())
+
+    assert accepted is not None
+    np.testing.assert_array_equal(accepted, black)
 
 def test_adaptive_gray_code_patterns_are_black_outside_board_mask() -> None:
     controller = ProjectorCalibrationController(object(), object())

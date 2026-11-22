@@ -12,10 +12,13 @@ from .occupancy import empty_square_candidates
 from .projector import ProjectorWindow
 from .projector_calibration import (
     BoardLatticeHiddenError,
+    BoardOutsideProjectorError,
     CalibrationError,
     CodedPattern,
     GrayImage,
+    InsufficientBoardSupportError,
     MappingResult,
+    PAIR_MINIMUM_CONTRAST,
     PlaneSupportSelection,
     ValidationResult,
     board_mask,
@@ -75,16 +78,40 @@ _STARTING_POSITION_EDGE_TARGETS = [
 ]
 _STARTING_POSITION_CENTER_TARGET = [(4.0, 4.0), (4.25, 4.0)]
 
+FAILURE_BOARD_NOT_VISIBLE = "board-not-visible"
+FAILURE_BOARD_OUTSIDE_PROJECTOR = "board-outside-projector"
+FAILURE_CLEAR_PIECES = "clear-pieces"
+FAILURE_PROJECTOR_FOCUS = "projector-focus"
+FAILURE_CAMERA = "camera"
+FAILURE_UNRELIABLE = "unreliable"
+_RETRYABLE_FAILURES = frozenset({FAILURE_CAMERA, FAILURE_UNRELIABLE})
+
+
+def _failure_kind_for(error: Exception) -> str:
+    if isinstance(
+        error,
+        (BoardLatticeHiddenError, InsufficientBoardSupportError),
+    ):
+        return FAILURE_CLEAR_PIECES
+    if isinstance(error, BoardOutsideProjectorError):
+        return FAILURE_BOARD_OUTSIDE_PROJECTOR
+    return FAILURE_UNRELIABLE
+
 
 class ProjectorCalibrationController(QObject):
     status_changed = Signal(str)
     progress_changed = Signal(int, int)
     completed = Signal(object)
     failed = Signal(str)
+    attempt_failed = Signal(str)
     active_changed = Signal(bool)
     _OMITTED_LEAST_SIGNIFICANT_BITS = 1
     _ADAPTIVE_FORCED_CAPTURE_MILLISECONDS = 600
+    _BLACK_SYNC_RELAX_MILLISECONDS = 1000
+    _BLACK_SYNC_MAXIMUM_CHANGE = 0.02
     _MAXIMUM_PAIR_RECAPTURES = 2
+    _MAXIMUM_ADAPTIVE_ATTEMPTS = 3
+    _ADAPTIVE_RETRY_DELAY_MILLISECONDS = 1000
     _MINIMUM_VALIDATION_HITS = 9
 
     def __init__(
@@ -151,6 +178,11 @@ class ProjectorCalibrationController(QObject):
         self._adaptive_candidate_gray: GrayImage | None = None
         self._adaptive_expected_change_ratio = 0.1
         self._adaptive_gray_fallback = False
+        self._adaptive_black_sync = False
+        self._adaptive_after_black = False
+        self._adaptive_attempt = 0
+        self._adaptive_attempt_failures: list[str] = []
+        self._failure_kind = FAILURE_UNRELIABLE
         self._adaptive_black_color: ImageArray | None = None
         self._adaptive_empty_squares: NDArray[np.bool_] | None = None
         self._plane_support: PlaneSupportSelection | None = None
@@ -190,6 +222,14 @@ class ProjectorCalibrationController(QObject):
     @property
     def adaptive_cropped_mode(self) -> bool:
         return self._adaptive_cropped_mode
+
+    @property
+    def failure_kind(self) -> str:
+        return self._failure_kind
+
+    @property
+    def adaptive_attempt(self) -> int:
+        return self._adaptive_attempt
 
     @property
     def diagnostic_captures(self) -> dict[str, ImageArray]:
@@ -271,6 +311,12 @@ class ProjectorCalibrationController(QObject):
             details["validation_targets"] = [
                 dict(entry) for entry in self._validation_log
             ]
+        details["attempt"] = self._adaptive_attempt
+        details["failure_kind"] = self._failure_kind
+        if self._adaptive_attempt_failures:
+            details["previous_attempt_failures"] = list(
+                self._adaptive_attempt_failures
+            )
         return details
 
     def start(self, projector_width: int, projector_height: int) -> None:
@@ -401,6 +447,19 @@ class ProjectorCalibrationController(QObject):
         if projector_width <= 1 or projector_height <= 1:
             raise ValueError("Projector dimensions must be greater than one.")
 
+        self._adaptive_attempt = 1
+        self._adaptive_attempt_failures = []
+        self._start_adaptive_attempt(projector_width, projector_height)
+
+    def _start_adaptive_attempt(
+        self,
+        projector_width: int,
+        projector_height: int,
+    ) -> None:
+        first_attempt = not self._active
+        self._failure_kind = FAILURE_UNRELIABLE
+        self._adaptive_black_sync = False
+        self._adaptive_after_black = False
         pattern = coded_marker_pattern(
             projector_width,
             projector_height,
@@ -474,10 +533,11 @@ class ProjectorCalibrationController(QObject):
             for length in (projector_width, projector_height)
         )
         self._progress_total = len(self._steps) + gray_steps + 10
-        self.active_changed.emit(True)
-        self.status_changed.emit(
-            "Starting board-cropped calibration with the projector black."
-        )
+        if first_attempt:
+            self.active_changed.emit(True)
+            self.status_changed.emit(
+                "Starting board-cropped calibration with the projector black."
+            )
         self.progress_changed.emit(0, self._progress_total)
         self._display_current_step()
 
@@ -603,7 +663,10 @@ class ProjectorCalibrationController(QObject):
                 return
             rough_detection = self._detection
             if rough_detection is None:
-                self._fail("The populated board was not detected in black.")
+                self._fail(
+                    "The populated board was not detected in black.",
+                    FAILURE_BOARD_NOT_VISIBLE,
+                )
                 return
             self._collecting = False
             self._adaptive_discovery_candidate = averaged
@@ -614,6 +677,16 @@ class ProjectorCalibrationController(QObject):
             self._adaptive_cropped_mode
             and self._adaptive_phase == "gray-code"
         ):
+            if self._adaptive_black_sync:
+                reference = self._accept_adaptive_black_frame(gray)
+                if reference is None:
+                    return
+                self._collecting = False
+                self._adaptive_black_sync = False
+                self._adaptive_after_black = True
+                self._adaptive_previous_gray = reference
+                self._schedule(0, self._display_current_step)
+                return
             if self._adaptive_gray_fallback:
                 if self._frame_accumulator is None:
                     self._frame_accumulator = np.zeros(
@@ -621,7 +694,10 @@ class ProjectorCalibrationController(QObject):
                         dtype=np.float32,
                     )
                 if gray.shape != self._frame_accumulator.shape:
-                    self._fail("Camera resolution changed during calibration.")
+                    self._fail(
+                        "Camera resolution changed during calibration.",
+                        FAILURE_CAMERA,
+                    )
                     return
                 self._frame_accumulator += gray
                 self._frame_count += 1
@@ -642,7 +718,10 @@ class ProjectorCalibrationController(QObject):
         if self._frame_accumulator is None:
             self._frame_accumulator = np.zeros(gray.shape, dtype=np.float32)
         if gray.shape != self._frame_accumulator.shape:
-            self._fail("Camera resolution changed during calibration.")
+            self._fail(
+                "Camera resolution changed during calibration.",
+                FAILURE_CAMERA,
+            )
             return
 
         if (
@@ -671,6 +750,67 @@ class ProjectorCalibrationController(QObject):
         ).astype(np.uint8)
         self._complete_frame_capture(averaged)
 
+    def _accept_adaptive_black_frame(
+        self,
+        gray: GrayImage,
+    ) -> GrayImage | None:
+        """Return a fresh black reference once the camera shows black."""
+        black = self._captures["black"]
+        detection = self._detection
+        if gray.shape != black.shape:
+            self._fail(
+                "Camera resolution changed during calibration.",
+                FAILURE_CAMERA,
+            )
+            return None
+        if detection is None:
+            self._fail("Adaptive Gray-code synchronization is unavailable.")
+            return None
+        usable = board_mask(gray.shape, detection) != 0
+        maximum_change = self._BLACK_SYNC_MAXIMUM_CHANGE
+        black_change = float(np.mean(cv2.absdiff(black, gray)[usable] > 15))
+        candidate = self._adaptive_candidate_gray
+        self._adaptive_candidate_gray = gray.copy()
+        if candidate is None:
+            return None
+        relaxed = self._adaptive_gray_fallback
+        if relaxed:
+            if float(
+                np.mean(cv2.absdiff(candidate, gray)[usable] > 15)
+            ) > maximum_change:
+                return None
+        elif black_change > maximum_change or float(
+            np.mean(cv2.absdiff(black, candidate)[usable] > 15)
+        ) > maximum_change:
+            return None
+        reference = np.rint(
+            (candidate.astype(np.float32) + gray.astype(np.float32)) / 2.0
+        ).astype(np.uint8)
+        self._adaptive_candidate_gray = None
+        self._gray_capture_log.append(
+            {
+                "key": "black-sync",
+                "mode": "settled" if relaxed else "matched",
+                "changed_ratio": round(black_change, 4),
+                "elapsed_milliseconds": round(
+                    (monotonic() - self._adaptive_step_shown_at) * 1000
+                ),
+            }
+        )
+        return reference
+
+    def _begin_adaptive_black_sync(self) -> None:
+        if not self._active:
+            return
+        self._adaptive_black_sync = True
+        self._adaptive_gray_fallback = False
+        self.status_changed.emit(
+            "Waiting for the camera to show the projector black."
+        )
+        self._projector.show_black()
+        self._adaptive_step_shown_at = monotonic()
+        self._begin_frame_collection()
+
     def _accept_adaptive_discovery_frame(
         self,
         gray: GrayImage,
@@ -678,7 +818,10 @@ class ProjectorCalibrationController(QObject):
         black = self._captures["black"]
         detection = self._detection
         if gray.shape != black.shape:
-            self._fail("Camera resolution changed during calibration.")
+            self._fail(
+                "Camera resolution changed during calibration.",
+                FAILURE_CAMERA,
+            )
             return None
         if detection is None:
             self._fail("Adaptive discovery synchronization is unavailable.")
@@ -731,7 +874,10 @@ class ProjectorCalibrationController(QObject):
             self._fail("Adaptive Gray-code synchronization is unavailable.")
             return None
         if gray.shape != previous.shape:
-            self._fail("Camera resolution changed during calibration.")
+            self._fail(
+                "Camera resolution changed during calibration.",
+                FAILURE_CAMERA,
+            )
             return None
         usable = board_mask(gray.shape, detection) != 0
         if not np.any(usable):
@@ -809,7 +955,7 @@ class ProjectorCalibrationController(QObject):
             try:
                 self._accept_validation_capture(averaged)
             except (CalibrationError, ValueError, cv2.error) as error:
-                self._fail(str(error))
+                self._fail_with_error(error)
         else:
             step = self._steps[self._step_index]
             self._captures[step.key] = averaged
@@ -821,8 +967,21 @@ class ProjectorCalibrationController(QObject):
                 detection = self._detector.detect(averaged)
                 if detection is None:
                     self._fail(
-                        "The populated board was not detected with the "
-                        "projector black."
+                        "The board was not found in the camera image with "
+                        "the projector black.",
+                        FAILURE_BOARD_NOT_VISIBLE,
+                    )
+                    return
+                height, width = averaged.shape[:2]
+                outer = detection.grid_points[[0, 0, 8, 8], [0, 8, 8, 0]]
+                if (
+                    np.min(outer) < 0
+                    or np.max(outer[:, 0]) > width - 1
+                    or np.max(outer[:, 1]) > height - 1
+                ):
+                    self._fail(
+                        "The board extends beyond the camera image.",
+                        FAILURE_BOARD_NOT_VISIBLE,
                     )
                     return
                 self._detection = detection
@@ -889,14 +1048,11 @@ class ProjectorCalibrationController(QObject):
         if recaptures < self._MAXIMUM_PAIR_RECAPTURES:
             self._gray_pair_recaptures[pair_key] = recaptures + 1
             self._step_index -= 1
-            # The projector still shows the inverse pattern, so the next
-            # accepted frame must differ from the inverse capture.
-            self._adaptive_previous_gray = inverse.copy()
             self.status_changed.emit(
                 f"Recapturing {axis.upper()} Gray-code bit {int(bit) + 1}; "
                 "the camera did not see the projected pattern reliably."
             )
-            self._schedule(0, self._advance_capture)
+            self._schedule(0, self._begin_adaptive_black_sync)
             return False
 
         agreement = (
@@ -908,8 +1064,10 @@ class ProjectorCalibrationController(QObject):
             f"The camera did not see projected {axis.upper()} Gray-code bit "
             f"{int(bit) + 1} reliably after {recaptures} recaptures "
             f"(contrast {quality.contrast:.0%}, pattern agreement "
-            f"{agreement}). Keep hands and shadows away from the board and "
-            "check that the projector image is in focus."
+            f"{agreement}).",
+            FAILURE_PROJECTOR_FOCUS
+            if quality.contrast < PAIR_MINIMUM_CONTRAST
+            else FAILURE_UNRELIABLE,
         )
         return False
 
@@ -958,9 +1116,13 @@ class ProjectorCalibrationController(QObject):
             )
         except (CalibrationError, ValueError, cv2.error) as error:
             self._adaptive_discovery_candidate = None
+            self._captures["coded"] = candidate
             if isinstance(error, BoardLatticeHiddenError):
                 self._lattice_hidden = error
-            self._fail(f"Coded discovery failed: {error}")
+            self._fail(
+                f"Coded discovery failed: {error}",
+                _failure_kind_for(error),
+            )
             return
 
         self._adaptive_discovery_candidate = None
@@ -1073,7 +1235,16 @@ class ProjectorCalibrationController(QObject):
             if projector_mask is None:
                 self._fail("Adaptive projector board mask is unavailable.")
                 return
-            if self._step_index > 0:
+            if self._adaptive_after_black:
+                # The projector shows black and the reference is a fresh
+                # camera image of it.
+                self._adaptive_after_black = False
+                projector_changed = step.pattern[projector_mask] != 0
+                previous_capture = self._adaptive_previous_gray
+                if previous_capture is None:
+                    self._fail("Adaptive black reference is unavailable.")
+                    return
+            elif self._step_index > 0:
                 previous_step = self._steps[self._step_index - 1]
                 projector_changed = (
                     step.pattern[projector_mask]
@@ -1142,7 +1313,9 @@ class ProjectorCalibrationController(QObject):
             and self._adaptive_phase == "gray-code"
         ):
             QTimer.singleShot(
-                self._ADAPTIVE_FORCED_CAPTURE_MILLISECONDS,
+                self._BLACK_SYNC_RELAX_MILLISECONDS
+                if self._adaptive_black_sync
+                else self._ADAPTIVE_FORCED_CAPTURE_MILLISECONDS,
                 lambda: self._enable_adaptive_gray_fallback(
                     token,
                     run_token,
@@ -1173,7 +1346,8 @@ class ProjectorCalibrationController(QObject):
         ):
             self._fail(
                 "No complete set of fresh camera frames arrived within "
-                f"{self._capture_timeout_milliseconds / 1000:.1f} seconds."
+                f"{self._capture_timeout_milliseconds / 1000:.1f} seconds.",
+                FAILURE_CAMERA,
             )
 
     def _advance_capture(self) -> None:
@@ -1199,7 +1373,7 @@ class ProjectorCalibrationController(QObject):
                 self._calculate_mapping()
             self._start_validation()
         except (CalibrationError, ValueError, cv2.error) as error:
-            self._fail(str(error))
+            self._fail_with_error(error)
 
     def _calculate_mapping(self) -> None:
         black = self._captures["black"]
@@ -1275,7 +1449,7 @@ class ProjectorCalibrationController(QObject):
         self._mapping = None
         self._steps = self._build_cropped_gray_code_steps(projector_mask)
         self._adaptive_projector_mask = projector_mask
-        self._adaptive_previous_gray = self._captures["black"].copy()
+        self._adaptive_previous_gray = None
         self._adaptive_candidate_gray = None
         self._step_index = 0
         self._capture_progress_base = 2
@@ -1283,7 +1457,7 @@ class ProjectorCalibrationController(QObject):
         self.status_changed.emit(
             "Coded discovery complete; starting board-cropped Gray code."
         )
-        self._display_current_step()
+        self._begin_adaptive_black_sync()
 
     def _calculate_adaptive_mapping(self) -> None:
         detection = self._detection
@@ -1442,7 +1616,7 @@ class ProjectorCalibrationController(QObject):
             raise RuntimeError("Plane support is not available.")
         squares = select_validation_squares(selection.square_status)
         if len(squares) < self._MINIMUM_VALIDATION_HITS:
-            raise CalibrationError(
+            raise InsufficientBoardSupportError(
                 f"Only {len(squares)} usable squares are available for "
                 f"validation targets; {self._MINIMUM_VALIDATION_HITS} are "
                 "required."
@@ -1511,7 +1685,7 @@ class ProjectorCalibrationController(QObject):
         try:
             self._show_validation_target()
         except (CalibrationError, ValueError, cv2.error) as error:
-            self._fail(str(error))
+            self._fail_with_error(error)
 
     def _accept_validation_capture(self, averaged: GrayImage) -> None:
         if self._validation_index == 0 and "validation_black" not in self._captures:
@@ -1575,7 +1749,7 @@ class ProjectorCalibrationController(QObject):
         try:
             self._finish_validation()
         except (CalibrationError, ValueError) as error:
-            self._fail(str(error))
+            self._fail_with_error(error)
 
     def _finish_validation(self) -> None:
         if self._detection is None or self._mapping is None:
@@ -1840,7 +2014,16 @@ class ProjectorCalibrationController(QObject):
             raise CalibrationError("Could not measure local board square size.")
         return (horizontal + vertical) / 2.0
 
-    def _fail(self, message: str) -> None:
+    def _fail(self, message: str, kind: str = FAILURE_UNRELIABLE) -> None:
+        self._failure_kind = kind
+        if (
+            self._active
+            and self._adaptive_cropped_mode
+            and kind in _RETRYABLE_FAILURES
+            and self._adaptive_attempt < self._MAXIMUM_ADAPTIVE_ATTEMPTS
+        ):
+            self._retry_adaptive_attempt(message)
+            return
         self._active = False
         self._collecting = False
         self._run_token += 1
@@ -1849,6 +2032,29 @@ class ProjectorCalibrationController(QObject):
         self.active_changed.emit(False)
         self.status_changed.emit(f"Calibration failed: {message}")
         self.failed.emit(message)
+
+    def _fail_with_error(self, error: Exception) -> None:
+        self._fail(str(error), _failure_kind_for(error))
+
+    def _retry_adaptive_attempt(self, message: str) -> None:
+        self._collecting = False
+        self._run_token += 1
+        self._capture_token += 1
+        self._projector.show_black()
+        self.attempt_failed.emit(message)
+        self._adaptive_attempt_failures.append(message)
+        failed_attempt = self._adaptive_attempt
+        self._adaptive_attempt += 1
+        self.status_changed.emit(
+            f"Calibration attempt {failed_attempt} failed: {message} "
+            f"Retrying automatically (attempt {self._adaptive_attempt} of "
+            f"{self._MAXIMUM_ADAPTIVE_ATTEMPTS})."
+        )
+        width, height = self._projector_size
+        self._schedule(
+            self._ADAPTIVE_RETRY_DELAY_MILLISECONDS,
+            lambda: self._start_adaptive_attempt(width, height),
+        )
 
     def _schedule(
         self,
