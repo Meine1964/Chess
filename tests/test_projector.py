@@ -685,6 +685,17 @@ def test_projector_renders_patterns_and_calibrated_squares(
     assert pattern_image.pixelColor(80, 90).red() == 0
     assert pattern_image.pixelColor(240, 90).red() == 180
 
+    color_pattern = np.zeros((180, 320, 3), dtype=np.uint8)
+    color_pattern[:, :160, 1] = 200
+    color_pattern[:, 160:, 0] = 200
+    window.show_pattern(color_pattern)
+    application.processEvents()
+    color_image = window.grab().toImage()
+    assert color_image.pixelColor(80, 90).green() == 200
+    assert color_image.pixelColor(80, 90).red() == 0
+    assert color_image.pixelColor(240, 90).red() == 200
+    assert color_image.pixelColor(240, 90).green() == 0
+
     x_values = np.linspace(40, 280, 9, dtype=np.float32)
     y_values = np.linspace(20, 160, 9, dtype=np.float32)
     x_grid, y_grid = np.meshgrid(x_values, y_values)

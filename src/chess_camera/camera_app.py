@@ -152,6 +152,11 @@ _PROMOTION_MODE_SETTING = "chess/promotion_mode"
 _AUTOMATIC_START_RESET_SETTING = "chess/automatic_start_reset"
 _ALIGNMENT_REMAP_DELAY_MILLISECONDS = 750
 _ALIGNMENT_REMAP_RETRY_MILLISECONDS = 250
+_STARTUP_CALIBRATION_SETTLE_SECONDS = 2.0
+_CALIBRATION_RETRY_ACTION = (
+    "Keep hands and shadows off the board, then start Board-cropped "
+    "calibration again."
+)
 _BOARD_EDGE_STUCK_DIAGNOSTIC_SECONDS = 3.0
 _BOARD_EDGE_STUCK_REPEAT_SECONDS = 5.0
 _ILLEGAL_CORRECTION_FALLBACK_MILLISECONDS = 2000
@@ -1171,6 +1176,9 @@ class CameraWindow(QMainWindow):
         self._calibration_store = CalibrationStore(
             _PROJECT_ROOT / "calibrations"
         )
+        self._startup_calibration_pending = False
+        self._startup_calibration_ready_at: float | None = None
+        self._startup_calibration_running = False
         self._reference_store = ReferenceImageStore(
             _PROJECT_ROOT / "calibrations" / "move_reference.npz"
         )
@@ -1737,7 +1745,7 @@ class CameraWindow(QMainWindow):
             "calibration patterns to the detected board."
         )
         self._adaptive_calibration_button.triggered.connect(
-            self._start_adaptive_projector_calibration
+            lambda: self._start_adaptive_projector_calibration()
         )
         self._quick_verify_button = QAction(
             "Quick realign / assess",
@@ -2569,7 +2577,7 @@ class CameraWindow(QMainWindow):
         self._projector_selector.setCurrentIndex(selected_index)
         self._projector_selector.setEnabled(bool(screens))
         self._projector_selector.blockSignals(False)
-        self._restore_saved_calibration()
+        self._request_startup_calibration()
 
     @staticmethod
     def _device_key(device: QCameraDevice) -> str:
@@ -2646,7 +2654,7 @@ class CameraWindow(QMainWindow):
         self._detection_status.setText(
             "Starting live preview. Take a snapshot to detect the board."
         )
-        self._restore_saved_calibration()
+        self._request_startup_calibration()
         self._restore_move_reference()
         self._record_runtime_diagnostic(
             "camera-started",
@@ -2888,25 +2896,33 @@ class CameraWindow(QMainWindow):
                 str(error),
             )
 
-    def _start_adaptive_projector_calibration(self) -> None:
+    def _start_adaptive_projector_calibration(
+        self,
+        *,
+        startup: bool = False,
+    ) -> bool:
         if self._latest_frame is None:
-            QMessageBox.warning(
-                self,
-                "Board-cropped calibration",
-                "No camera frame is available yet.",
-            )
-            return
+            if not startup:
+                QMessageBox.warning(
+                    self,
+                    "Board-cropped calibration",
+                    "No camera frame is available yet.",
+                )
+            return False
         if not self._open_projector():
-            return
+            return False
 
         self._suspend_selected_square()
         selected_index = self._projector_selector.currentIndex()
         screen_geometry = self._screens[selected_index].geometry()
         self._record_runtime_diagnostic(
             "calibration-start-requested",
-            "Board-cropped calibration requested.",
+            "Automatic startup calibration started."
+            if startup
+            else "Board-cropped calibration requested.",
             details={
                 "operation": "adaptive-board-cropped",
+                "startup": startup,
                 "previous_calibration_available": (
                     self._calibration_result is not None
                 ),
@@ -2920,11 +2936,14 @@ class CameraWindow(QMainWindow):
             )
         except (RuntimeError, ValueError) as error:
             self._projector_window.show_black()
-            QMessageBox.critical(
-                self,
-                "Board-cropped calibration",
-                str(error),
-            )
+            if not startup:
+                QMessageBox.critical(
+                    self,
+                    "Board-cropped calibration",
+                    str(error),
+                )
+            return False
+        return True
 
     def _start_quick_verification(self) -> None:
         result = self._calibration_result
@@ -3120,6 +3139,8 @@ class CameraWindow(QMainWindow):
         )
         if active:
             self._alignment_monitor.set_paused("projector calibration")
+            if not self._startup_calibration_running:
+                self._startup_calibration_pending = False
 
     def _cancel_projector_calibration(self) -> None:
         self._calibrator.cancel()
@@ -3129,11 +3150,19 @@ class CameraWindow(QMainWindow):
             "calibration-cancelled",
             "Projector calibration was cancelled.",
         )
+        if self._startup_calibration_running:
+            self._startup_calibration_running = False
+            CameraWindow._report_startup_calibration_failure(
+                self,
+                "Startup calibration was cancelled.",
+            )
 
     def _projector_calibration_completed(
         self,
         result: CalibrationResult,
     ) -> None:
+        startup = self._startup_calibration_running
+        self._startup_calibration_running = False
         self._activate_calibration_result(result)
         self._projector_window.show_black()
         self._projector_window.set_calibration_overlays_suppressed(False)
@@ -3178,6 +3207,8 @@ class CameraWindow(QMainWindow):
             "calibration-completed",
             self._projector_status.text(),
             details={
+                "startup": startup,
+                **self._calibrator.diagnostic_details,
                 "board_confidence": result.board_detection.confidence,
                 "board_method": result.board_detection.method,
                 "board_reprojection_error_pixels": (
@@ -3196,11 +3227,38 @@ class CameraWindow(QMainWindow):
                 ),
             },
             include_images=True,
+            additional_images={
+                f"calibration-{name}": image
+                for name, image in (
+                    self._calibrator.diagnostic_captures.items()
+                )
+                if name == "plane-support"
+            },
         )
 
     def _projector_calibration_failed(self, message: str) -> None:
         self._projector_window.set_calibration_overlays_suppressed(False)
         self._projector_window.show_black()
+        if self._startup_calibration_running:
+            self._startup_calibration_running = False
+            self._record_runtime_diagnostic(
+                "calibration-failed",
+                message,
+                details={
+                    "operation": "Startup calibration",
+                    "startup": True,
+                    **self._calibrator.diagnostic_details,
+                },
+                include_images=True,
+                additional_images={
+                    f"calibration-{name}": image
+                    for name, image in (
+                        self._calibrator.diagnostic_captures.items()
+                    )
+                },
+            )
+            CameraWindow._report_startup_calibration_failure(self, message)
+            return
         if self._calibrator.quick_verification:
             operation = "Quick realignment"
         elif self._calibrator.validation_only:
@@ -3226,10 +3284,18 @@ class CameraWindow(QMainWindow):
                 f"{operation} failed: {message} "
                 "The previous verified mapping was retained.",
             )
-            self._projector_status.setText(
+            status = (
                 f"{operation} failed: {message} The previous verified "
                 "mapping remains active."
             )
+            if self._calibrator.adaptive_cropped_mode:
+                map_shown = CameraWindow._show_calibration_support_map(self)
+                action = CameraWindow._calibration_failure_action(
+                    self,
+                    map_shown,
+                )
+                status = f"{status} {action}"
+            self._projector_status.setText(status)
             self._record_runtime_diagnostic(
                 "calibration-failed",
                 message,
@@ -3237,6 +3303,7 @@ class CameraWindow(QMainWindow):
                     "operation": operation,
                     "previous_calibration_retained": True,
                     "previous_calibration_invalidated": False,
+                    **self._calibrator.diagnostic_details,
                 },
                 include_images=True,
                 additional_images={
@@ -3300,6 +3367,7 @@ class CameraWindow(QMainWindow):
             details={
                 "operation": operation,
                 "previous_calibration_retained": False,
+                **self._calibrator.diagnostic_details,
             },
             include_images=True,
             additional_images={
@@ -3307,6 +3375,10 @@ class CameraWindow(QMainWindow):
                 for name, image in self._calibrator.diagnostic_captures.items()
             },
         )
+        if self._calibrator.adaptive_cropped_mode:
+            map_shown = CameraWindow._show_calibration_support_map(self)
+            action = CameraWindow._calibration_failure_action(self, map_shown)
+            message = f"{message} {action}"
         QMessageBox.warning(
             self,
             "Projector calibration failed",
@@ -8710,99 +8782,95 @@ class CameraWindow(QMainWindow):
                 "selected_index": self._projector_selector.currentIndex()
             },
         )
-        self._restore_saved_calibration()
+        self._request_startup_calibration()
 
-    def _restore_saved_calibration(self) -> None:
+    def _request_startup_calibration(self) -> None:
         if self._camera is None:
             return
         selected_index = self._projector_selector.currentIndex()
         if not 0 <= selected_index < len(self._screens):
+            self._startup_calibration_pending = False
             self._invalidate_calibration()
             self._projector_status.setText(
-                "No projector display is selected; startup checks wait for "
-                "a calibrated projector."
+                "No projector display is selected; startup calibration waits "
+                "for a projector."
             )
             self._record_runtime_diagnostic(
-                "saved-calibration-unavailable",
+                "startup-calibration-unavailable",
                 "No projector display is selected.",
                 details={"reason": "projector-unavailable"},
             )
             return
 
-        active_device = self._devices[self._active_device_index]
-        camera_resolution = self._camera.cameraFormat().resolution()
-        selected_screen = self._screens[selected_index]
-        projector_geometry = selected_screen.geometry()
-        try:
-            saved = self._calibration_store.load_for_projector(
-                camera_id=self._device_key(active_device),
-                camera_resolution=(
-                    camera_resolution.width(),
-                    camera_resolution.height(),
-                ),
-                projector_name=selected_screen.name(),
-                projector_resolution=(
-                    projector_geometry.width(),
-                    projector_geometry.height(),
-                ),
-            )
-        except (OSError, ValueError) as error:
-            self._invalidate_calibration()
-            self._projector_status.setText(
-                f"Saved calibration could not be loaded: {error} "
-                "Start a calibration to continue."
-            )
-            self._record_runtime_diagnostic(
-                "saved-calibration-load-failed",
-                str(error),
-            )
-            return
-        if saved is None:
-            self._invalidate_calibration()
-            self._projector_status.setText(
-                "No saved calibration matches the selected projector. "
-                "Start a calibration to continue."
-            )
-            self._record_runtime_diagnostic(
-                "saved-calibration-unavailable",
-                self._projector_status.text(),
-                details={"reason": "hardware-mismatch"},
-            )
-            return
-
-        occupied_squares = CameraWindow._recovery_occupied_squares(self)
-        self._activate_calibration_result(
-            saved.result,
-            live_verified=False,
-            camera_changed=not saved.camera_matches,
-            recovery_occupied_squares=occupied_squares,
-        )
+        self._invalidate_calibration()
+        self._startup_calibration_pending = True
+        self._startup_calibration_ready_at = None
         self._projector_status.setText(
-            "Loaded the saved calibration; verifying the live camera grid "
-            "before startup checks."
-            if saved.camera_matches
-            else "Loaded the saved projector calibration for a different "
-            "camera; recovering the camera grid before startup checks."
+            "Startup calibration starts when the camera image has settled; "
+            "pieces may stay on the board."
         )
         self._record_runtime_diagnostic(
-            "saved-calibration-loaded",
+            "startup-calibration-scheduled",
             self._projector_status.text(),
-            details={
-                "match": (
-                    "camera-and-projector"
-                    if saved.camera_matches
-                    else "projector-only"
-                ),
-                "recovery_occupied_squares": len(occupied_squares),
-            },
-            include_images=True,
         )
-        self._restore_remembered_square()
 
-    def _recovery_occupied_squares(self) -> frozenset[tuple[int, int]]:
-        return frozenset(
-            self._physical_board_square(row, column)
-            for row, column in self._piece_synchronizer.position
+    def _advance_startup_calibration(self) -> None:
+        if not self._startup_calibration_pending or self._calibrator.active:
+            return
+        now = monotonic()
+        if self._startup_calibration_ready_at is None:
+            self._startup_calibration_ready_at = (
+                now + _STARTUP_CALIBRATION_SETTLE_SECONDS
+            )
+            return
+        if now < self._startup_calibration_ready_at:
+            return
+        self._startup_calibration_pending = False
+        self._startup_calibration_running = True
+        if not self._start_adaptive_projector_calibration(startup=True):
+            self._startup_calibration_running = False
+            CameraWindow._report_startup_calibration_failure(
+                self,
+                "Startup calibration could not start.",
+            )
+
+    def _report_startup_calibration_failure(self, message: str) -> None:
+        self._invalidate_calibration()
+        self._set_calibration_indicator(
+            self._projector_calibration_indicator,
+            "Projector calibration",
+            "error",
+            message,
+        )
+        map_shown = CameraWindow._show_calibration_support_map(self)
+        action = CameraWindow._calibration_failure_action(self, map_shown)
+        self._projector_status.setText(
+            f"Startup calibration failed: {message} {action}"
+        )
+        self._record_runtime_diagnostic(
+            "startup-calibration-unavailable",
+            self._projector_status.text(),
+            details={"support_map_shown": map_shown},
+        )
+
+    def _show_calibration_support_map(self) -> bool:
+        pattern = self._calibrator.support_map
+        if pattern is None:
+            return False
+        self._projector_window.show_pattern(pattern)
+        return True
+
+    def _calibration_failure_action(self, map_shown: bool) -> str:
+        if not map_shown:
+            return _CALIBRATION_RETRY_ACTION
+        if self._calibrator.clearance_squares:
+            return (
+                "Green squares were usable. Remove the pieces from the red "
+                "squares, then start Board-cropped calibration again."
+            )
+        return (
+            "Green squares were usable for calibration. "
+            f"{_CALIBRATION_RETRY_ACTION}"
         )
 
     def _alignment_recovery_projection_requested(
@@ -8831,11 +8899,18 @@ class CameraWindow(QMainWindow):
             )
             return
         self._alignment_monitor.recovery_projection_shown()
-        if details.get("pattern") != "pattern" or details.get("attempt") != 1:
+        if not details.get("announce"):
             return
+        stage = details.get("stage")
         self._projector_status.setText(message)
         self._record_runtime_diagnostic(
-            "alignment-recovery-started",
+            "alignment-recovery-refining"
+            if stage == "fringe"
+            else (
+                "alignment-recovery-verifying"
+                if stage == "verify"
+                else "alignment-recovery-started"
+            ),
             message,
             details=details,
             include_images=True,
@@ -8900,7 +8975,15 @@ class CameraWindow(QMainWindow):
         self._set_calibration_indicator(
             self._camera_calibration_indicator,
             "Camera calibration (recovered: "
-            + ("board moved" if hypothesis == "board_moved" else "camera moved")
+            + (
+                "re-measured"
+                if details.get("refined")
+                else (
+                    "board moved"
+                    if hypothesis == "board_moved"
+                    else "camera moved"
+                )
+            )
             + ")",
             "ok",
             self._projector_status.text(),
@@ -8975,6 +9058,7 @@ class CameraWindow(QMainWindow):
         self._latest_frame = camera_frame.copy()
         self._alignment_monitor.accept_frame(self._latest_frame)
         self._calibrator.accept_frame(camera_frame)
+        CameraWindow._advance_startup_calibration(self)
         if not self._snapshot_visible:
             self._display_frame(camera_frame)
             self._detection_status.setText(

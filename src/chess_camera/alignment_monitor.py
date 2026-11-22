@@ -27,6 +27,7 @@ from .projector_calibration import (
 
 OutputMode = Literal["black", "selected", "recovery", "paused"]
 RecoveryHypothesisName = Literal["camera_moved", "board_moved"]
+BoolArray = np.ndarray[tuple[int, ...], np.dtype[np.bool_]]
 
 # Lit squares of the startup verification pattern, indexed by physical grid
 # row and column. Under every other board symmetry and every one-square shift
@@ -56,7 +57,26 @@ _RECOVERY_MINIMUM_MARGIN = 0.2
 _RECOVERY_RIVAL_SEPARATION = 0.25
 _RECOVERY_MINIMUM_SCORED_SQUARES = 16
 _RECOVERY_SAMPLE_OFFSETS = np.linspace(0.3, 0.7, 5, dtype=np.float32)
+_RECOVERY_ACCEPTED_RESIDUAL = 0.05
+_RECOVERY_RESPONSE_SATURATION = 2.5
+_RECOVERY_VERIFIED_RESIDUAL = 0.1
+_RECOVERY_FRINGE_STEPS = 4
+_RECOVERY_FRINGE_OFFSETS = np.linspace(0.2, 0.8, 7, dtype=np.float32)
+_RECOVERY_MINIMUM_MODULATION = 4.0
+_RECOVERY_MINIMUM_MODULATION_FRACTION = 0.15
+_RECOVERY_MINIMUM_VALID_SAMPLE_FRACTION = 0.5
+_RECOVERY_MINIMUM_REFINED_SQUARES = 8
+_RECOVERY_MINIMUM_REFINED_SPAN = 3
+_RECOVERY_MAXIMUM_FIT_ERROR = 0.08
+_RECOVERY_LOCAL_RADIUS = 1.5
+_RECOVERY_MINIMUM_LOCAL_SAMPLES = 10
 _ALL_SQUARES = tuple((row, column) for row in range(8) for column in range(8))
+# Offset measurement uses 7 x 7 cells shifted by half a square, so that every
+# pattern edge crosses the middle of a uniformly coloured board square.
+# Edges coinciding with board edges would be biased toward the darker square
+# by optical blur.
+_OFFSET_PATTERN = RECOVERY_PATTERN[:7, :7]
+_MINIMUM_OFFSET_CELLS = 8
 
 
 def _point_diagnostic(point: FloatArray) -> list[float]:
@@ -93,15 +113,26 @@ class _RecoveryState:
     displacement: float
     reason: str
     requested_at: float
-    inverted: bool = False
+    stage: str = "coarse"
+    queue: list[tuple[str, GrayImage]] = field(default_factory=list)
+    current: str | None = None
+    announce_pending: bool = False
     shown_at: float | None = None
     display_delays: list[float] = field(default_factory=list)
     attempts: int = 0
-    pattern_frame: GrayImage | None = None
-    inverse_frame: GrayImage | None = None
+    frames: dict[str, GrayImage] = field(default_factory=dict)
     last_response: FloatArray | None = None
     last_hypotheses: tuple[RecoveryHypothesis, ...] = ()
     last_error: str | None = None
+    selected: RecoveryHypothesis | None = None
+    board_camera_grid: FloatArray | None = None
+    candidate: CalibrationResult | None = None
+    measure_response: FloatArray | None = None
+    measured_residual: float | None = None
+    refinement: dict[str, object] | None = None
+    refinement_error: str | None = None
+    verify_response: FloatArray | None = None
+    verification: dict[str, object] | None = None
 
 
 def grid_symmetries(grid: FloatArray) -> tuple[FloatArray, ...]:
@@ -122,34 +153,90 @@ def _median_square_width(grid: FloatArray) -> float:
     )
 
 
+_RENDER_SUPERSAMPLING = 4
+_UNIT_SQUARE = np.asarray(((0, 0), (1, 0), (1, 1), (0, 1)), dtype=np.float32)
+
+
+def _render_squares(
+    shape: tuple[int, int],
+    grid: FloatArray,
+    values: FloatArray,
+) -> FloatArray:
+    """Render per-square values with exact, unbiased pixel coverage.
+
+    Each cell is mapped through the homography of its four grid corners and
+    supersampled, so neighbouring squares partition every pixel exactly.
+    """
+    height, width = shape
+    image = np.zeros(shape, dtype=np.float32)
+    steps = (np.arange(_RENDER_SUPERSAMPLING) + 0.5) / _RENDER_SUPERSAMPLING - 0.5
+    rows, columns = values.shape
+    for row in range(rows):
+        for column in range(columns):
+            value = float(values[row, column])
+            if value == 0:
+                continue
+            quad = np.asarray(
+                (
+                    grid[row, column],
+                    grid[row, column + 1],
+                    grid[row + 1, column + 1],
+                    grid[row + 1, column],
+                ),
+                dtype=np.float32,
+            )
+            left = max(0, int(np.floor(np.min(quad[:, 0]))) - 1)
+            top = max(0, int(np.floor(np.min(quad[:, 1]))) - 1)
+            right = min(width, int(np.ceil(np.max(quad[:, 0]))) + 2)
+            bottom = min(height, int(np.ceil(np.max(quad[:, 1]))) + 2)
+            if right <= left or bottom <= top:
+                continue
+            x_values = (
+                np.arange(left, right, dtype=np.float32)[:, None] + steps
+            ).reshape(-1)
+            y_values = (
+                np.arange(top, bottom, dtype=np.float32)[:, None] + steps
+            ).reshape(-1)
+            x_grid, y_grid = np.meshgrid(x_values, y_values)
+            local = _apply_homography(
+                cv2.getPerspectiveTransform(quad, _UNIT_SQUARE),
+                np.stack((x_grid, y_grid), axis=2),
+            )
+            inside = (
+                (local[..., 0] >= 0)
+                & (local[..., 0] < 1)
+                & (local[..., 1] >= 0)
+                & (local[..., 1] < 1)
+            )
+            coverage = inside.reshape(
+                bottom - top,
+                _RENDER_SUPERSAMPLING,
+                right - left,
+                _RENDER_SUPERSAMPLING,
+            ).mean(axis=(1, 3))
+            image[top:bottom, left:right] += value * coverage
+    return image
+
+
 def recovery_pattern_image(
     projector_grid: FloatArray,
     projector_size: tuple[int, int],
     *,
     inverted: bool,
+    offset: bool = False,
 ) -> GrayImage:
-    """Render the verification pattern, or its inverse, on the board grid."""
+    """Render the verification pattern, or its inverse, on the board grid.
+
+    The offset variant is shifted by half a square for offset measurement.
+    """
     width, height = projector_size
-    image = np.zeros((height, width), dtype=np.uint8)
-    lit = RECOVERY_PATTERN != inverted
-    for row, column in zip(*np.nonzero(lit), strict=True):
-        quad = np.asarray(
-            (
-                projector_grid[row, column],
-                projector_grid[row, column + 1],
-                projector_grid[row + 1, column + 1],
-                projector_grid[row + 1, column],
-            ),
-            dtype=np.float64,
-        )
-        cv2.fillConvexPoly(
-            image,
-            np.rint(quad * 16).astype(np.int32),
-            255,
-            lineType=cv2.LINE_AA,
-            shift=4,
-        )
-    return image
+    pattern = _OFFSET_PATTERN if offset else RECOVERY_PATTERN
+    corners = _offset_corners(projector_grid) if offset else projector_grid
+    lit = np.where(pattern != inverted, 255.0, 0.0)
+    return np.asarray(
+        np.rint(np.clip(_render_squares((height, width), corners, lit), 0, 255)),
+        dtype=np.uint8,
+    )
 
 
 def normalized_recovery_response(
@@ -179,40 +266,107 @@ def normalized_recovery_response(
     )
 
 
+def _bilinear(grid: FloatArray, board_points: FloatArray) -> FloatArray:
+    """Map cell coordinates (column, row) through a grid of cell corners."""
+    points = np.asarray(board_points, dtype=np.float64).reshape(-1, 2)
+    column = np.clip(np.floor(points[:, 0]), 0, grid.shape[1] - 2).astype(np.intp)
+    row = np.clip(np.floor(points[:, 1]), 0, grid.shape[0] - 2).astype(np.intp)
+    u = (points[:, 0] - column)[:, None]
+    v = (points[:, 1] - row)[:, None]
+    mapped = (
+        (1 - u) * (1 - v) * grid[row, column]
+        + u * (1 - v) * grid[row, column + 1]
+        + (1 - u) * v * grid[row + 1, column]
+        + u * v * grid[row + 1, column + 1]
+    )
+    return np.asarray(mapped, dtype=np.float32).reshape(
+        np.shape(board_points)
+    )
+
+
+def _square_samples(
+    squares: tuple[tuple[int, int], ...],
+    offsets: FloatArray,
+) -> FloatArray:
+    """Return board coordinates sampled inside each square, shape (n, m, 2)."""
+    indices = np.asarray(squares, dtype=np.float32)
+    u_values, v_values = np.meshgrid(offsets, offsets)
+    return np.stack(
+        (
+            indices[:, 1, None] + u_values.reshape(1, -1),
+            indices[:, 0, None] + v_values.reshape(1, -1),
+        ),
+        axis=2,
+    ).astype(np.float32)
+
+
+def _sample_image(image: FloatArray, points: FloatArray) -> FloatArray:
+    flat = np.asarray(points, dtype=np.float32).reshape(-1, 1, 2)
+    sampled = cv2.remap(
+        np.asarray(image, dtype=np.float32),
+        flat[..., 0],
+        flat[..., 1],
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0.0,
+    )
+    return np.asarray(sampled, dtype=np.float32).reshape(points.shape[:-1])
+
+
 def _score_grid(
     response: FloatArray,
     grid: FloatArray,
     squares: tuple[tuple[int, int], ...],
+    pattern: BoolArray = RECOVERY_PATTERN,
 ) -> float:
+    board = _square_samples(squares, _RECOVERY_SAMPLE_OFFSETS)
+    samples = _sample_image(response, _bilinear(grid, board))
     indices = np.asarray(squares, dtype=np.intp)
-    rows, columns = indices[:, 0], indices[:, 1]
-    top_left = grid[rows, columns][:, None, :]
-    top_right = grid[rows, columns + 1][:, None, :]
-    bottom_left = grid[rows + 1, columns][:, None, :]
-    bottom_right = grid[rows + 1, columns + 1][:, None, :]
-    u_values, v_values = np.meshgrid(
-        _RECOVERY_SAMPLE_OFFSETS,
-        _RECOVERY_SAMPLE_OFFSETS,
-    )
-    u = u_values.reshape(1, -1, 1)
-    v = v_values.reshape(1, -1, 1)
-    points = (
-        (1 - u) * (1 - v) * top_left
-        + u * (1 - v) * top_right
-        + (1 - u) * v * bottom_left
-        + u * v * bottom_right
-    )
-    x = np.rint(points[..., 0]).astype(np.intp)
-    y = np.rint(points[..., 1]).astype(np.intp)
-    height, width = response.shape
-    inside = (x >= 0) & (x < width) & (y >= 0) & (y < height)
-    samples = np.where(
-        inside,
-        response[np.clip(y, 0, height - 1), np.clip(x, 0, width - 1)],
-        0.0,
-    )
-    signs = np.where(RECOVERY_PATTERN[rows, columns], 1.0, -1.0)
+    signs = np.where(pattern[indices[:, 0], indices[:, 1]], 1.0, -1.0)
     return float(np.mean(signs * np.median(samples, axis=1)))
+
+
+def _offset_corners(grid: FloatArray) -> FloatArray:
+    """Return the 8 x 8 corners of the half-square-offset cells."""
+    rows, columns = np.mgrid[0:8, 0:8]
+    board = np.stack((columns + 0.5, rows + 0.5), axis=2).astype(np.float32)
+    return _bilinear(grid, board)
+
+
+def _offset_cells(
+    squares: tuple[tuple[int, int], ...],
+) -> tuple[tuple[int, int], ...]:
+    """Return offset cells lying entirely on the given squares."""
+    scored = set(squares)
+    cells = tuple(
+        (row, column)
+        for row in range(7)
+        for column in range(7)
+        if {
+            (row, column),
+            (row, column + 1),
+            (row + 1, column),
+            (row + 1, column + 1),
+        }
+        <= scored
+    )
+    if len(cells) < _MINIMUM_OFFSET_CELLS:
+        return tuple((row, column) for row in range(7) for column in range(7))
+    return cells
+
+
+def offset_pattern_score(
+    response: FloatArray,
+    grid: FloatArray,
+    squares: tuple[tuple[int, int], ...] = _ALL_SQUARES,
+) -> float:
+    """Score the offset measurement pattern predicted on a board grid."""
+    return _score_grid(
+        response,
+        _offset_corners(grid),
+        _offset_cells(squares),
+        _OFFSET_PATTERN,
+    )
 
 
 def score_recovery_hypotheses(
@@ -272,6 +426,307 @@ def select_recovery_hypothesis(
         ):
             return None
     return best
+
+
+def _apply_homography(homography: FloatArray, points: FloatArray) -> FloatArray:
+    flat = np.asarray(points, dtype=np.float64).reshape(-1, 1, 2)
+    mapped = cv2.perspectiveTransform(flat, np.asarray(homography, np.float64))
+    return np.asarray(mapped, dtype=np.float32).reshape(np.shape(points))
+
+
+def _pattern_template(
+    shape: tuple[int, int],
+    grid: FloatArray,
+    squares: tuple[tuple[int, int], ...],
+) -> tuple[FloatArray, ImageArray]:
+    corners = _offset_corners(grid)
+    template = _render_squares(
+        shape,
+        corners,
+        np.where(_OFFSET_PATTERN, 1.0, -1.0),
+    )
+    scored = np.zeros(_OFFSET_PATTERN.shape, dtype=np.float32)
+    for row, column in _offset_cells(squares):
+        scored[row, column] = 1.0
+    mask = np.where(_render_squares(shape, corners, scored) >= 0.5, 255, 0)
+    return template, mask.astype(np.uint8)
+
+def measure_pattern_offset(
+    response: FloatArray,
+    predicted_grid: FloatArray,
+    squares: tuple[tuple[int, int], ...] = _ALL_SQUARES,
+) -> FloatArray:
+    """Return the homography moving predicted pattern points to measured ones.
+
+    The predicted offset-pattern template is registered onto the normalized
+    response by enhanced-correlation alignment, restricted to cells lying on
+    the scored squares.
+    """
+    width = _median_square_width(predicted_grid)
+    points = predicted_grid.reshape(-1, 2)
+    height_limit, width_limit = response.shape
+    left = int(max(0, np.floor(np.min(points[:, 0]) - width)))
+    top = int(max(0, np.floor(np.min(points[:, 1]) - width)))
+    right = int(min(width_limit, np.ceil(np.max(points[:, 0]) + width)))
+    bottom = int(min(height_limit, np.ceil(np.max(points[:, 1]) + width)))
+    if right - left < 8 or bottom - top < 8:
+        raise CalibrationError("The predicted pattern lies outside the image.")
+    origin = np.asarray([left, top], dtype=np.float32)
+    template, mask = _pattern_template(
+        (bottom - top, right - left),
+        predicted_grid - origin,
+        squares,
+    )
+    # The normalized response is brightness independent, so faint light just
+    # outside the lit region reads as full strength and biases the outer
+    # boundary of the scored region; only edges inside it are registered.
+    sigma = max(1.0, 0.05 * width)
+    margin = max(2, round(2 * sigma))
+    mask = cv2.erode(mask, np.ones((2 * margin + 1, 2 * margin + 1), np.uint8))
+    template = cv2.GaussianBlur(template, (0, 0), sigma)
+    # Saturation equalizes the reflectance-dependent response magnitude of
+    # light and dark board squares without moving the pattern edges.
+    measured = cv2.GaussianBlur(
+        np.clip(
+            np.asarray(response[top:bottom, left:right], dtype=np.float32)
+            * _RECOVERY_RESPONSE_SATURATION,
+            -1.0,
+            1.0,
+        ),
+        (0, 0),
+        sigma,
+    )
+    warp = np.eye(2, 3, dtype=np.float32)
+    try:
+        _correlation, warp = cv2.findTransformECC(
+            template,
+            measured,
+            warp,
+            cv2.MOTION_AFFINE,
+            (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 200, 1e-6),
+            mask,
+            1,
+        )
+    except cv2.error as error:
+        raise CalibrationError(
+            f"The verification pattern could not be registered: {error}"
+        ) from error
+    shift = np.asarray(
+        [[1, 0, left], [0, 1, top], [0, 0, 1]],
+        dtype=np.float64,
+    )
+    return np.asarray(
+        shift
+        @ np.vstack((np.asarray(warp, np.float64), (0.0, 0.0, 1.0)))
+        @ np.linalg.inv(shift),
+        dtype=np.float64,
+    )
+
+
+def pattern_offset_fraction(
+    warp: FloatArray,
+    predicted_grid: FloatArray,
+    squares: tuple[tuple[int, int], ...] = _ALL_SQUARES,
+) -> float:
+    """Return the largest displacement of a scored square corner in squares."""
+    corners = {
+        (row + down, column + right)
+        for row, column in squares
+        for down in (0, 1)
+        for right in (0, 1)
+    }
+    indices = np.asarray(sorted(corners), dtype=np.intp)
+    points = predicted_grid[indices[:, 0], indices[:, 1]]
+    moved = _apply_homography(warp, points)
+    return float(
+        np.max(np.linalg.norm(moved - points, axis=1))
+    ) / _median_square_width(predicted_grid)
+
+
+def corrected_projector_grid(
+    predicted_grid: FloatArray,
+    rendered_projector_grid: FloatArray,
+    board_camera_grid: FloatArray,
+    hypothesis_projector_grid: FloatArray,
+    warp: FloatArray,
+) -> FloatArray:
+    """Correct a hypothesis mapping by the measured pattern offset.
+
+    The hypothesis predicted rendered projector points at predicted camera
+    points; the warp says where they really appeared. The board's projector
+    point is where the hypothesis would place the unwarped camera point.
+    """
+    hypothesis_homography, _mask = cv2.findHomography(
+        predicted_grid.reshape(-1, 2),
+        rendered_projector_grid.reshape(-1, 2),
+        method=0,
+    )
+    if hypothesis_homography is None:
+        raise CalibrationError("The hypothesis mapping could not be fitted.")
+    unwarped = _apply_homography(np.linalg.inv(warp), board_camera_grid)
+    return np.asarray(
+        hypothesis_projector_grid
+        + _apply_homography(hypothesis_homography, unwarped)
+        - _apply_homography(hypothesis_homography, board_camera_grid),
+        dtype=np.float32,
+    )
+
+
+def _projector_to_board_homography(projector_grid: FloatArray) -> FloatArray:
+    rows, columns = np.mgrid[0:9, 0:9]
+    board = np.stack((columns, rows), axis=2).astype(np.float32)
+    homography, _mask = cv2.findHomography(
+        projector_grid.reshape(-1, 2),
+        board.reshape(-1, 2),
+        method=0,
+    )
+    if homography is None:
+        raise CalibrationError("The projector board grid is degenerate.")
+    return np.asarray(homography, dtype=np.float64)
+
+
+def recovery_fringe_image(
+    projector_grid: FloatArray,
+    projector_size: tuple[int, int],
+    axis: int,
+    step: int,
+) -> GrayImage:
+    """Render one phase-shifted fringe with a period of one board square.
+
+    Axis 0 varies along board columns and axis 1 along board rows.
+    """
+    width, height = projector_size
+    homography = _projector_to_board_homography(projector_grid)
+    x_values, y_values = np.meshgrid(
+        np.arange(width, dtype=np.float32),
+        np.arange(height, dtype=np.float32),
+    )
+    board = _apply_homography(
+        homography,
+        np.stack((x_values, y_values), axis=2),
+    )
+    phase = 2 * np.pi * board[..., axis] + step * np.pi / 2
+    mask = np.zeros((height, width), dtype=np.uint8)
+    hull = cv2.convexHull(
+        np.rint(projector_grid.reshape(-1, 2)).astype(np.int32)
+    )
+    cv2.fillConvexPoly(mask, hull, 1)
+    return np.asarray(
+        np.rint(127.5 + 127.5 * np.cos(phase)) * mask,
+        dtype=np.uint8,
+    )
+
+
+def refine_projector_grid(
+    black: GrayImage,
+    fringes: dict[tuple[int, int], GrayImage],
+    board_camera_grid: FloatArray,
+    rendered_projector_grid: FloatArray,
+    squares: tuple[tuple[int, int], ...] = _ALL_SQUARES,
+) -> tuple[FloatArray, dict[str, object]]:
+    """Measure the board's projector grid from decoded fringe phases."""
+    to_board = _projector_to_board_homography(rendered_projector_grid)
+    to_projector = np.linalg.inv(to_board)
+    board = _square_samples(squares, _RECOVERY_FRINGE_OFFSETS)
+    camera_points = _bilinear(board_camera_grid, board)
+    prior = _apply_homography(
+        to_board,
+        _bilinear(rendered_projector_grid, board),
+    )
+    black_samples = _sample_image(
+        cv2.GaussianBlur(black.astype(np.float32), (0, 0), 1.0),
+        camera_points,
+    )
+    decoded = np.zeros_like(board)
+    valid = np.ones(board.shape[:2], dtype=bool)
+    for axis in (0, 1):
+        samples = [
+            _sample_image(
+                cv2.GaussianBlur(
+                    fringes[(axis, step)].astype(np.float32),
+                    (0, 0),
+                    1.0,
+                ),
+                camera_points,
+            )
+            for step in range(_RECOVERY_FRINGE_STEPS)
+        ]
+        sine = samples[3] - samples[1]
+        cosine = samples[0] - samples[2]
+        modulation = 0.5 * np.hypot(sine, cosine)
+        brightness = np.mean(samples, axis=0) - black_samples
+        valid &= (modulation >= _RECOVERY_MINIMUM_MODULATION) & (
+            modulation >= _RECOVERY_MINIMUM_MODULATION_FRACTION * brightness
+        )
+        fraction = np.mod(np.arctan2(sine, cosine) / (2 * np.pi), 1.0)
+        expected = prior[..., axis]
+        decoded[..., axis] = (
+            expected + np.mod(fraction - expected + 0.5, 1.0) - 0.5
+        )
+    square_valid = (
+        np.mean(valid, axis=1) >= _RECOVERY_MINIMUM_VALID_SAMPLE_FRACTION
+    )
+    valid &= square_valid[:, None]
+    refined_squares = np.asarray(squares)[square_valid]
+    details: dict[str, object] = {
+        "squares": int(np.count_nonzero(square_valid)),
+        "samples": int(np.count_nonzero(valid)),
+    }
+    if (
+        len(refined_squares) < _RECOVERY_MINIMUM_REFINED_SQUARES
+        or np.ptp(refined_squares[:, 0]) + 1 < _RECOVERY_MINIMUM_REFINED_SPAN
+        or np.ptp(refined_squares[:, 1]) + 1 < _RECOVERY_MINIMUM_REFINED_SPAN
+    ):
+        raise CalibrationError(
+            "Fringe refinement found too few usable empty squares "
+            f"({details['squares']})."
+        )
+    board_points = board[valid]
+    projector_points = _apply_homography(to_projector, decoded[valid])
+    projector_width = _median_square_width(rendered_projector_grid)
+    homography, inliers = cv2.findHomography(
+        board_points,
+        projector_points,
+        cv2.RANSAC,
+        0.1 * projector_width,
+    )
+    if homography is None or inliers is None:
+        raise CalibrationError("The fringe correspondences could not be fitted.")
+    inlier = inliers.reshape(-1).astype(bool)
+    residuals = projector_points - _apply_homography(homography, board_points)
+    fit_error = float(
+        np.median(np.linalg.norm(residuals[inlier], axis=1))
+    ) / projector_width
+    details["inlier_fraction"] = round(float(np.mean(inlier)), 3)
+    details["fit_error_square_fraction"] = round(fit_error, 4)
+    if fit_error > _RECOVERY_MAXIMUM_FIT_ERROR:
+        raise CalibrationError(
+            f"Fringe refinement fit error is {fit_error:.1%} of a square."
+        )
+    rows, columns = np.mgrid[0:9, 0:9]
+    corners = np.stack((columns, rows), axis=2).astype(np.float32)
+    refined = _apply_homography(homography, corners)
+    inlier_board = board_points[inlier]
+    inlier_residuals = residuals[inlier]
+    for row in range(9):
+        for column in range(9):
+            near = (
+                np.linalg.norm(inlier_board - corners[row, column], axis=1)
+                <= _RECOVERY_LOCAL_RADIUS
+            )
+            if np.count_nonzero(near) >= _RECOVERY_MINIMUM_LOCAL_SAMPLES:
+                refined[row, column] += np.median(
+                    inlier_residuals[near],
+                    axis=0,
+                )
+    details["change_square_fraction"] = round(
+        float(
+            np.max(np.linalg.norm(refined - rendered_projector_grid, axis=2))
+        )
+        / projector_width,
+        4,
+    )
+    return np.asarray(refined, dtype=np.float32), details
 
 
 def camera_moved_mapping(
@@ -735,7 +1190,10 @@ class AlignmentMonitor(QObject):
         self._generation += 1
         self._check_running = False
         self._output_mode = "recovery"
-        self._request_recovery_pattern(inverted=False)
+        self._queue_recovery_patterns(
+            "coarse",
+            self._result.mapping.projector_grid,
+        )
 
     def _recovery_scored_squares(self) -> tuple[tuple[int, int], ...]:
         empty = tuple(
@@ -747,46 +1205,106 @@ class AlignmentMonitor(QObject):
             return _ALL_SQUARES
         return empty
 
-    def _request_recovery_pattern(self, *, inverted: bool) -> None:
+    def _recovery_message(self, stage: str) -> str:
         state = self._recovery
-        if state is None or self._result is None:
+        if stage == "fringe":
+            return (
+                "The verification pattern is offset from the predicted "
+                "position; projecting fringes to re-measure the alignment."
+            )
+        if stage == "verify":
+            return "Checking the recovered alignment with the verification pattern."
+        if self._camera_changed:
+            return (
+                "The saved calibration belongs to a different camera; "
+                "projecting a verification pattern to recover the camera grid."
+            )
+        displacement = 0.0 if state is None else state.displacement
+        return (
+            f"The live camera grid differs by {displacement:.1f} px from the "
+            "saved calibration; projecting a verification pattern to "
+            "determine whether the camera or the board moved."
+        )
+
+    def _queue_recovery_patterns(
+        self,
+        stage: str,
+        projector_grid: FloatArray,
+    ) -> None:
+        state = self._recovery
+        if state is None:
             return
-        state.inverted = inverted
+        state.stage = stage
+        state.announce_pending = (
+            stage == "verify" or (stage == "coarse" and state.attempts == 0)
+        )
+        prefix = "" if stage == "coarse" else f"{stage}-"
+        state.queue = [
+            (
+                f"{prefix}{'inverse' if inverted else 'pattern'}",
+                recovery_pattern_image(
+                    projector_grid,
+                    self._projector_size,
+                    inverted=inverted,
+                    offset=stage != "coarse",
+                ),
+            )
+            for inverted in (False, True)
+        ]
+        self._request_next_recovery_projection()
+
+    def _queue_recovery_fringes(self, projector_grid: FloatArray) -> None:
+        state = self._recovery
+        if state is None:
+            return
+        state.stage = "fringe"
+        state.announce_pending = True
+        state.queue = [
+            (
+                f"fringe-{axis}-{step}",
+                recovery_fringe_image(
+                    projector_grid,
+                    self._projector_size,
+                    axis,
+                    step,
+                ),
+            )
+            for axis in (0, 1)
+            for step in range(_RECOVERY_FRINGE_STEPS)
+        ]
+        self._request_next_recovery_projection()
+
+    def _request_next_recovery_projection(self) -> None:
+        state = self._recovery
+        if state is None or not state.queue:
+            return
+        announce = state.announce_pending
+        state.announce_pending = False
+        key, image = state.queue.pop(0)
+        state.current = key
         state.shown_at = None
         state.requested_at = self._clock()
-        pattern = recovery_pattern_image(
-            self._result.mapping.projector_grid,
-            self._projector_size,
-            inverted=inverted,
-        )
-        message = (
-            "The saved calibration belongs to a different camera; projecting "
-            "a verification pattern to recover the camera grid."
-            if self._camera_changed
-            else (
-                f"The live camera grid differs by {state.displacement:.1f} px "
-                "from the saved calibration; projecting a verification "
-                "pattern to determine whether the camera or the board moved."
-            )
-        )
-        if not inverted and state.attempts == 0:
+        message = self._recovery_message(state.stage)
+        if announce:
             self.status_changed.emit(message)
         self.recovery_projection_requested.emit(
-            pattern,
+            image,
             message,
             {
                 "reason": state.reason,
                 "displacement_pixels": round(state.displacement, 2),
-                "pattern": "inverse" if inverted else "pattern",
+                "stage": state.stage,
+                "pattern": key,
                 "attempt": state.attempts + 1,
                 "scored_squares": len(self._recovery_scored_squares()),
                 "board_moved_tested": not self._camera_changed,
+                "announce": announce,
             },
         )
 
     def _check_recovery(self, frame: ImageArray) -> None:
         state = self._recovery
-        if state is None or self._result is None:
+        if state is None or self._result is None or state.current is None:
             return
         captured_at = self._check_started_at
         if state.shown_at is None:
@@ -807,25 +1325,35 @@ class AlignmentMonitor(QObject):
                 "The camera image size changed during alignment recovery."
             )
             return
-        if not state.inverted:
-            state.pattern_frame = captured
-            self._request_recovery_pattern(inverted=True)
+        state.frames[state.current] = captured
+        if state.queue:
+            self._request_next_recovery_projection()
             return
-        state.inverse_frame = captured
+        if state.stage == "coarse":
+            self._finish_coarse_recovery()
+        elif state.stage == "measure":
+            self._finish_measure_recovery()
+        elif state.stage == "fringe":
+            self._finish_fringe_recovery()
+        else:
+            self._finish_verify_recovery()
+
+    def _finish_coarse_recovery(self) -> None:
+        state = self._recovery
+        if state is None or self._result is None:
+            return
         state.attempts += 1
-        if state.pattern_frame is None:
-            self._request_recovery_pattern(inverted=False)
-            return
+        squares = self._recovery_scored_squares()
         response = normalized_recovery_response(
             state.black_reference,
-            state.pattern_frame,
-            state.inverse_frame,
+            state.frames["pattern"],
+            state.frames["inverse"],
         )
         hypotheses = score_recovery_hypotheses(
             response,
             state.detection.grid_points,
             None if self._camera_changed else state.old_camera_grid,
-            self._recovery_scored_squares(),
+            squares,
         )
         state.last_response = response
         state.last_hypotheses = hypotheses
@@ -840,8 +1368,12 @@ class AlignmentMonitor(QObject):
             if state.attempts >= _RECOVERY_MAXIMUM_ATTEMPTS:
                 self._fail_recovery(state.last_error)
             else:
-                self._request_recovery_pattern(inverted=False)
+                self._queue_recovery_patterns(
+                    "coarse",
+                    self._result.mapping.projector_grid,
+                )
             return
+        state.selected = selected
 
         try:
             if selected.name == "camera_moved":
@@ -863,16 +1395,195 @@ class AlignmentMonitor(QObject):
         except (CalibrationError, ValueError) as error:
             self._fail_recovery(f"The recovered mapping is invalid: {error}")
             return
-
-        result = CalibrationResult(
+        state.detection = detection
+        state.board_camera_grid = detection.grid_points.copy()
+        hypothesis = CalibrationResult(
             board_detection=detection,
             mapping=mapping,
             validation=self._result.validation,
         )
+        state.candidate = hypothesis
+        self._queue_recovery_patterns("measure", mapping.projector_grid)
+
+    def _finish_measure_recovery(self) -> None:
+        state = self._recovery
+        if (
+            state is None
+            or state.candidate is None
+            or state.board_camera_grid is None
+        ):
+            return
+        hypothesis = state.candidate
+        response = normalized_recovery_response(
+            state.black_reference,
+            state.frames["measure-pattern"],
+            state.frames["measure-inverse"],
+        )
+        state.measure_response = response
+        warp: FloatArray | None = None
+        try:
+            warp = measure_pattern_offset(
+                response,
+                state.board_camera_grid,
+                self._recovery_scored_squares(),
+            )
+            state.measured_residual = pattern_offset_fraction(
+                warp,
+                state.board_camera_grid,
+                self._recovery_scored_squares(),
+            )
+        except CalibrationError as error:
+            state.last_error = str(error)
+        if (
+            state.measured_residual is not None
+            and state.measured_residual <= _RECOVERY_ACCEPTED_RESIDUAL
+        ):
+            self._complete_recovery(hypothesis, refined=False)
+            return
+        if warp is not None:
+            try:
+                state.candidate = self._with_projector_grid(
+                    hypothesis,
+                    corrected_projector_grid(
+                        state.board_camera_grid,
+                        hypothesis.mapping.projector_grid,
+                        state.board_camera_grid,
+                        hypothesis.mapping.projector_grid,
+                        warp,
+                    ),
+                )
+            except CalibrationError as error:
+                state.last_error = str(error)
+        self._queue_recovery_fringes(state.candidate.mapping.projector_grid)
+
+    def _finish_fringe_recovery(self) -> None:
+        state = self._recovery
+        if (
+            state is None
+            or state.candidate is None
+            or state.board_camera_grid is None
+        ):
+            return
+        try:
+            grid, refinement = refine_projector_grid(
+                state.black_reference,
+                {
+                    (axis, step): state.frames[f"fringe-{axis}-{step}"]
+                    for axis in (0, 1)
+                    for step in range(_RECOVERY_FRINGE_STEPS)
+                },
+                state.board_camera_grid,
+                state.candidate.mapping.projector_grid,
+                self._recovery_scored_squares(),
+            )
+            state.refinement = refinement
+            state.candidate = self._with_projector_grid(state.candidate, grid)
+        except CalibrationError as error:
+            state.refinement_error = str(error)
+        self._queue_recovery_patterns(
+            "verify",
+            state.candidate.mapping.projector_grid,
+        )
+
+    def _finish_verify_recovery(self) -> None:
+        state = self._recovery
+        if (
+            state is None
+            or state.candidate is None
+            or state.board_camera_grid is None
+        ):
+            return
+        squares = self._recovery_scored_squares()
+        response = normalized_recovery_response(
+            state.black_reference,
+            state.frames["verify-pattern"],
+            state.frames["verify-inverse"],
+        )
+        state.verify_response = response
+        score = offset_pattern_score(response, state.board_camera_grid, squares)
+        residual: float | None = None
+        try:
+            residual = pattern_offset_fraction(
+                measure_pattern_offset(
+                    response,
+                    state.board_camera_grid,
+                    squares,
+                ),
+                state.board_camera_grid,
+                squares,
+            )
+        except CalibrationError as error:
+            state.last_error = str(error)
+        state.verification = {
+            "score": round(score, 3),
+            "residual_square_fraction": (
+                None if residual is None else round(residual, 4)
+            ),
+        }
+        if score < _RECOVERY_MINIMUM_SCORE or (
+            residual is None or residual > _RECOVERY_VERIFIED_RESIDUAL
+        ):
+            offset = "unmeasured" if residual is None else f"{residual:.0%}"
+            self._fail_recovery(
+                "The re-measured alignment failed the final check (score "
+                f"{score:.2f}, offset {offset} of a square)."
+            )
+            return
+        self._complete_recovery(state.candidate, refined=True)
+
+    def _with_projector_grid(
+        self,
+        result: CalibrationResult,
+        projector_grid: FloatArray,
+    ) -> CalibrationResult:
+        grid = np.asarray(projector_grid, dtype=np.float32)
+        width, height = self._projector_size
+        if (
+            not np.all(np.isfinite(grid))
+            or np.any(grid < -0.5)
+            or np.any(grid[..., 0] > width - 0.5)
+            or np.any(grid[..., 1] > height - 0.5)
+        ):
+            raise CalibrationError(
+                "The re-measured board grid lies outside the projector image."
+            )
+        camera_grid = result.mapping.camera_grid
+        homography, _mask = cv2.findHomography(
+            camera_grid.reshape(-1, 2),
+            grid.reshape(-1, 2),
+            method=0,
+        )
+        if homography is None:
+            raise CalibrationError(
+                "The camera-to-projector homography could not be refitted."
+            )
+        return replace(
+            result,
+            mapping=replace(
+                result.mapping,
+                projector_grid=grid.copy(),
+                camera_to_projector_homography=np.asarray(
+                    homography,
+                    dtype=result.mapping.camera_to_projector_homography.dtype,
+                ),
+            ),
+        )
+
+    def _complete_recovery(
+        self,
+        result: CalibrationResult,
+        *,
+        refined: bool,
+    ) -> None:
+        state = self._recovery
+        if state is None or state.selected is None:
+            return
+        selected = state.selected
         details = self._recovery_details(state, selected)
+        details["refined"] = refined
         images = self._recovery_images(state)
         self._result = result
-        self._tracker.reset(detection)
+        self._tracker.reset(result.board_detection)
         self._recovery = None
         self._startup_verification_pending = False
         self._camera_changed = False
@@ -889,10 +1600,16 @@ class AlignmentMonitor(QObject):
             if selected.name == "camera_moved"
             else "the board moved"
         )
-        message = (
-            f"Alignment recovered: {description}; verification pattern score "
-            f"{selected.score:.2f}."
-        )
+        if refined and state.verification is not None:
+            message = (
+                f"Alignment recovered: re-measured after {description}; "
+                f"final check score {state.verification['score']:.2f}."
+            )
+        else:
+            message = (
+                f"Alignment recovered: {description}; verification pattern "
+                f"score {selected.score:.2f}."
+            )
         self.status_changed.emit(message)
         self.recovery_completed.emit(result, message, details, images)
 
@@ -901,7 +1618,7 @@ class AlignmentMonitor(QObject):
         details: dict[str, object] = {}
         images: dict[str, ImageArray] = {}
         if state is not None:
-            details = self._recovery_details(state, None)
+            details = self._recovery_details(state, state.selected)
             images = self._recovery_images(state)
         self._timer.stop()
         self._result = None
@@ -923,6 +1640,7 @@ class AlignmentMonitor(QObject):
             "reason": state.reason,
             "displacement_pixels": round(state.displacement, 2),
             "attempts": state.attempts,
+            "stage": state.stage,
             "scored_squares": len(self._recovery_scored_squares()),
             "minimum_score": _RECOVERY_MINIMUM_SCORE,
             "minimum_margin": _RECOVERY_MINIMUM_MARGIN,
@@ -934,6 +1652,15 @@ class AlignmentMonitor(QObject):
                 hypothesis.diagnostic() for hypothesis in state.last_hypotheses
             ],
             "selected": None if selected is None else selected.diagnostic(),
+            "measured_residual_square_fraction": (
+                None
+                if state.measured_residual is None
+                else round(state.measured_residual, 4)
+            ),
+            "accepted_residual_square_fraction": _RECOVERY_ACCEPTED_RESIDUAL,
+            "refinement": state.refinement,
+            "refinement_error": state.refinement_error,
+            "verification": state.verification,
         }
 
     @staticmethod
@@ -941,16 +1668,23 @@ class AlignmentMonitor(QObject):
         images: dict[str, ImageArray] = {
             "recovery-black": state.black_reference,
         }
-        if state.pattern_frame is not None:
-            images["recovery-pattern"] = state.pattern_frame
-        if state.inverse_frame is not None:
-            images["recovery-inverse"] = state.inverse_frame
-        if state.last_response is not None:
-            images["recovery-response"] = np.clip(
-                state.last_response * 127 + 128,
-                0,
-                255,
-            ).astype(np.uint8)
+        for key, name in (
+            ("pattern", "recovery-pattern"),
+            ("inverse", "recovery-inverse"),
+            ("fringe-0-0", "recovery-fringe-columns"),
+            ("fringe-1-0", "recovery-fringe-rows"),
+        ):
+            if key in state.frames:
+                images[name] = state.frames[key]
+        for response, name in (
+            (state.last_response, "recovery-response"),
+            (state.measure_response, "recovery-measure-response"),
+            (state.verify_response, "recovery-verify-response"),
+        ):
+            if response is not None:
+                images[name] = np.clip(response * 127 + 128, 0, 255).astype(
+                    np.uint8
+                )
         return images
 
     @Slot(int, str)

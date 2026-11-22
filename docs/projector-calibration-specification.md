@@ -549,10 +549,12 @@ After calibration is completed or restored, the application:
    submitting, and illegal-correction move states retain priority until their
    outcome is handled.
 5. Commits the pending remap at the next safe move-tracking boundary, or after
-   a bounded delay when no move outcome is active, and immediately redraws any
-   active square. Genuine whole-board movement therefore remains automatic,
-   while repeated detector fits cannot continually erase physical-move
-   evidence.
+   a bounded delay when no move outcome is active, and immediately repaints
+   every active board-relative projector element with the updated grid,
+   including clocks, results, move guidance, turn indicators, reconciliation
+   marks, and any active square. Genuine whole-board movement therefore
+   remains automatic, while repeated detector fits cannot continually erase
+   physical-move evidence.
 6. Transfers the calibrated local correction field to the moved board using a
    smooth quadratic camera-space model.
 7. Geometrically warps the stored black reference with the board motion.

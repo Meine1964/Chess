@@ -224,9 +224,11 @@ def test_monitor_skips_optical_check_for_occupied_square() -> None:
 
 def _scene(
     board_grid: np.ndarray,
-    light_grid: np.ndarray | None,
-    inverted: bool = False,
+    projected: np.ndarray | None = None,
+    camera_shift: float = 0.0,
+    occupied: frozenset[tuple[int, int]] = frozenset(),
 ) -> np.ndarray:
+    """Render the board lit by a projector image shifted into the camera."""
     reflectance = np.full((100, 100), 0.5, dtype=np.float32)
     for row in range(8):
         for column in range(8):
@@ -238,16 +240,19 @@ def _scene(
                     board_grid[row + 1, column],
                 ]
             ).astype(np.int32)
-            cv2.fillConvexPoly(
-                reflectance,
-                quad,
-                0.9 if (row + column) % 2 == 0 else 0.3,
-            )
+            value = 0.9 if (row + column) % 2 == 0 else 0.3
+            if (row, column) in occupied:
+                value = 0.05
+            cv2.fillConvexPoly(reflectance, quad, value)
     light = np.zeros((100, 100), dtype=np.float32)
-    if light_grid is not None:
+    if projected is not None:
         light = (
-            recovery_pattern_image(light_grid, (100, 100), inverted=inverted)
-            .astype(np.float32)
+            cv2.warpAffine(
+                projected.astype(np.float32),
+                np.asarray([[1, 0, camera_shift], [0, 1, 0]], np.float32),
+                (100, 100),
+                flags=cv2.INTER_LINEAR,
+            )
             * 0.8
         )
     gray = np.clip((40 + light) * reflectance, 0, 255).astype(np.uint8)
@@ -304,7 +309,7 @@ def _recovering_monitor(
     monitor._check_completed(
         monitor._generation,
         live,
-        _scene(live.grid_points, None),
+        _scene(live.grid_points),
     )
     return monitor, events, clock
 
@@ -323,15 +328,20 @@ def _check_at(
 
 def _drive_recovery(
     monitor: AlignmentMonitor,
+    events: dict[str, list[object]],
     clock: _Clock,
     detection: BoardDetection,
     board_grid: np.ndarray,
-    light_grid: np.ndarray | None,
+    camera_shift: float | None,
+    *,
+    occupied: frozenset[tuple[int, int]] = frozenset(),
+    dark_stages: frozenset[str] = frozenset(),
 ) -> None:
-    for _step in range(8):
-        state = monitor._recovery
-        if state is None:
+    for _step in range(20):
+        if monitor._recovery is None:
             return
+        projected, details = events["requested"][-1]
+        lit = camera_shift is not None and details["stage"] not in dark_stages
         clock.now += 0.1
         monitor.recovery_projection_shown()
         _check_at(
@@ -339,7 +349,12 @@ def _drive_recovery(
             clock,
             clock.now + 0.6,
             detection,
-            _scene(board_grid, light_grid, state.inverted),
+            _scene(
+                board_grid,
+                projected if lit else None,
+                camera_shift or 0.0,
+                occupied,
+            ),
         )
 
 
@@ -370,52 +385,63 @@ def test_recovery_pattern_is_distinct_under_symmetries_and_shifts() -> None:
             ) <= 0.1
 
 
+def _requested_patterns(events: dict[str, list[object]]) -> list[str]:
+    return [details["pattern"] for _pattern, details in events["requested"]]
+
+
+_FRINGES = [f"fringe-{axis}-{step}" for axis in (0, 1) for step in range(4)]
+_STARTING_POSITION = frozenset(
+    (row, column) for row in (0, 1, 6, 7) for column in range(8)
+)
+
+
 @pytest.mark.parametrize(
-    ("hypothesis", "camera_grid_offset", "projector_grid_offset"),
+    ("hypothesis", "camera_shift", "projector_grid_offset"),
     [
         ("camera_moved", 6.0, 0.0),
-        ("board_moved", 6.0, 6.0),
+        ("board_moved", 0.0, 6.0),
     ],
 )
-def test_startup_recovery_selects_the_hypothesis_matching_the_pattern(
+def test_startup_recovery_adopts_an_exact_hypothesis_without_refinement(
     hypothesis: str,
-    camera_grid_offset: float,
+    camera_shift: float,
     projector_grid_offset: float,
 ) -> None:
     moved = _detection(offset_x=6)
-    light_grid = (
-        moved.grid_points
-        if hypothesis == "camera_moved"
-        else _detection().grid_points
-    )
     monitor, events, clock = _recovering_monitor(moved)
 
     pattern, details = events["requested"][0]
     assert details["pattern"] == "pattern"
+    assert details["announce"]
     assert pattern.shape == (200, 200)
     assert monitor.output_mode == "recovery"
 
-    _drive_recovery(monitor, clock, moved, moved.grid_points, light_grid)
+    _drive_recovery(monitor, events, clock, moved, moved.grid_points, camera_shift)
 
     assert not events["failed"]
-    assert [details["pattern"] for _pattern, details in events["requested"]] == [
+    assert _requested_patterns(events) == [
         "pattern",
         "inverse",
+        "measure-pattern",
+        "measure-inverse",
     ]
     result, _message, details, images = events["completed"][0]
     assert details["selected"]["hypothesis"] == hypothesis
     assert details["selected"]["score"] >= 0.6
+    assert details["measured_residual_square_fraction"] <= 0.05
+    assert not details["refined"]
     assert len(details["hypotheses"]) == 9
     assert set(images) == {
         "recovery-black",
         "recovery-pattern",
         "recovery-inverse",
         "recovery-response",
+        "recovery-measure-response",
     }
     original = _detection().grid_points
     np.testing.assert_allclose(
         result.mapping.camera_grid[..., 0],
-        original[..., 0] + camera_grid_offset,
+        original[..., 0] + 6,
     )
     np.testing.assert_allclose(
         result.mapping.projector_grid[..., 0],
@@ -426,11 +452,106 @@ def test_startup_recovery_selects_the_hypothesis_matching_the_pattern(
     assert not monitor.startup_verification_pending
 
 
+@pytest.mark.parametrize("occupied", [frozenset(), _STARTING_POSITION])
+def test_combined_camera_and_board_movement_is_re_measured(
+    occupied: frozenset[tuple[int, int]],
+) -> None:
+    moved = _detection(offset_x=8)
+    monitor, events, clock = _recovering_monitor(moved, occupied=occupied)
+
+    _drive_recovery(
+        monitor,
+        events,
+        clock,
+        moved,
+        moved.grid_points,
+        6.0,
+        occupied=occupied,
+    )
+
+    assert not events["failed"], events["failed"]
+    assert _requested_patterns(events) == [
+        "pattern",
+        "inverse",
+        "measure-pattern",
+        "measure-inverse",
+        *_FRINGES,
+        "verify-pattern",
+        "verify-inverse",
+    ]
+    announced = [
+        details["stage"]
+        for _pattern, details in events["requested"]
+        if details["announce"]
+    ]
+    assert announced == ["coarse", "fringe", "verify"]
+    result, message, details, images = events["completed"][0]
+    assert "re-measured" in message
+    assert details["refined"]
+    assert details["measured_residual_square_fraction"] > 0.05
+    assert details["refinement"]["squares"] >= 8
+    assert details["verification"]["score"] >= 0.4
+    assert details["verification"]["residual_square_fraction"] <= 0.1
+    assert {
+        "recovery-fringe-columns",
+        "recovery-fringe-rows",
+        "recovery-verify-response",
+    } <= set(images)
+    expected = _detection(offset_x=2).grid_points
+    np.testing.assert_allclose(result.mapping.projector_grid, expected, atol=0.3)
+    np.testing.assert_allclose(result.mapping.camera_grid, moved.grid_points)
+
+
+def test_failed_fringe_refinement_keeps_the_measured_offset_correction() -> None:
+    moved = _detection(offset_x=8)
+    monitor, events, clock = _recovering_monitor(moved)
+
+    _drive_recovery(
+        monitor,
+        events,
+        clock,
+        moved,
+        moved.grid_points,
+        6.0,
+        dark_stages=frozenset({"fringe"}),
+    )
+
+    result, _message, details, _images = events["completed"][0]
+    assert details["refinement"] is None
+    assert "too few usable" in details["refinement_error"]
+    assert details["verification"]["residual_square_fraction"] <= 0.1
+    np.testing.assert_allclose(
+        result.mapping.projector_grid,
+        _detection(offset_x=2).grid_points,
+        atol=0.5,
+    )
+
+
+def test_re_measured_alignment_must_pass_the_final_check() -> None:
+    moved = _detection(offset_x=8)
+    monitor, events, clock = _recovering_monitor(moved)
+
+    _drive_recovery(
+        monitor,
+        events,
+        clock,
+        moved,
+        moved.grid_points,
+        6.0,
+        dark_stages=frozenset({"verify"}),
+    )
+
+    assert not events["completed"]
+    message, details, _images = events["failed"][0]
+    assert "final check" in message
+    assert details["verification"]["score"] < 0.4
+    assert monitor.output_mode == "paused"
+
+
 def test_recovery_ignores_frames_before_the_pattern_is_visible() -> None:
     moved = _detection(offset_x=6)
-    saved = _detection().grid_points
     monitor, events, clock = _recovering_monitor(moved)
-    dark = _scene(moved.grid_points, None)
+    dark = _scene(moved.grid_points)
 
     _check_at(monitor, clock, 0.2, moved, dark)
     clock.now = 0.3
@@ -441,7 +562,7 @@ def test_recovery_ignores_frames_before_the_pattern_is_visible() -> None:
     assert not events["completed"]
     assert not events["failed"]
 
-    _drive_recovery(monitor, clock, moved, moved.grid_points, saved)
+    _drive_recovery(monitor, events, clock, moved, moved.grid_points, 0.0)
 
     _result, _message, details, _images = events["completed"][0]
     assert details["selected"]["hypothesis"] == "board_moved"
@@ -461,13 +582,7 @@ def test_camera_change_recovery_restores_grid_indexing() -> None:
     )
     monitor, events, clock = _recovering_monitor(reindexed, camera_changed=True)
 
-    _drive_recovery(
-        monitor,
-        clock,
-        reindexed,
-        moved.grid_points,
-        moved.grid_points,
-    )
+    _drive_recovery(monitor, events, clock, reindexed, moved.grid_points, 6.0)
 
     result, _message, details, _images = events["completed"][0]
     assert details["selected"]["hypothesis"] == "camera_moved"
@@ -487,7 +602,7 @@ def test_missing_pattern_fails_after_three_attempts_without_alignment_loss() -> 
     lost: list[str] = []
     monitor.alignment_lost.connect(lost.append)
 
-    _drive_recovery(monitor, clock, moved, moved.grid_points, None)
+    _drive_recovery(monitor, events, clock, moved, moved.grid_points, None)
 
     assert not events["completed"]
     _message, details, _images = events["failed"][0]
@@ -501,7 +616,7 @@ def test_recovery_fails_when_the_pattern_is_never_displayed() -> None:
     moved = _detection(offset_x=6)
     monitor, events, clock = _recovering_monitor(moved)
 
-    _check_at(monitor, clock, 3.5, moved, _scene(moved.grid_points, None))
+    _check_at(monitor, clock, 3.5, moved, _scene(moved.grid_points))
 
     message, _details, _images = events["failed"][0]
     assert "not displayed" in message

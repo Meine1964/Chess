@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from time import monotonic
 
 import cv2
 import numpy as np
@@ -7,29 +8,39 @@ from numpy.typing import NDArray
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from .board_detector import BoardDetection, BoardDetector, FloatArray, ImageArray
+from .occupancy import empty_square_candidates
 from .projector import ProjectorWindow
 from .projector_calibration import (
     CalibrationError,
     CodedPattern,
     GrayImage,
     MappingResult,
+    PlaneSupportSelection,
     ValidationResult,
     board_mask,
     board_circle_polygon,
     bgr_to_gray,
+    clearance_squares,
     coded_marker_pattern,
     decode_gray_code,
     expanded_projector_board_mask,
     fit_coded_pattern_mapping,
     fit_projector_mapping,
     gray_code_bit_count,
+    gray_code_pair_quality,
     gray_code_pattern,
     interpolate_grid_point,
     locate_validation_target,
     measure_coverage,
+    plane_support_overlay,
     quick_realign_mapping,
     refine_projector_mesh,
     remap_projector_mapping,
+    require_board_plane_support,
+    select_board_plane_support,
+    select_validation_squares,
+    support_map_pattern,
+    square_interior_labels,
     validation_result,
 )
 
@@ -70,6 +81,9 @@ class ProjectorCalibrationController(QObject):
     failed = Signal(str)
     active_changed = Signal(bool)
     _OMITTED_LEAST_SIGNIFICANT_BITS = 1
+    _ADAPTIVE_FORCED_CAPTURE_MILLISECONDS = 600
+    _MAXIMUM_PAIR_RECAPTURES = 2
+    _MINIMUM_VALIDATION_HITS = 9
 
     def __init__(
         self,
@@ -135,6 +149,20 @@ class ProjectorCalibrationController(QObject):
         self._adaptive_candidate_gray: GrayImage | None = None
         self._adaptive_expected_change_ratio = 0.1
         self._adaptive_gray_fallback = False
+        self._adaptive_black_color: ImageArray | None = None
+        self._adaptive_empty_squares: NDArray[np.bool_] | None = None
+        self._plane_support: PlaneSupportSelection | None = None
+        self._plane_support_image: ImageArray | None = None
+        self._adaptive_rough_homography: FloatArray | None = None
+        self._adaptive_step_shown_at = 0.0
+        self._gray_capture_log: list[dict[str, object]] = []
+        self._gray_pair_log: list[dict[str, object]] = []
+        self._gray_pair_recaptures: dict[str, int] = {}
+        self._gray_weakest_pair: tuple[float, GrayImage, GrayImage] | None = (
+            None
+        )
+        self._clearance_squares: tuple[tuple[int, int], ...] = ()
+        self._validation_log: list[dict[str, object]] = []
         self._capture_progress_base = 0
         self._coded_pattern: CodedPattern | None = None
         self._inverse_coded_pattern: CodedPattern | None = None
@@ -161,12 +189,73 @@ class ProjectorCalibrationController(QObject):
         return self._adaptive_cropped_mode
 
     @property
-    def diagnostic_captures(self) -> dict[str, GrayImage]:
-        return {
+    def diagnostic_captures(self) -> dict[str, ImageArray]:
+        captures = {
             name.replace("_", "-"): image.copy()
             for name, image in self._captures.items()
             if name in {"black", "white", "coded", "coded_inverse"}
         }
+        if self._adaptive_cropped_mode and self._plane_support_image is not None:
+            captures["plane-support"] = self._plane_support_image.copy()
+        if self._adaptive_cropped_mode and self._gray_weakest_pair is not None:
+            _score, normal, inverse = self._gray_weakest_pair
+            captures["gray-weakest-normal"] = normal.copy()
+            captures["gray-weakest-inverse"] = inverse.copy()
+        return captures
+
+    @property
+    def clearance_squares(self) -> tuple[tuple[int, int], ...]:
+        return self._clearance_squares
+
+    @property
+    def support_map(self) -> NDArray[np.uint8] | None:
+        """RGB board map: usable squares green, squares to clear red."""
+        selection = self._plane_support
+        mapping = self._mapping or self._adaptive_rough_mapping
+        if not self._adaptive_cropped_mode or selection is None or (
+            mapping is None
+        ):
+            return None
+        usable = tuple(
+            (int(row), int(column))
+            for row, column in np.argwhere(
+                selection.square_status == "retained"
+            )
+        )
+        return support_map_pattern(
+            self._projector_size,
+            mapping.projector_grid,
+            usable,
+            self._clearance_squares,
+            self._intensity,
+        )
+
+    @property
+    def diagnostic_details(self) -> dict[str, object]:
+        if not self._adaptive_cropped_mode:
+            return {}
+        details: dict[str, object] = {
+            "occupancy_empty_squares": (
+                None
+                if self._adaptive_empty_squares is None
+                else int(np.count_nonzero(self._adaptive_empty_squares))
+            ),
+            "gray_code_captures": [
+                dict(entry) for entry in self._gray_capture_log
+            ],
+            "gray_code_pairs": [dict(entry) for entry in self._gray_pair_log],
+        }
+        if self._plane_support is not None:
+            details["plane_support"] = self._plane_support.details()
+        if self._clearance_squares:
+            details["clearance_squares"] = [
+                [row, column] for row, column in self._clearance_squares
+            ]
+        if self._validation_log:
+            details["validation_targets"] = [
+                dict(entry) for entry in self._validation_log
+            ]
+        return details
 
     def start(self, projector_width: int, projector_height: int) -> None:
         if self._active:
@@ -315,6 +404,18 @@ class ProjectorCalibrationController(QObject):
         self._adaptive_candidate_gray = None
         self._adaptive_expected_change_ratio = 0.1
         self._adaptive_gray_fallback = False
+        self._adaptive_black_color = None
+        self._adaptive_empty_squares = None
+        self._plane_support = None
+        self._plane_support_image = None
+        self._adaptive_rough_homography = None
+        self._adaptive_step_shown_at = 0.0
+        self._gray_capture_log = []
+        self._gray_pair_log = []
+        self._gray_pair_recaptures = {}
+        self._gray_weakest_pair = None
+        self._clearance_squares = ()
+        self._validation_log = []
         self._coded_pattern = pattern
         self._inverse_coded_pattern = None
         self._quick_phase = ""
@@ -480,27 +581,15 @@ class ProjectorCalibrationController(QObject):
             and self._adaptive_phase == "discovery"
             and self._steps[self._step_index].key == "coded"
         ):
-            black = self._captures["black"]
-            if gray.shape != black.shape:
-                self._fail("Camera resolution changed during calibration.")
-                return
-            if self._frame_accumulator is None:
-                self._frame_accumulator = np.zeros(
-                    gray.shape,
-                    dtype=np.float32,
-                )
-            self._frame_accumulator += gray
-            self._frame_count += 1
-            if self._frame_count < self._frames_per_state:
+            averaged = self._accept_adaptive_discovery_frame(gray)
+            if averaged is None:
                 return
             rough_detection = self._detection
             if rough_detection is None:
                 self._fail("The populated board was not detected in black.")
                 return
             self._collecting = False
-            self._adaptive_discovery_candidate = np.rint(
-                self._frame_accumulator / self._frame_count
-            ).astype(np.uint8)
+            self._adaptive_discovery_candidate = averaged
             self._projector.show_black()
             self._schedule(25, self._fit_adaptive_discovery_candidate)
             return
@@ -524,6 +613,7 @@ class ProjectorCalibrationController(QObject):
                 averaged = np.rint(
                     self._frame_accumulator / self._frame_count
                 ).astype(np.uint8)
+                self._log_gray_capture("forced", averaged)
                 self._adaptive_previous_gray = averaged
                 self._complete_frame_capture(averaged)
                 return
@@ -538,6 +628,13 @@ class ProjectorCalibrationController(QObject):
             self._fail("Camera resolution changed during calibration.")
             return
 
+        if (
+            self._adaptive_cropped_mode
+            and self._adaptive_phase == "discovery"
+            and self._steps[self._step_index].key == "black"
+            and frame.ndim == 3
+        ):
+            self._adaptive_black_color = frame
         self._frame_accumulator += gray
         self._frame_count += 1
         required_frames = (
@@ -556,6 +653,56 @@ class ProjectorCalibrationController(QObject):
             self._frame_accumulator / self._frame_count
         ).astype(np.uint8)
         self._complete_frame_capture(averaged)
+
+    def _accept_adaptive_discovery_frame(
+        self,
+        gray: GrayImage,
+    ) -> GrayImage | None:
+        black = self._captures["black"]
+        detection = self._detection
+        if gray.shape != black.shape:
+            self._fail("Camera resolution changed during calibration.")
+            return None
+        if detection is None:
+            self._fail("Adaptive discovery synchronization is unavailable.")
+            return None
+        usable = board_mask(gray.shape, detection) != 0
+        if not np.any(usable):
+            self._fail("The detected board has no usable camera pixels.")
+            return None
+
+        changed_ratio = float(
+            np.mean(cv2.absdiff(black, gray)[usable] > 15)
+        )
+        if changed_ratio < 0.005:
+            self._adaptive_candidate_gray = None
+            self._frame_accumulator = None
+            self._frame_count = 0
+            return None
+
+        previous = self._adaptive_candidate_gray
+        if previous is not None:
+            stable_ratio = float(
+                np.mean(cv2.absdiff(previous, gray)[usable] > 15)
+            )
+            if stable_ratio > 0.02:
+                self._frame_accumulator = None
+                self._frame_count = 0
+
+        if self._frame_accumulator is None:
+            self._frame_accumulator = np.zeros(
+                gray.shape,
+                dtype=np.float32,
+            )
+        self._frame_accumulator += gray
+        self._frame_count += 1
+        self._adaptive_candidate_gray = gray.copy()
+        if self._frame_count < self._frames_per_state:
+            return None
+
+        return np.rint(
+            self._frame_accumulator / self._frame_count
+        ).astype(np.uint8)
 
     def _accept_adaptive_gray_frame(
         self,
@@ -601,9 +748,43 @@ class ProjectorCalibrationController(QObject):
             )
             / 2.0
         ).astype(np.uint8)
+        self._log_gray_capture("transition", averaged)
         self._adaptive_previous_gray = averaged
         self._adaptive_candidate_gray = None
         return averaged
+
+    def _log_gray_capture(self, mode: str, averaged: GrayImage) -> None:
+        # Validation captures follow the Gray-code steps in the same phase.
+        if self._validation_index >= 0 or self._step_index >= len(
+            self._steps
+        ):
+            return
+        previous = self._adaptive_previous_gray
+        detection = self._detection
+        changed_ratio: float | None = None
+        if (
+            previous is not None
+            and detection is not None
+            and previous.shape == averaged.shape
+        ):
+            usable = board_mask(averaged.shape, detection) != 0
+            if np.any(usable):
+                changed_ratio = round(
+                    float(
+                        np.mean(cv2.absdiff(previous, averaged)[usable] > 15)
+                    ),
+                    4,
+                )
+        self._gray_capture_log.append(
+            {
+                "key": self._steps[self._step_index].key,
+                "mode": mode,
+                "changed_ratio": changed_ratio,
+                "elapsed_milliseconds": round(
+                    (monotonic() - self._adaptive_step_shown_at) * 1000
+                ),
+            }
+        )
 
     def _complete_frame_capture(self, averaged: GrayImage) -> None:
         self._collecting = False
@@ -628,12 +809,115 @@ class ProjectorCalibrationController(QObject):
                     )
                     return
                 self._detection = detection
+                self._adaptive_empty_squares = self._classify_empty_squares(
+                    detection
+                )
+            if (
+                self._adaptive_cropped_mode
+                and self._adaptive_phase == "gray-code"
+                and step.key.endswith("_inverse")
+                and not self._verify_gray_code_pair(step.key)
+            ):
+                return
             self._step_index += 1
             self.progress_changed.emit(
                 self._capture_progress_base + self._step_index,
                 self._progress_total,
             )
             self._schedule(0, self._advance_capture)
+
+    def _verify_gray_code_pair(self, inverse_key: str) -> bool:
+        """Check a captured pair; recapture or fail when it is unreliable."""
+        pair_key = inverse_key.removesuffix("_inverse")
+        normal_key = f"{pair_key}_normal"
+        detection = self._detection
+        homography = self._adaptive_rough_homography
+        if detection is None or homography is None:
+            self._fail("Adaptive Gray-code verification is unavailable.")
+            return False
+        normal = self._captures[normal_key]
+        inverse = self._captures[inverse_key]
+        quality = gray_code_pair_quality(
+            normal,
+            inverse,
+            board_mask(normal.shape, detection) != 0,
+            self._steps[self._step_index - 1].pattern,
+            homography,
+        )
+        recaptures = self._gray_pair_recaptures.get(pair_key, 0)
+        self._gray_pair_log.append(
+            {
+                "pair": pair_key,
+                "contrast": round(quality.contrast, 4),
+                "agreement": (
+                    None
+                    if quality.agreement is None
+                    else round(quality.agreement, 4)
+                ),
+                "checked_ratio": round(quality.checked_ratio, 4),
+                "recaptures": recaptures,
+                "accepted": quality.acceptable,
+            }
+        )
+        score = min(
+            quality.contrast,
+            1.0 if quality.agreement is None else quality.agreement,
+        )
+        if self._gray_weakest_pair is None or score < self._gray_weakest_pair[0]:
+            self._gray_weakest_pair = (score, normal.copy(), inverse.copy())
+        if quality.acceptable:
+            return True
+
+        axis, bit = pair_key.split("_")
+        if recaptures < self._MAXIMUM_PAIR_RECAPTURES:
+            self._gray_pair_recaptures[pair_key] = recaptures + 1
+            self._step_index -= 1
+            # The projector still shows the inverse pattern, so the next
+            # accepted frame must differ from the inverse capture.
+            self._adaptive_previous_gray = inverse.copy()
+            self.status_changed.emit(
+                f"Recapturing {axis.upper()} Gray-code bit {int(bit) + 1}; "
+                "the camera did not see the projected pattern reliably."
+            )
+            self._schedule(0, self._advance_capture)
+            return False
+
+        agreement = (
+            "not checked"
+            if quality.agreement is None
+            else f"{quality.agreement:.0%}"
+        )
+        self._fail(
+            f"The camera did not see projected {axis.upper()} Gray-code bit "
+            f"{int(bit) + 1} reliably after {recaptures} recaptures "
+            f"(contrast {quality.contrast:.0%}, pattern agreement "
+            f"{agreement}). Keep hands and shadows away from the board and "
+            "check that the projector image is in focus."
+        )
+        return False
+
+    def _classify_empty_squares(
+        self,
+        detection: BoardDetection,
+    ) -> NDArray[np.bool_] | None:
+        color = self._adaptive_black_color
+        if color is None:
+            return None
+        try:
+            return empty_square_candidates(color, detection.grid_points)
+        except (ValueError, cv2.error):
+            return None
+
+    def _allowed_marker_mask(
+        self,
+        image_shape: tuple[int, int],
+        detection: BoardDetection,
+    ) -> NDArray[np.bool_] | None:
+        empty_squares = self._adaptive_empty_squares
+        if empty_squares is None or not np.any(empty_squares):
+            return None
+        labels = square_interior_labels(image_shape, detection.grid_points)
+        return np.isin(labels, np.flatnonzero(empty_squares.reshape(-1)))
 
     def _fit_adaptive_discovery_candidate(self) -> None:
         candidate = self._adaptive_discovery_candidate
@@ -650,10 +934,14 @@ class ProjectorCalibrationController(QObject):
                 pattern,
                 self._projector_size,
                 require_quadrant_coverage=False,
+                allowed_marker_mask=self._allowed_marker_mask(
+                    candidate.shape,
+                    rough_detection,
+                ),
             )
-        except (CalibrationError, ValueError, cv2.error):
+        except (CalibrationError, ValueError, cv2.error) as error:
             self._adaptive_discovery_candidate = None
-            self._display_current_step()
+            self._fail(f"Coded discovery failed: {error}")
             return
 
         self._adaptive_discovery_candidate = None
@@ -781,6 +1069,14 @@ class ProjectorCalibrationController(QObject):
             )
             if self._adaptive_expected_change_ratio == 0.0:
                 self._captures[step.key] = previous_capture.copy()
+                self._gray_capture_log.append(
+                    {
+                        "key": step.key,
+                        "mode": "reused",
+                        "changed_ratio": 0.0,
+                        "elapsed_milliseconds": 0,
+                    }
+                )
                 self._step_index += 1
                 self.progress_changed.emit(
                     self._capture_progress_base + self._step_index,
@@ -790,6 +1086,7 @@ class ProjectorCalibrationController(QObject):
                 return
         self.status_changed.emit(step.description)
         self._projector.show_pattern(step.pattern)
+        self._adaptive_step_shown_at = monotonic()
         settle_milliseconds = self._settle_milliseconds
         if (
             self._adaptive_cropped_mode
@@ -812,6 +1109,7 @@ class ProjectorCalibrationController(QObject):
             return
         self._frame_accumulator = None
         self._frame_count = 0
+        self._adaptive_candidate_gray = None
         self._collecting = True
         self._capture_token += 1
         token = self._capture_token
@@ -825,7 +1123,7 @@ class ProjectorCalibrationController(QObject):
             and self._adaptive_phase == "gray-code"
         ):
             QTimer.singleShot(
-                250,
+                self._ADAPTIVE_FORCED_CAPTURE_MILLISECONDS,
                 lambda: self._enable_adaptive_gray_fallback(
                     token,
                     run_token,
@@ -945,6 +1243,15 @@ class ProjectorCalibrationController(QObject):
             self._projector_size,
             rough_mapping.projector_grid,
         )
+        homography, _mask = cv2.findHomography(
+            detection.grid_points.reshape(-1, 2).astype(np.float64),
+            rough_mapping.projector_grid.reshape(-1, 2).astype(np.float64),
+        )
+        if homography is None:
+            raise CalibrationError(
+                "The rough discovery mapping has no valid homography."
+            )
+        self._adaptive_rough_homography = homography
         self._detection = detection
         self._mapping = None
         self._steps = self._build_cropped_gray_code_steps(projector_mask)
@@ -1001,11 +1308,28 @@ class ProjectorCalibrationController(QObject):
             if board_pixels == 0
             else float(np.count_nonzero(valid) / board_pixels)
         )
-        mapping = fit_projector_mapping(
+        selection = select_board_plane_support(
             detection,
             projector_x,
             projector_y,
             valid,
+            self._projector_size,
+            empty_squares=self._adaptive_empty_squares,
+        )
+        self._plane_support = selection
+        self._plane_support_image = plane_support_overlay(
+            self._captures["black"],
+            detection.grid_points,
+            selection,
+        )
+        if not selection.sufficiently_spread:
+            self._clearance_squares = clearance_squares(selection)
+        require_board_plane_support(selection)
+        mapping = fit_projector_mapping(
+            detection,
+            projector_x,
+            projector_y,
+            selection.mask,
             self._projector_size,
             coverage_ratio,
         )
@@ -1071,6 +1395,10 @@ class ProjectorCalibrationController(QObject):
                 + _STARTING_POSITION_EDGE_TARGETS
                 + [_STARTING_POSITION_CENTER_TARGET]
             )
+            if self._adaptive_cropped_mode:
+                self._validation_candidates = (
+                    self._adaptive_validation_candidates()
+                )
             self._validation_progress_base = (
                 self._progress_total
                 - len(self._validation_candidates)
@@ -1086,6 +1414,24 @@ class ProjectorCalibrationController(QObject):
         self._validation_candidate_index = 0
         self._validation_index = 0
         self._show_validation_black()
+
+    def _adaptive_validation_candidates(
+        self,
+    ) -> list[list[tuple[float, float]]]:
+        selection = self._plane_support
+        if selection is None:
+            raise RuntimeError("Plane support is not available.")
+        squares = select_validation_squares(selection.square_status)
+        if len(squares) < self._MINIMUM_VALIDATION_HITS:
+            raise CalibrationError(
+                f"Only {len(squares)} usable squares are available for "
+                f"validation targets; {self._MINIMUM_VALIDATION_HITS} are "
+                "required."
+            )
+        self._progress_total += len(squares) - 9
+        return [
+            [(column + 0.5, row + 0.5)] for row, column in squares
+        ]
 
     def _show_validation_black(self) -> None:
         if not self._active:
@@ -1168,28 +1514,32 @@ class ProjectorCalibrationController(QObject):
                 max(8, round(square_width * 0.75)),
             )
         except CalibrationError:
-            candidates = self._validation_candidates[
-                self._validation_index
-            ]
-            current_coordinate = self._validation_coordinates[
-                self._validation_index
-            ]
-            current_candidate = candidates.index(current_coordinate)
-            next_candidate = current_candidate + 1
-            if next_candidate >= len(candidates):
-                raise
-            self._validation_expected.pop()
-            self._validation_widths.pop()
-            self._validation_candidate_index = next_candidate
-            self._validation_coordinates[self._validation_index] = (
-                candidates[next_candidate]
-            )
-            self.status_changed.emit(
-                f"Validation target {self._validation_index + 1} was not "
-                "detected; trying an alternative location."
-            )
-            self._schedule(0, self._show_validation_target_safely)
-            return
+            if self._adaptive_cropped_mode:
+                # A piece can hide a surplus target; it counts as a miss.
+                measured = np.full(2, np.nan, dtype=np.float32)
+            else:
+                candidates = self._validation_candidates[
+                    self._validation_index
+                ]
+                current_coordinate = self._validation_coordinates[
+                    self._validation_index
+                ]
+                current_candidate = candidates.index(current_coordinate)
+                next_candidate = current_candidate + 1
+                if next_candidate >= len(candidates):
+                    raise
+                self._validation_expected.pop()
+                self._validation_widths.pop()
+                self._validation_candidate_index = next_candidate
+                self._validation_coordinates[self._validation_index] = (
+                    candidates[next_candidate]
+                )
+                self.status_changed.emit(
+                    f"Validation target {self._validation_index + 1} was "
+                    "not detected; trying an alternative location."
+                )
+                self._schedule(0, self._show_validation_target_safely)
+                return
         self._validation_measured.append(measured)
         self._validation_index += 1
         self._validation_candidate_index = 0
@@ -1241,8 +1591,15 @@ class ProjectorCalibrationController(QObject):
             self._start_validation()
             return
 
-        validation = validation_result(measured, expected, widths)
-        if validation.maximum_square_fraction >= 0.1:
+        validation = (
+            self._adaptive_validation_result(measured, expected, widths)
+            if self._adaptive_cropped_mode
+            else validation_result(measured, expected, widths)
+        )
+        if (
+            not self._adaptive_cropped_mode
+            and validation.maximum_square_fraction >= 0.1
+        ):
             if (
                 not self._quick_verification
                 and not self._validation_only
@@ -1289,6 +1646,54 @@ class ProjectorCalibrationController(QObject):
             "maximum validation error."
         )
         self.completed.emit(result)
+
+    def _adaptive_validation_result(
+        self,
+        measured: FloatArray,
+        expected: FloatArray,
+        widths: FloatArray,
+    ) -> ValidationResult:
+        """Accept surplus targets when enough spread targets hit."""
+        detected = np.all(np.isfinite(measured), axis=1)
+        fractions = np.full(len(measured), np.nan, dtype=np.float32)
+        fractions[detected] = (
+            np.linalg.norm(measured[detected] - expected[detected], axis=1)
+            / widths[detected]
+        )
+        hits = detected & (np.nan_to_num(fractions, nan=1.0) < 0.1)
+        self._validation_log = [
+            {
+                "square": [int(y - 0.5), int(x - 0.5)],
+                "detected": bool(detected[index]),
+                "square_error": (
+                    None
+                    if not detected[index]
+                    else round(float(fractions[index]), 4)
+                ),
+                "hit": bool(hits[index]),
+            }
+            for index, (x, y) in enumerate(self._validation_coordinates)
+        ]
+        quadrants = {
+            (y < 4, x < 4)
+            for (x, y), hit in zip(
+                self._validation_coordinates, hits, strict=True
+            )
+            if hit
+        }
+        hit_count = int(np.count_nonzero(hits))
+        if hit_count < self._MINIMUM_VALIDATION_HITS:
+            raise CalibrationError(
+                f"Only {hit_count} of {len(measured)} validation targets "
+                "were within 10% of a square; "
+                f"{self._MINIMUM_VALIDATION_HITS} are required."
+            )
+        if len(quadrants) < 4:
+            raise CalibrationError(
+                "Validation targets within 10% of a square do not cover "
+                "every board quadrant."
+            )
+        return validation_result(measured[hits], expected[hits], widths[hits])
 
     def _retry_worst_validation_target(
         self,

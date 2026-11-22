@@ -185,6 +185,28 @@ class SquareOccupancyDetector:
         )
 
 
+def empty_square_candidates(
+    frame: ImageArray,
+    camera_grid: FloatArray,
+) -> NDArray[np.bool_]:
+    """Return squares that are empty under both rank and file parity models.
+
+    The board orientation is unknown during calibration, so a square is a
+    candidate only when both empty-reference models agree.
+    """
+    empty = np.ones((8, 8), dtype=bool)
+    for quarter_turns in (0, 1):
+        detector = SquareOccupancyDetector(
+            required_observations=1,
+            required_agreement=1,
+        )
+        update = detector.observe(frame, camera_grid, quarter_turns)
+        if update.result is None:
+            raise ValueError("Occupancy could not classify the board.")
+        empty &= update.result.labels == "empty"
+    return empty
+
+
 def rectify_board(
     frame: ImageArray,
     camera_grid: FloatArray,

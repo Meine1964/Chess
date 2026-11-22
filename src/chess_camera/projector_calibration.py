@@ -419,6 +419,7 @@ def fit_coded_pattern_mapping(
     inverse_illuminated: GrayImage | None = None,
     inverse_pattern: CodedPattern | None = None,
     require_quadrant_coverage: bool = True,
+    allowed_marker_mask: BoolArray | None = None,
 ) -> tuple[BoardDetection, MappingResult]:
     refined_detection = fit_visible_middle_lattice(
         black,
@@ -473,6 +474,19 @@ def fit_coded_pattern_mapping(
         ],
         dtype=bool,
     )
+    if allowed_marker_mask is not None and marker_count:
+        mask_height, mask_width = allowed_marker_mask.shape
+        centers = np.rint(np.mean(marker_camera_points, axis=1)).astype(
+            np.int64
+        )
+        center_x = np.clip(centers[:, 0], 0, mask_width - 1)
+        center_y = np.clip(centers[:, 1], 0, mask_height - 1)
+        allowed_markers = np.logical_and(
+            inside_markers,
+            allowed_marker_mask[center_y, center_x],
+        )
+        if np.unique(marker_ids[allowed_markers]).size >= 4:
+            inside_markers = allowed_markers
     camera_points = marker_camera_points[inside_markers].reshape(-1, 2)
     projector_points = projector_points.reshape(marker_count, 4, 2)[
         inside_markers
@@ -815,6 +829,477 @@ def decode_gray_code(
         decoded.append(binary_value)
 
     return decoded[0], decoded[1], valid
+
+
+_PLANE_SUPPORT_SMOOTHNESS = 4
+_PLANE_SUPPORT_INTERIOR_SCALE = 0.8
+_PLANE_SUPPORT_MINIMUM_SQUARE_PIXELS = 40
+_PLANE_SUPPORT_SQUARE_INLIER_RATIO = 0.8
+_PLANE_SUPPORT_MINIMUM_SQUARES = 12
+_PLANE_SUPPORT_THRESHOLD = 2.5
+
+
+@dataclass(frozen=True)
+class PlaneSupportSelection:
+    mask: BoolArray
+    interior_mask: BoolArray
+    plane_inliers: BoolArray
+    square_status: NDArray[np.str_]
+    filter_counts: dict[str, int]
+    occupancy_used: bool
+
+    @property
+    def retained_square_count(self) -> int:
+        return int(np.count_nonzero(self.square_status == "retained"))
+
+    @property
+    def sufficiently_spread(self) -> bool:
+        retained = self.square_status == "retained"
+        if self.retained_square_count < _PLANE_SUPPORT_MINIMUM_SQUARES:
+            return False
+        quadrants = (
+            retained[:4, :4],
+            retained[:4, 4:],
+            retained[4:, :4],
+            retained[4:, 4:],
+        )
+        return (
+            all(bool(np.any(quadrant)) for quadrant in quadrants)
+            and int(np.count_nonzero(np.any(retained, axis=1))) >= 3
+            and int(np.count_nonzero(np.any(retained, axis=0))) >= 3
+        )
+
+    def details(self) -> dict[str, object]:
+        return {
+            "filter_counts": dict(self.filter_counts),
+            "occupancy_used": self.occupancy_used,
+            "retained_square_count": self.retained_square_count,
+            "squares": {
+                status: [
+                    [int(row), int(column)]
+                    for row, column in np.argwhere(
+                        self.square_status == status
+                    )
+                ]
+                for status in (
+                    "retained",
+                    "plane-rejected",
+                    "sparse",
+                    "excluded",
+                )
+            },
+        }
+
+
+def square_interior_labels(
+    image_shape: tuple[int, int],
+    camera_grid: FloatArray,
+    scale: float = 1.0,
+) -> NDArray[np.int16]:
+    if camera_grid.shape != (9, 9, 2):
+        raise ValueError("Camera grid must have shape (9, 9, 2).")
+    if not 0 < scale <= 1:
+        raise ValueError("Square interior scale must be in (0, 1].")
+    labels = np.full(image_shape, -1, dtype=np.int16)
+    for row in range(8):
+        for column in range(8):
+            corners = camera_grid[
+                [row, row, row + 1, row + 1],
+                [column, column + 1, column + 1, column],
+            ]
+            center = np.mean(corners, axis=0)
+            polygon = center + (corners - center) * scale
+            cv2.fillConvexPoly(
+                labels,
+                np.ascontiguousarray(np.rint(polygon), dtype=np.int32),
+                row * 8 + column,
+            )
+    return labels
+
+
+def _smooth_decoded_mask(
+    projector_x: IntArray,
+    projector_y: IntArray,
+    valid: BoolArray,
+) -> BoolArray:
+    smooth = valid.copy()
+    for decoded in (projector_x, projector_y):
+        values = np.clip(decoded, 0, 65535).astype(np.uint16)
+        median = cv2.medianBlur(values, 5).astype(np.int32)
+        smooth &= np.abs(decoded - median) <= _PLANE_SUPPORT_SMOOTHNESS
+    return smooth
+
+
+def select_board_plane_support(
+    detection: BoardDetection,
+    projector_x: IntArray,
+    projector_y: IntArray,
+    valid_mask: BoolArray,
+    projector_size: tuple[int, int],
+    *,
+    empty_squares: BoolArray | None = None,
+) -> PlaneSupportSelection:
+    """Select decoded pixels that lie on the board plane despite pieces.
+
+    The occupancy prior is tried first; when it does not yield sufficiently
+    spread plane-consistent squares, every square is reconsidered.
+    """
+    if (
+        projector_x.shape != projector_y.shape
+        or projector_x.shape != valid_mask.shape
+    ):
+        raise ValueError("Decoded coordinate arrays and mask must have equal shapes.")
+    if empty_squares is not None and empty_squares.shape != (8, 8):
+        raise ValueError("Empty-square candidates must have shape (8, 8).")
+    width, height = projector_size
+    contrast = np.logical_and.reduce(
+        (
+            valid_mask,
+            projector_x >= 0,
+            projector_x < width,
+            projector_y >= 0,
+            projector_y < height,
+        )
+    )
+    smooth = _smooth_decoded_mask(projector_x, projector_y, contrast)
+    labels = square_interior_labels(
+        valid_mask.shape,
+        detection.grid_points,
+        _PLANE_SUPPORT_INTERIOR_SCALE,
+    )
+    counts = {
+        "contrast": int(np.count_nonzero(contrast)),
+        "smooth": int(np.count_nonzero(smooth)),
+    }
+    if empty_squares is not None and np.any(empty_squares):
+        prior_selection = _select_plane_squares(
+            smooth,
+            labels,
+            empty_squares.astype(bool),
+            projector_x,
+            projector_y,
+            counts,
+            True,
+        )
+        if prior_selection.sufficiently_spread:
+            return prior_selection
+    return _select_plane_squares(
+        smooth,
+        labels,
+        np.ones((8, 8), dtype=bool),
+        projector_x,
+        projector_y,
+        counts,
+        False,
+    )
+
+
+def _select_plane_squares(
+    smooth: BoolArray,
+    labels: NDArray[np.int16],
+    candidates: BoolArray,
+    projector_x: IntArray,
+    projector_y: IntArray,
+    base_counts: dict[str, int],
+    occupancy_used: bool,
+) -> PlaneSupportSelection:
+    candidate_ids = np.flatnonzero(candidates.reshape(-1))
+    interior = np.logical_and(smooth, np.isin(labels, candidate_ids))
+    status = np.full((8, 8), "excluded", dtype="<U14")
+    status[candidates] = "sparse"
+    plane_inliers = np.zeros_like(interior)
+    mask = np.zeros_like(interior)
+    camera_y, camera_x = np.nonzero(interior)
+    counts = {**base_counts, "interior": int(camera_x.size)}
+    if camera_x.size >= 4 * _PLANE_SUPPORT_MINIMUM_SQUARE_PIXELS:
+        camera_points = np.column_stack((camera_x, camera_y)).astype(
+            np.float32
+        )
+        projector_points = np.column_stack(
+            (
+                projector_x[camera_y, camera_x],
+                projector_y[camera_y, camera_x],
+            )
+        ).astype(np.float32)
+        stride = max(1, camera_x.size // 50_000)
+        homography, _inlier_mask = cv2.findHomography(
+            camera_points[::stride],
+            projector_points[::stride],
+            cv2.RANSAC,
+            _PLANE_SUPPORT_THRESHOLD,
+        )
+        if homography is not None:
+            predicted = cv2.perspectiveTransform(
+                camera_points.reshape(-1, 1, 2),
+                homography,
+            ).reshape(-1, 2)
+            inliers = (
+                np.linalg.norm(predicted - projector_points, axis=1)
+                <= _PLANE_SUPPORT_THRESHOLD
+            )
+            square_ids = labels[camera_y, camera_x].astype(np.int64)
+            totals = np.bincount(square_ids, minlength=64)
+            inlier_totals = np.bincount(
+                square_ids,
+                weights=inliers.astype(np.float64),
+                minlength=64,
+            )
+            flat_status = status.reshape(-1)
+            for square_id in candidate_ids:
+                total = int(totals[square_id])
+                if total < _PLANE_SUPPORT_MINIMUM_SQUARE_PIXELS:
+                    continue
+                flat_status[square_id] = (
+                    "retained"
+                    if inlier_totals[square_id] / total
+                    >= _PLANE_SUPPORT_SQUARE_INLIER_RATIO
+                    else "plane-rejected"
+                )
+            plane_inliers[camera_y[inliers], camera_x[inliers]] = True
+            keep = flat_status[square_ids] == "retained"
+            mask[camera_y[keep], camera_x[keep]] = True
+    counts["plane_inliers"] = int(np.count_nonzero(plane_inliers))
+    counts["retained"] = int(np.count_nonzero(mask))
+    return PlaneSupportSelection(
+        mask=mask,
+        interior_mask=interior,
+        plane_inliers=plane_inliers,
+        square_status=status,
+        filter_counts=counts,
+        occupancy_used=occupancy_used,
+    )
+
+
+def require_board_plane_support(selection: PlaneSupportSelection) -> None:
+    if not selection.sufficiently_spread:
+        raise CalibrationError(
+            f"Only {selection.retained_square_count} board squares are "
+            "consistent with the board plane; at least "
+            f"{_PLANE_SUPPORT_MINIMUM_SQUARES} spread over every quadrant, "
+            "three ranks, and three files are required."
+        )
+
+
+def plane_support_overlay(
+    black: GrayImage,
+    camera_grid: FloatArray,
+    selection: PlaneSupportSelection,
+) -> ImageArray:
+    image = np.asarray(cv2.cvtColor(black, cv2.COLOR_GRAY2BGR), dtype=np.uint8)
+    accepted = np.logical_and(selection.mask, selection.plane_inliers)
+    rejected = np.logical_and(
+        selection.interior_mask,
+        np.logical_not(selection.plane_inliers),
+    )
+    image[accepted] = (image[accepted] // 2 + np.array([0, 127, 0])).astype(
+        np.uint8
+    )
+    image[rejected] = (image[rejected] // 2 + np.array([0, 0, 127])).astype(
+        np.uint8
+    )
+    colors = {
+        "retained": (0, 220, 0),
+        "plane-rejected": (0, 0, 255),
+        "excluded": (255, 0, 0),
+    }
+    for row in range(8):
+        for column in range(8):
+            color = colors.get(str(selection.square_status[row, column]))
+            if color is None:
+                continue
+            polygon = camera_grid[
+                [row, row, row + 1, row + 1],
+                [column, column + 1, column + 1, column],
+            ]
+            cv2.polylines(
+                image,
+                [np.rint(polygon).astype(np.int32)],
+                True,
+                color,
+                2,
+            )
+    return image
+
+
+_CLEARANCE_BLOCK = (slice(2, 6), slice(2, 6))
+_PAIR_MINIMUM_DIFFERENCE = 8
+_PAIR_AGREEMENT_MARGIN = 8
+_PAIR_MINIMUM_CHECKED_RATIO = 0.05
+PAIR_MINIMUM_CONTRAST = 0.3
+PAIR_MINIMUM_AGREEMENT = 0.7
+
+
+def clearance_squares(
+    selection: PlaneSupportSelection,
+) -> tuple[tuple[int, int], ...]:
+    """Return central squares that must be emptied for spread support."""
+    block = selection.square_status[_CLEARANCE_BLOCK] != "retained"
+    return tuple(
+        (int(row) + 2, int(column) + 2) for row, column in np.argwhere(block)
+    )
+
+
+_SUPPORT_MAP_SQUARE_SCALE = 0.8
+
+
+def support_map_pattern(
+    projector_size: tuple[int, int],
+    projector_grid: FloatArray,
+    usable_squares: tuple[tuple[int, int], ...],
+    clear_squares: tuple[tuple[int, int], ...],
+    intensity: int = 255,
+) -> NDArray[np.uint8]:
+    """Draw usable squares green and squares to clear red as an RGB image."""
+    if projector_grid.shape != (9, 9, 2):
+        raise ValueError("The projector grid must have shape (9, 9, 2).")
+    width, height = projector_size
+    pattern = np.zeros((height, width, 3), dtype=np.uint8)
+    for squares, color in (
+        (usable_squares, (0, intensity, 0)),
+        (clear_squares, (intensity, 0, 0)),
+    ):
+        for row, column in squares:
+            polygon = projector_grid[
+                [row, row, row + 1, row + 1],
+                [column, column + 1, column + 1, column],
+            ].astype(np.float64)
+            center = polygon.mean(axis=0)
+            polygon = center + _SUPPORT_MAP_SQUARE_SCALE * (polygon - center)
+            cv2.fillConvexPoly(
+                pattern,
+                np.ascontiguousarray(np.rint(polygon), dtype=np.int32),
+                color,
+            )
+    return pattern
+
+
+_VALIDATION_NOMINAL_SQUARES = (
+    (1, 1), (1, 3), (1, 4), (1, 6),
+    (3, 1), (3, 6), (4, 1), (4, 6),
+    (6, 1), (6, 3), (6, 4), (6, 6),
+    (3, 3),
+)
+_VALIDATION_MAXIMUM_DISTANCE = 2.0
+_VALIDATION_NEIGHBOUR_PENALTY = 0.5
+
+
+def select_validation_squares(
+    square_status: NDArray[np.str_],
+) -> tuple[tuple[int, int], ...]:
+    """Place surplus validation targets on retained (empty, flat) squares."""
+    retained = square_status == "retained"
+    padded = np.pad(~retained, 1, constant_values=False)
+    blocked_neighbours = sum(
+        padded[1 + dy : 9 + dy, 1 + dx : 9 + dx].astype(np.int32)
+        for dy in (-1, 0, 1)
+        for dx in (-1, 0, 1)
+        if dy or dx
+    )
+    used: set[tuple[int, int]] = set()
+    selected: list[tuple[int, int]] = []
+    for nominal_row, nominal_column in _VALIDATION_NOMINAL_SQUARES:
+        best: tuple[float, tuple[int, int]] | None = None
+        for row, column in np.argwhere(retained):
+            square = (int(row), int(column))
+            if square in used:
+                continue
+            distance = float(
+                np.hypot(row - nominal_row, column - nominal_column)
+            )
+            if distance > _VALIDATION_MAXIMUM_DISTANCE:
+                continue
+            score = distance + _VALIDATION_NEIGHBOUR_PENALTY * float(
+                blocked_neighbours[row, column]
+            )
+            if best is None or score < best[0]:
+                best = (score, square)
+        if best is not None:
+            used.add(best[1])
+            selected.append(best[1])
+    return tuple(selected)
+
+
+@dataclass(frozen=True)
+class GrayCodePairQuality:
+    contrast: float
+    agreement: float | None
+    checked_ratio: float
+
+    @property
+    def acceptable(self) -> bool:
+        return self.contrast >= PAIR_MINIMUM_CONTRAST and (
+            self.agreement is None
+            or self.agreement >= PAIR_MINIMUM_AGREEMENT
+        )
+
+
+def gray_code_pair_quality(
+    normal: GrayImage,
+    inverse: GrayImage,
+    usable_mask: BoolArray,
+    normal_pattern: GrayImage,
+    camera_to_projector: FloatArray,
+) -> GrayCodePairQuality:
+    """Measure whether a captured pair shows the projected normal pattern.
+
+    The rough camera-to-projector homography predicts which camera pixels the
+    normal pattern lights. Only pixels predicted well inside a uniform stripe
+    are compared, so rough-fit error and piece parallax do not matter.
+    """
+    if normal.shape != inverse.shape or normal.shape != usable_mask.shape:
+        raise ValueError("Gray-code pair images must match the usable mask.")
+    camera_y, camera_x = np.nonzero(usable_mask)
+    if camera_x.size == 0:
+        return GrayCodePairQuality(0.0, None, 0.0)
+    difference = (
+        normal[camera_y, camera_x].astype(np.int16)
+        - inverse[camera_y, camera_x].astype(np.int16)
+    )
+    distinct = np.abs(difference) >= _PAIR_MINIMUM_DIFFERENCE
+    contrast = float(np.mean(distinct))
+
+    kernel = np.ones(
+        (2 * _PAIR_AGREEMENT_MARGIN + 1, 2 * _PAIR_AGREEMENT_MARGIN + 1),
+        dtype=np.uint8,
+    )
+    lit = (normal_pattern > 0).astype(np.uint8)
+    lit_core = cv2.erode(lit, kernel, borderValue=0) > 0
+    dark_core = cv2.erode(1 - lit, kernel, borderValue=0) > 0
+    predicted = cv2.perspectiveTransform(
+        np.column_stack((camera_x, camera_y))
+        .astype(np.float64)
+        .reshape(-1, 1, 2),
+        camera_to_projector,
+    ).reshape(-1, 2)
+    projector_x = np.rint(predicted[:, 0]).astype(np.int64)
+    projector_y = np.rint(predicted[:, 1]).astype(np.int64)
+    height, width = normal_pattern.shape
+    inside = (
+        (projector_x >= 0)
+        & (projector_x < width)
+        & (projector_y >= 0)
+        & (projector_y < height)
+    )
+    expected_lit = np.zeros(camera_x.size, dtype=bool)
+    expected_dark = np.zeros(camera_x.size, dtype=bool)
+    expected_lit[inside] = lit_core[projector_y[inside], projector_x[inside]]
+    expected_dark[inside] = dark_core[
+        projector_y[inside],
+        projector_x[inside],
+    ]
+    # Non-distinct predicted pixels count as disagreement: a stale normal
+    # frame differs from the inverse on only about half of them.
+    checked = expected_lit | expected_dark
+    checked_ratio = float(np.count_nonzero(checked) / camera_x.size)
+    if checked_ratio < _PAIR_MINIMUM_CHECKED_RATIO:
+        return GrayCodePairQuality(contrast, None, checked_ratio)
+    agreement = float(
+        np.mean(
+            distinct[checked]
+            & ((difference[checked] > 0) == expected_lit[checked])
+        )
+    )
+    return GrayCodePairQuality(contrast, agreement, checked_ratio)
 
 
 def fit_projector_mapping(

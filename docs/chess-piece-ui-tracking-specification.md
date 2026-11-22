@@ -219,11 +219,25 @@ Restored settings are provisional until the startup checks below succeed.
    for an authorized calibration or verification pattern. If a necessary
    check cannot be completed, or either calibration is invalid or unavailable,
    report the specific condition non-modally and do not enter startup Offline
-   readiness. Full calibration, including any checkerboard or other pattern
-   required by the chosen method, shall begin only on an explicit user action;
-   it shall not start automatically on a failed check.
+   readiness.
 
-   Concretely, the saved calibration is loaded when its projector display
+   **Startup calibration.** Whenever the camera starts or the selected
+   projector changes, and a projector display is selected, the application
+   automatically runs the piece-tolerant board-cropped calibration, as
+   described in `adaptive-board-cropped-calibration-specification.md`. It
+   does not first trust the saved calibration. The calibration begins after
+   two seconds of camera frames, works with pieces in any position, and on
+   success is activated and saved as live verified. When it fails or is
+   cancelled, the application stays uncalibrated and never loads the saved
+   calibration. The failure and its corrective action are reported
+   non-modally, and a board map shows usable squares in green and squares
+   to clear in red.
+
+   The saved-calibration loading and automatic alignment recovery described
+   below are no longer invoked by the application, because startup always
+   recalibrates. Their code is retained until its removal is decided.
+
+   Previously, the saved calibration was loaded when its projector display
    name and resolution match the selected projector. Camera-only operation is
    not supported. A loaded saved calibration keeps occupancy, startup checks,
    and move tracking paused until the alignment monitor reports a live
@@ -272,33 +286,84 @@ Restored settings are provisional until the startup checks below succeed.
        the board used to be, so it is predicted on the saved camera grid.
        Adoption uses the existing board remap of the projector grid. This
        hypothesis is not tested after a camera hardware change.
-   - The best hypothesis is adopted when its score is at least 0.4 and every
-     rival whose predicted grid differs by more than a quarter square scores
-     at least 0.2 lower. Rivals within a quarter square predict nearly the
-     same mapping and do not make the result ambiguous. An adopted result is
-     activated as live verified and saved as the new calibration record for
-     the active camera and projector, after the previous record is copied to
+   - The best hypothesis is selected when its score is at least 0.4 and
+     every rival whose predicted grid differs by more than a quarter square
+     scores at least 0.2 lower. Rivals within a quarter square predict nearly
+     the same mapping and do not make the result ambiguous. If three pattern
+     pairs yield no selectable hypothesis, recovery fails.
+   - The selected hypothesis is only a coarse explanation; when the camera
+     and board both moved (or the projector moved), neither explanation is
+     exact. The remaining offset is therefore measured, not assumed:
+     **Offset measurement (A).** A measurement pattern and its inverse are
+     projected through the hypothesis mapping. Its 7 x 7 cells are shifted by
+     half a square, so every pattern edge crosses the middle of a uniformly
+     coloured board square: optical blur pushes an edge that coincides with
+     a light/dark board edge toward the darker square, which biased a
+     square-aligned measurement by up to 8% of a square in simulation. A
+     +1/-1 template of the cells predicted on the live board grid is
+     registered onto the normalized, saturated response by
+     enhanced-correlation (ECC) affine alignment, restricted to the eroded
+     interior of cells lying entirely on scored squares (all cells when
+     fewer than eight qualify). Patterns and templates are rendered with
+     exact supersampled pixel coverage; OpenCV's anti-aliased polygon fill
+     fattens squares asymmetrically. The largest displacement of a scored
+     square corner is the residual offset.
+     - A residual of at most 5% of a square adopts the hypothesis mapping.
+     - Otherwise the measured warp corrects the hypothesis mapping:
+       the projector point of each board grid point is taken where the
+       hypothesis would place the registered camera point. If the
+       registration does not converge, the uncorrected hypothesis mapping is
+       used as the starting point.
+   - **Fringe refinement (B).** Starting from that corrected mapping, the
+     application projects, cropped to the board, four phase-shifted cosine
+     fringes along the board columns and four along the board rows, each
+     with a period of one square. For every scored square, 7 x 7 camera
+     samples over its central 60% decode the phase `atan2(I3 - I1, I0 - I2)`,
+     which is independent of the square's reflectance. The phase is
+     unwrapped against the corrected mapping's prediction and gives the
+     exact projector pixel seen at that board position. Samples with fringe
+     modulation below 4 grey levels or below 15% of the projected brightness
+     (pieces, shadows, glare) are rejected, and a square needs at least half
+     of its samples. At least eight squares spanning at least three rows and
+     three columns are required. A robust board-to-projector homography
+     (RANSAC, threshold 10% of a projector square) is fitted, each projector
+     grid point is corrected by the median residual of inlier samples within
+     1.5 squares, and the median fit error must be at most 8% of a square.
+     If refinement fails these checks, the corrected mapping from A is kept.
+   - **Final check.** The measurement pattern and its inverse are projected
+     again through the new projector grid and must appear on the live board
+     grid with a cell score of at least 0.4 and a measured offset of at most
+     10% of a square; otherwise recovery fails. The camera and board
+     may therefore both have moved, and the projector too, as long as the
+     live board grid is detected and enough squares are empty.
+   - An adopted result is activated as live verified and saved as the new
+     calibration record for the active camera and projector, after the
+     previous record is copied to
      `calibrations/before-recovery-<timestamp>.json`. The camera calibration
-     indicator keeps showing which hypothesis was recovered. The projector
-     returns to black and startup continues with occupancy.
-   - If three pattern pairs yield no acceptable hypothesis (for example,
-     both camera and board moved, or the board was obstructed), the
-     calibration is marked unusable for this run, the saved record is kept,
-     and the user is told non-modally to run a calibration explicitly.
+     indicator keeps showing which hypothesis was recovered, or that the
+     alignment was re-measured. The projector returns to black and startup
+     continues with occupancy.
+   - A failure marks the calibration unusable for this run, keeps the saved
+     record, and tells the user non-modally to run a calibration explicitly.
    - Every step is written to the runtime diagnostics event file
      `diagnostics/runtime-events.jsonl` with camera images: the recovery
      start (reason, displacement, number of scored squares), the measurement
-     (black, pattern, inverse, and normalized-response images, display
-     delays, every hypothesis's score and grid center, the selected
-     hypothesis, the last rejection reason), the backup file name, and the
-     adoption or failure.
+     (black, pattern, inverse, normalized-response, measurement-response,
+     first column and row fringe, and final-check response images, display delays, every
+     hypothesis's score and grid center, the selected hypothesis, the
+     measured residual offset, the refinement sample counts, fit error and
+     change, the final-check score and offset, and the last rejection
+     reason), the backup file name, and the adoption or failure.
    - Recovery runs only for startup verification of a loaded saved
      calibration. During play, board movement is still remapped as a board
      movement and verified by the projected-square alignment checks.
 
    *Implementation status:* implemented in `AlignmentMonitor`
    (`recovery_pattern_image`, `score_recovery_hypotheses`,
-   `select_recovery_hypothesis`, `camera_moved_mapping`) and `CameraWindow`
+   `select_recovery_hypothesis`, `measure_pattern_offset`,
+   `pattern_offset_fraction`, `offset_pattern_score`,
+   `corrected_projector_grid`, `recovery_fringe_image`,
+   `refine_projector_grid`, `camera_moved_mapping`) and `CameraWindow`
    (`_restore_saved_calibration`, recovery signal handlers), with
    `CalibrationStore.load_for_projector` reporting whether the camera also
    matches and `CalibrationStore.backup` preserving the replaced record.
@@ -310,15 +375,24 @@ Restored settings are provisional until the startup checks below succeed.
    settling delay; on a board moved by about 1 cm the square straddled a light
    and a dark board square, the reflectance difference biased the centroid
    by 17% of a square, and the correct hypothesis was rejected. The
-   normalized, whole-board pattern comparison replaces both. Tests:
+   normalized, whole-board pattern comparison replaces both. A third run with
+   camera and board both moved selected "camera moved" with score 0.78 but
+   left a 13% offset, because hypothesis selection alone cannot measure a
+   combined movement; offset measurement, fringe refinement, and the final
+   check address this. Tests:
    `tests/test_alignment_monitor.py` (pattern asymmetry, hypothesis
    selection with board reflectance, frames before a pattern is visible are
-   ignored, camera change with different grid indexing, missing pattern
-   fails after three attempts, display timeout, small drift without
-   recovery) and `tests/test_projector_calibration.py` (store matching and
+   ignored, camera change with different grid indexing, combined camera and
+   board movement refined to the exact projector grid with and without
+   occupied squares, failed fringe refinement falling back to the measured
+   correction, a re-measured alignment failing the final check, missing pattern fails after three attempts, display
+   timeout, small drift without recovery) and `tests/test_projector_calibration.py` (store matching and
    backup, occupied-square exclusion, dialog-free failure). Known
-   limitations: simultaneous camera and board movement requires explicit
-   calibration, and if no camera frame is available when recovery completes,
+   limitations: the coarse step must still select a hypothesis, so a
+   movement of more than about a quarter square relative to both
+   explanations requires explicit calibration; with few empty squares (for
+   example the starting position) the outer ranks are extrapolated from the
+   board plane; and if no camera frame is available when recovery completes,
    the recovered calibration is used but not saved.
 2. **Load the saved session provisionally.** Read and validate any saved
    physical piece map, orientation, legal FEN, reference metadata, and Offline
@@ -394,9 +468,11 @@ correction. Until then, a mismatch shall follow step 6 above.
   readiness and reports which check failed without opening a startup dialog
   or automatically projecting a calibration pattern.
 - With a valid projector calibration, a moved board, a moved camera, or a
-  replaced camera is recovered by an asymmetric verification pattern and its
-  inverse, scored over the empty board squares independently of board
-  reflectance; the chosen
+  replaced camera, or a combination of these, is recovered by an asymmetric
+  verification pattern and its inverse scored over the empty board squares
+  independently of board reflectance, a measured residual offset, fringe
+  refinement when that offset exceeds 5% of a square, and a final check
+  within 10% of a square; the chosen
   hypothesis is saved, reported in the status text, and recorded in the
   runtime diagnostics file. An unmatched verification keeps the saved record
   and asks for explicit calibration without a dialog.

@@ -255,16 +255,23 @@ class ProjectorWindow(QWidget):
         self.update()
 
     def show_pattern(self, pattern: NDArray[np.uint8]) -> None:
-        if pattern.ndim != 2:
-            raise ValueError("Projector patterns must be grayscale images.")
+        """Show a grayscale (H, W) or RGB (H, W, 3) projector image."""
         contiguous_pattern = np.ascontiguousarray(pattern, dtype=np.uint8)
-        height, width = contiguous_pattern.shape
+        if contiguous_pattern.ndim == 2:
+            image_format = QImage.Format.Format_Grayscale8
+        elif contiguous_pattern.ndim == 3 and contiguous_pattern.shape[2] == 3:
+            image_format = QImage.Format.Format_RGB888
+        else:
+            raise ValueError(
+                "Projector patterns must be grayscale or RGB images."
+            )
+        height, width = contiguous_pattern.shape[:2]
         self._pattern = QImage(
             contiguous_pattern.data,
             width,
             height,
             contiguous_pattern.strides[0],
-            QImage.Format.Format_Grayscale8,
+            image_format,
         ).copy()
         self._show_mode("pattern")
 

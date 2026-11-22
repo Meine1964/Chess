@@ -16,6 +16,7 @@ from src.chess_camera.projector_calibration import (
     MappingResult,
     ValidationResult,
     board_circle_polygon,
+    clearance_squares,
     coded_marker_pattern,
     decode_gray_code,
     detect_coded_marker_correspondences,
@@ -25,6 +26,7 @@ from src.chess_camera.projector_calibration import (
     fit_projector_mapping,
     fit_visible_middle_lattice,
     gray_code_bit_count,
+    gray_code_pair_quality,
     gray_code_pattern,
     interpolate_grid_point,
     locate_validation_target,
@@ -32,7 +34,11 @@ from src.chess_camera.projector_calibration import (
     quick_realign_mapping,
     remap_projector_mapping,
     refine_projector_mesh,
+    require_board_plane_support,
+    select_board_plane_support,
+    select_validation_squares,
     square_polygons,
+    support_map_pattern,
     validation_result,
 )
 
@@ -54,6 +60,122 @@ def _detection(
         method="test",
         grid_alignment=1.0,
     )
+
+
+_PIECE_SCENE_HOMOGRAPHY = np.asarray(
+    [[1.4, 0.05, 30.0], [-0.03, 1.35, 25.0], [0.00004, 0.00002, 1.0]],
+    dtype=np.float64,
+)
+
+
+def _piece_scene(
+    occupied_rows: tuple[int, ...],
+) -> tuple[BoardDetection, np.ndarray, np.ndarray, np.ndarray]:
+    detection = _detection(40, 40, 360, 360)
+    camera_y, camera_x = np.mgrid[0:400, 0:400].astype(np.float64)
+    points = np.stack((camera_x, camera_y, np.ones_like(camera_x)), axis=2)
+    projected = points @ _PIECE_SCENE_HOMOGRAPHY.T
+    projector_x = projected[:, :, 0] / projected[:, :, 2]
+    projector_y = projected[:, :, 1] / projected[:, :, 2]
+    for row in occupied_rows:
+        top = 40 + 40 * row
+        # A piece and its occlusion fill the square with smoothly varying,
+        # off-plane projector coordinates from the piece's height.
+        rise = (camera_y[top : top + 40, 40:360] - top) * 0.3
+        projector_x[top : top + 40, 40:360] += 9 + rise
+        projector_y[top : top + 40, 40:360] -= 12 + rise
+    quantized_x = (np.floor(projector_x / 2) * 2 + 1).astype(np.int32)
+    quantized_y = (np.floor(projector_y / 2) * 2 + 1).astype(np.int32)
+    valid = np.zeros((400, 400), dtype=bool)
+    valid[42:358, 42:358] = True
+    return detection, quantized_x, quantized_y, valid
+
+
+def _true_projector_grid(detection: BoardDetection) -> np.ndarray:
+    return cv2.perspectiveTransform(
+        detection.grid_points.reshape(-1, 1, 2).astype(np.float64),
+        _PIECE_SCENE_HOMOGRAPHY,
+    ).reshape(9, 9, 2)
+
+
+def test_plane_support_calibrates_starting_position_with_pieces() -> None:
+    detection, projector_x, projector_y, valid = _piece_scene((0, 1, 6, 7))
+    with pytest.raises(CalibrationError, match="inliers"):
+        fit_projector_mapping(
+            detection,
+            projector_x,
+            projector_y,
+            valid,
+            (1280, 720),
+            1.0,
+        )
+
+    selection = select_board_plane_support(
+        detection,
+        projector_x,
+        projector_y,
+        valid,
+        (1280, 720),
+        empty_squares=np.ones((8, 8), dtype=bool),
+    )
+    require_board_plane_support(selection)
+    mapping = fit_projector_mapping(
+        detection,
+        projector_x,
+        projector_y,
+        selection.mask,
+        (1280, 720),
+        1.0,
+    )
+
+    retained_rows = {
+        row for row, _column in np.argwhere(
+            selection.square_status == "retained"
+        )
+    }
+    assert retained_rows == {2, 3, 4, 5}
+    assert not np.any(selection.square_status[[0, 1, 6, 7]] == "retained")
+    error = np.linalg.norm(
+        mapping.projector_grid - _true_projector_grid(detection),
+        axis=2,
+    )
+    assert float(np.max(error)) < 1.0
+
+
+def test_plane_support_ignores_wrong_occupancy_prior() -> None:
+    detection, projector_x, projector_y, valid = _piece_scene((0, 1, 6, 7))
+    prior = np.zeros((8, 8), dtype=bool)
+    prior[0:2, :] = True
+
+    selection = select_board_plane_support(
+        detection,
+        projector_x,
+        projector_y,
+        valid,
+        (1280, 720),
+        empty_squares=prior,
+    )
+
+    assert not selection.occupancy_used
+    assert selection.sufficiently_spread
+    assert selection.details()["retained_square_count"] == 32
+
+
+def test_plane_support_rejects_too_few_board_plane_squares() -> None:
+    detection, projector_x, projector_y, valid = _piece_scene(
+        (0, 1, 2, 3, 6, 7)
+    )
+
+    selection = select_board_plane_support(
+        detection,
+        projector_x,
+        projector_y,
+        valid,
+        (1280, 720),
+    )
+
+    with pytest.raises(CalibrationError, match="board squares"):
+        require_board_plane_support(selection)
 
 
 def test_expanded_projector_board_mask_limits_illumination() -> None:
@@ -502,6 +624,7 @@ def test_completed_calibration_returns_to_black_without_grid_preview() -> None:
         _latest_frame=None,
         _projector_window=MagicMock(),
         _restore_remembered_square=MagicMock(),
+        _startup_calibration_running=False,
     )
 
     with patch(
@@ -766,7 +889,11 @@ def test_failed_experimental_calibration_retains_previous_mapping(
             coded_pattern_mode=coded_pattern_mode,
             adaptive_cropped_mode=adaptive_cropped_mode,
             diagnostic_captures={},
+            diagnostic_details={},
+            support_map=None,
+            clearance_squares=(),
         ),
+        _startup_calibration_running=False,
         _invalidate_saved_calibration=MagicMock(return_value=None),
         _invalidate_calibration=MagicMock(),
         _set_calibration_indicator=MagicMock(),
@@ -787,6 +914,73 @@ def test_failed_experimental_calibration_retains_previous_mapping(
     details = window._record_runtime_diagnostic.call_args.kwargs["details"]
     assert details["previous_calibration_retained"] is True
     assert details["previous_calibration_invalidated"] is False
+
+
+def test_startup_calibration_starts_after_camera_settles() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    window = SimpleNamespace(
+        _startup_calibration_pending=True,
+        _startup_calibration_ready_at=None,
+        _startup_calibration_running=False,
+        _calibrator=SimpleNamespace(active=False),
+        _start_adaptive_projector_calibration=MagicMock(return_value=True),
+    )
+
+    with patch(
+        "src.chess_camera.camera_app.monotonic",
+        side_effect=[10.0, 11.0, 12.5],
+    ):
+        for _frame in range(3):
+            CameraWindow._advance_startup_calibration(window)
+
+    window._start_adaptive_projector_calibration.assert_called_once_with(
+        startup=True
+    )
+    assert window._startup_calibration_running is True
+    assert window._startup_calibration_pending is False
+
+
+def test_startup_calibration_failure_projects_support_map() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    support_map = np.zeros((720, 1280, 3), dtype=np.uint8)
+    window = SimpleNamespace(
+        _projector_window=MagicMock(),
+        _startup_calibration_running=True,
+        _calibrator=SimpleNamespace(
+            diagnostic_details={"plane_support": {}},
+            diagnostic_captures={},
+            support_map=support_map,
+            clearance_squares=((2, 3),),
+        ),
+        _record_runtime_diagnostic=MagicMock(),
+        _activate_calibration_result=MagicMock(),
+        _invalidate_calibration=MagicMock(),
+        _set_calibration_indicator=MagicMock(),
+        _projector_calibration_indicator=object(),
+        _projector_status=MagicMock(),
+    )
+
+    with patch("src.chess_camera.camera_app.QMessageBox") as message_box:
+        CameraWindow._projector_calibration_failed(window, "too few squares")
+
+    message_box.warning.assert_not_called()
+    window._activate_calibration_result.assert_not_called()
+    window._invalidate_calibration.assert_called_once_with()
+    window._projector_window.show_pattern.assert_called_once_with(support_map)
+    status = window._projector_status.setText.call_args.args[0]
+    assert "Remove the pieces from the red squares" in status
+    assert window._startup_calibration_running is False
+    failure = window._record_runtime_diagnostic.call_args_list[0]
+    assert failure.kwargs["details"]["startup"] is True
+    assert "plane_support" in failure.kwargs["details"]
 
 
 def test_alignment_loss_invalidates_projection_mapping() -> None:
@@ -1637,7 +1831,7 @@ def test_explicit_projector_selection_is_persisted() -> None:
         ],
         _settings=settings,
         _record_runtime_diagnostic=MagicMock(),
-        _restore_saved_calibration=MagicMock(),
+        _request_startup_calibration=MagicMock(),
     )
 
     CameraWindow._projector_selection_changed(window)
@@ -1683,7 +1877,7 @@ def test_projector_screen_refresh_uses_current_enumeration() -> None:
         _settings=settings,
         _projector_selector=selector,
         _screens=[],
-        _restore_saved_calibration=MagicMock(),
+        _request_startup_calibration=MagicMock(),
     )
 
     CameraWindow._refresh_projector_screens(
@@ -1696,7 +1890,7 @@ def test_projector_screen_refresh_uses_current_enumeration() -> None:
         "ABC TV - 1280x720 at (0, 0)",
     )
     selector.setCurrentIndex.assert_called_once_with(1)
-    window._restore_saved_calibration.assert_called_once_with()
+    window._request_startup_calibration.assert_called_once_with()
 
 
 def test_reset_to_start_blacks_projector_before_verification() -> None:
@@ -2261,7 +2455,281 @@ def test_adaptive_gray_code_falls_back_to_three_frame_average() -> None:
     assert np.all(controller._captures["x_0_normal"] == 20)
 
 
+def _striped_pattern(stripe_width: int, size: int = 128) -> np.ndarray:
+    columns = (np.arange(size) // stripe_width) % 2 == 1
+    return np.tile(np.where(columns, 255, 0).astype(np.uint8), (size, 1))
+
+
+def _captured(pattern: np.ndarray) -> np.ndarray:
+    return np.where(pattern > 0, 200, 50).astype(np.uint8)
+
+
+def test_gray_code_pair_quality_accepts_matching_pair() -> None:
+    pattern = _striped_pattern(32)
+    quality = gray_code_pair_quality(
+        _captured(pattern),
+        _captured(255 - pattern),
+        np.ones(pattern.shape, dtype=bool),
+        pattern,
+        np.eye(3),
+    )
+
+    assert quality.contrast == 1.0
+    assert quality.agreement == 1.0
+    assert quality.acceptable
+
+
+def test_gray_code_pair_quality_rejects_stale_normal_capture() -> None:
+    pattern = _striped_pattern(32)
+    stale = _striped_pattern(16)
+    quality = gray_code_pair_quality(
+        _captured(stale),
+        _captured(255 - pattern),
+        np.ones(pattern.shape, dtype=bool),
+        pattern,
+        np.eye(3),
+    )
+
+    assert quality.contrast >= 0.3
+    assert quality.agreement is not None
+    assert quality.agreement == pytest.approx(0.5, abs=0.05)
+    assert not quality.acceptable
+
+
+def test_gray_code_pair_quality_rejects_collapsed_pair() -> None:
+    pattern = _striped_pattern(32)
+    capture = np.full(pattern.shape, 120, dtype=np.uint8)
+    quality = gray_code_pair_quality(
+        capture,
+        capture,
+        np.ones(pattern.shape, dtype=bool),
+        pattern,
+        np.eye(3),
+    )
+
+    assert quality.contrast == 0.0
+    assert not quality.acceptable
+
+
+def test_clearance_lights_unretained_central_squares() -> None:
+    from src.chess_camera.projector_calibration import PlaneSupportSelection
+
+    status = np.full((8, 8), "retained", dtype="<U16")
+    status[2, 3] = "occupied"
+    status[5, 5] = "plane-outlier"
+    status[0, 0] = "occupied"
+    selection = PlaneSupportSelection(
+        mask=np.zeros((10, 10), dtype=bool),
+        interior_mask=np.zeros((10, 10), dtype=bool),
+        plane_inliers=np.zeros((10, 10), dtype=bool),
+        square_status=status,
+        filter_counts={},
+        occupancy_used=False,
+    )
+    squares = clearance_squares(selection)
+    grid = _detection(0, 0, 80, 80).grid_points
+    usable = tuple(
+        (int(row), int(column))
+        for row, column in np.argwhere(status == "retained")
+    )
+
+    pattern = support_map_pattern((90, 90), grid, usable, squares)
+
+    assert squares == ((2, 3), (5, 5))
+    assert tuple(pattern[25, 35]) == (255, 0, 0)
+    assert tuple(pattern[55, 55]) == (255, 0, 0)
+    assert tuple(pattern[15, 15]) == (0, 255, 0)
+    assert tuple(pattern[5, 5]) == (0, 0, 0)
+    assert tuple(pattern[25, 40]) == (0, 0, 0)
+
+
+def test_validation_squares_avoid_unretained_squares() -> None:
+    status = np.full((8, 8), "retained", dtype="<U16")
+    assert len(select_validation_squares(status)) == 13
+
+    status[3, 3] = "occupied"
+    status[1, 1] = "occupied"
+    squares = select_validation_squares(status)
+
+    assert len(squares) == 13
+    assert len(set(squares)) == 13
+    assert all(status[row, column] == "retained" for row, column in squares)
+
+
+def _adaptive_validation_controller(
+    hit_count: int,
+) -> tuple[ProjectorCalibrationController, list[str], list[object]]:
+    from unittest.mock import MagicMock
+
+    controller = ProjectorCalibrationController(MagicMock(), MagicMock())
+    controller._schedule = lambda _delay, _callback: None
+    controller._active = True
+    controller._adaptive_cropped_mode = True
+    detection = _detection()
+    controller._detection = detection
+    controller._mapping = MappingResult(
+        camera_grid=detection.grid_points,
+        projector_grid=detection.grid_points,
+        camera_to_projector_homography=np.eye(3, dtype=np.float32),
+        coverage_ratio=1.0,
+        decoded_ratio=1.0,
+        inlier_ratio=1.0,
+        rms_error=0.0,
+        maximum_error=0.0,
+    )
+    squares = select_validation_squares(
+        np.full((8, 8), "retained", dtype="<U16")
+    )
+    controller._validation_coordinates = [
+        (column + 0.5, row + 0.5) for row, column in squares
+    ]
+    for index, (x, y) in enumerate(controller._validation_coordinates):
+        expected = np.asarray([10 + x * 10, 10 + y * 10], dtype=np.float32)
+        controller._validation_expected.append(expected)
+        controller._validation_widths.append(10.0)
+        if index < hit_count:
+            measured = expected + 0.5
+        elif index % 2:
+            measured = np.full(2, np.nan, dtype=np.float32)
+        else:
+            measured = expected + 4.0
+        controller._validation_measured.append(measured)
+    failures: list[str] = []
+    completed: list[object] = []
+    controller.failed.connect(failures.append)
+    controller.completed.connect(completed.append)
+    return controller, failures, completed
+
+
+def test_adaptive_validation_tolerates_targets_on_pieces() -> None:
+    from unittest.mock import patch
+
+    controller, failures, completed = _adaptive_validation_controller(10)
+
+    with patch.object(
+        controller,
+        "_refine_and_repeat_validation",
+    ) as refine:
+        controller._finish_validation()
+
+    refine.assert_not_called()
+    assert not failures
+    assert len(completed) == 1
+    assert len(completed[0].validation.errors) == 10
+    assert sum(entry["hit"] for entry in controller._validation_log) == 10
+
+
+def test_adaptive_validation_fails_with_too_few_hits() -> None:
+    controller, _failures, completed = _adaptive_validation_controller(8)
+
+    with pytest.raises(CalibrationError, match="Only 8 of 13"):
+        controller._finish_validation()
+
+    assert not completed
+
+
+def _controller_at_first_gray_inverse() -> tuple[
+    ProjectorCalibrationController,
+    list[str],
+    list[str],
+]:
+    from unittest.mock import MagicMock
+
+    controller = ProjectorCalibrationController(MagicMock(), MagicMock())
+    controller._schedule = lambda _delay, _callback: None
+    controller._active = True
+    controller._adaptive_cropped_mode = True
+    controller._adaptive_phase = "gray-code"
+    controller._projector_size = (100, 100)
+    controller._detection = _detection()
+    controller._adaptive_rough_homography = np.eye(3)
+    controller._steps = controller._build_cropped_gray_code_steps(
+        np.ones((100, 100), dtype=bool)
+    )
+    controller._step_index = next(
+        index
+        for index, step in enumerate(controller._steps)
+        if step.key.endswith("_inverse")
+    )
+    failures: list[str] = []
+    statuses: list[str] = []
+    controller.failed.connect(failures.append)
+    controller.status_changed.connect(statuses.append)
+    return controller, failures, statuses
+
+
+def test_unreliable_gray_code_pair_is_recaptured_then_fails() -> None:
+    controller, failures, statuses = _controller_at_first_gray_inverse()
+    inverse_index = controller._step_index
+    inverse_step = controller._steps[inverse_index]
+    pair_key = inverse_step.key.removesuffix("_inverse")
+    collapsed = np.full((100, 100), 120, dtype=np.uint8)
+
+    for attempt in range(2):
+        controller._captures[f"{pair_key}_normal"] = collapsed
+        controller._complete_frame_capture(collapsed)
+        assert controller._step_index == inverse_index - 1
+        assert len(statuses) == attempt + 1
+        assert not failures
+        controller._step_index = inverse_index
+
+    controller._complete_frame_capture(collapsed)
+
+    assert len(failures) == 1
+    axis, bit = pair_key.split("_")
+    assert f"{axis.upper()} Gray-code bit {int(bit) + 1}" in failures[0]
+    assert "after 2 recaptures" in failures[0]
+    assert [entry["accepted"] for entry in controller._gray_pair_log] == [
+        False,
+        False,
+        False,
+    ]
+
+
+def test_reliable_gray_code_pair_advances() -> None:
+    controller, failures, statuses = _controller_at_first_gray_inverse()
+    inverse_index = controller._step_index
+    normal_step = controller._steps[inverse_index - 1]
+    inverse_step = controller._steps[inverse_index]
+    controller._captures[normal_step.key] = _captured(normal_step.pattern)
+
+    controller._complete_frame_capture(_captured(inverse_step.pattern))
+
+    assert controller._step_index == inverse_index + 1
+    assert not failures
+    assert not statuses
+    assert controller._gray_pair_log[-1]["accepted"] is True
+
+
+def test_forced_validation_capture_after_gray_code_is_not_logged() -> None:
+    controller = ProjectorCalibrationController(
+        object(),
+        object(),
+        frames_per_state=1,
+    )
+    controller._schedule = lambda _delay, _callback: None
+    controller._active = True
+    controller._collecting = True
+    controller._adaptive_cropped_mode = True
+    controller._adaptive_phase = "gray-code"
+    controller._adaptive_gray_fallback = True
+    controller._projector_size = (32, 24)
+    controller._steps = controller._build_cropped_gray_code_steps(
+        np.ones((24, 32), dtype=bool)
+    )
+    controller._step_index = len(controller._steps)
+    controller._validation_index = 0
+    accepted: list[np.ndarray] = []
+    controller._accept_validation_capture = accepted.append
+
+    controller.accept_frame(np.full((12, 16, 3), 30, dtype=np.uint8))
+
+    assert len(accepted) == 1
+    assert controller._gray_capture_log == []
+
+
 def test_adaptive_final_mapping_uses_dense_gray_code() -> None:
+    from types import SimpleNamespace
     from unittest.mock import patch
 
     class FakeProjector:
@@ -2295,12 +2763,29 @@ def test_adaptive_final_mapping_uses_dense_gray_code() -> None:
     )
     decoded = np.zeros((10, 10), dtype=np.int32)
     valid = np.ones((10, 10), dtype=bool)
+    selection = SimpleNamespace(
+        mask=np.zeros((10, 10), dtype=bool),
+        sufficiently_spread=True,
+    )
 
     with (
         patch(
             "src.chess_camera.calibration_controller.decode_gray_code",
             return_value=(decoded, decoded, valid),
         ) as decode,
+        patch(
+            "src.chess_camera.calibration_controller."
+            "select_board_plane_support",
+            return_value=selection,
+        ) as select,
+        patch(
+            "src.chess_camera.calibration_controller.plane_support_overlay",
+            return_value=np.zeros((10, 10, 3), dtype=np.uint8),
+        ),
+        patch(
+            "src.chess_camera.calibration_controller."
+            "require_board_plane_support",
+        ),
         patch(
             "src.chess_camera.calibration_controller.fit_projector_mapping",
             return_value=mapping,
@@ -2309,7 +2794,9 @@ def test_adaptive_final_mapping_uses_dense_gray_code() -> None:
         controller._calculate_adaptive_mapping()
 
     decode.assert_called_once()
+    select.assert_called_once()
     fit.assert_called_once()
+    assert fit.call_args.args[3] is selection.mask
     assert controller._mapping is mapping
     assert projector.grid is not None
 
@@ -2628,24 +3115,6 @@ def test_calibration_store_backs_up_mapping_before_replacement(
     assert backup.name.startswith("before-recovery-")
     assert backup.read_text(encoding="utf-8") == '{"schema_version": 1}'
     assert source.exists()
-
-
-def test_recovery_excludes_occupied_physical_squares() -> None:
-    from types import SimpleNamespace
-
-    from src.chess_camera.camera_app import CameraWindow
-
-    piece = object()
-    window = SimpleNamespace(
-        _piece_synchronizer=SimpleNamespace(
-            position={(4, 2): piece, (5, 3): piece}
-        ),
-        _physical_board_square=lambda row, column: (7 - row, 7 - column),
-    )
-
-    assert CameraWindow._recovery_occupied_squares(window) == frozenset(
-        {(3, 5), (2, 4)}
-    )
 
 
 def test_failed_alignment_recovery_is_reported_without_dialog() -> None:
