@@ -7,9 +7,11 @@ import numpy as np
 
 from .board_detector import FloatArray, ImageArray
 from .chess_position import Position, Square, square_name
+from .image_statistics import median_uint8_difference, offset_uint8
 from .legal_game import LegalMoveSignature
 from .legal_signature_matcher import (
     find_illegal_removed_piece,
+    match_destination_inferred_move,
     match_legal_move_signature,
     match_pending_castling,
     match_pending_castling_relocation,
@@ -218,6 +220,7 @@ class ReferenceMoveTracker:
         *,
         required_signature: LegalMoveSignature | None = None,
         compound_signatures: tuple[LegalMoveSignature, ...] = (),
+        allow_destination_inference: bool = False,
     ) -> ReferenceTrackerUpdate:
         started = perf_counter()
         state: ReferenceTrackerState | None = None
@@ -230,6 +233,7 @@ class ReferenceMoveTracker:
                 physical_signatures,
                 required_signature=required_signature,
                 compound_signatures=compound_signatures,
+                allow_destination_inference=allow_destination_inference,
             )
             state = update.state
             return update
@@ -248,6 +252,7 @@ class ReferenceMoveTracker:
         *,
         required_signature: LegalMoveSignature | None,
         compound_signatures: tuple[LegalMoveSignature, ...],
+        allow_destination_inference: bool,
     ) -> ReferenceTrackerUpdate:
         if self._reference is None:
             return ReferenceTrackerUpdate(
@@ -389,6 +394,7 @@ class ReferenceMoveTracker:
         illegal_relocation = False
         matched_signature: LegalMoveSignature | None = None
         compound_ambiguous = False
+        destination_inferred = False
         decision_details: dict[str, object] | None = None
         complete_candidate_signatures = (
             *physical_signatures,
@@ -469,6 +475,35 @@ class ReferenceMoveTracker:
                     matched_signature.source,
                     matched_signature.destination,
                 )
+            elif (
+                allow_destination_inference
+                and required_signature is None
+                and not compound_signatures
+                and not has_large_obstruction
+                and (
+                    inferred_signature := match_destination_inferred_move(
+                        scores,
+                        physical_signatures,
+                        piece_colors,
+                        minimum_square_change=self._minimum_square_change,
+                    )
+                )
+                is not None
+            ):
+                matched_signature = inferred_signature
+                move = (
+                    inferred_signature.source,
+                    inferred_signature.destination,
+                )
+                destination_inferred = True
+                decision_details = {
+                    "verification": "destination-inferred",
+                    "uci": inferred_signature.uci,
+                    "source_score": float(scores[inferred_signature.source]),
+                    "destination_score": float(
+                        scores[inferred_signature.destination]
+                    ),
+                }
             elif (
                 required_signature is not None
                 and compound_signatures
@@ -754,6 +789,7 @@ class ReferenceMoveTracker:
                     self._reference,
                     normalized,
                     release_move,
+                    limit_destination_ratio=not destination_inferred,
                 )
                 for release_move in release_moves
             )
@@ -1351,25 +1387,14 @@ def _normalize_candidate(
     reference: ImageArray,
     candidate: ImageArray,
 ) -> ImageArray:
-    reference_lab = cv2.cvtColor(reference, cv2.COLOR_BGR2LAB)
-    candidate_lab = cv2.cvtColor(candidate, cv2.COLOR_BGR2LAB).astype(
-        np.float32
+    reference_lightness = cv2.cvtColor(reference, cv2.COLOR_BGR2LAB)[:, :, 0]
+    candidate_lab = cv2.cvtColor(candidate, cv2.COLOR_BGR2LAB)
+    offset = median_uint8_difference(
+        reference_lightness,
+        candidate_lab[:, :, 0],
     )
-    offset = float(
-        np.median(
-            reference_lab[:, :, 0].astype(np.float32)
-            - candidate_lab[:, :, 0]
-        )
-    )
-    candidate_lab[:, :, 0] = np.clip(
-        candidate_lab[:, :, 0] + offset,
-        0,
-        255,
-    )
-    return cv2.cvtColor(
-        candidate_lab.astype(np.uint8),
-        cv2.COLOR_LAB2BGR,
-    )
+    candidate_lab[:, :, 0] = offset_uint8(candidate_lab[:, :, 0], offset)
+    return cv2.cvtColor(candidate_lab, cv2.COLOR_LAB2BGR)
 
 
 def _register_small_translation(
@@ -1518,6 +1543,8 @@ def _has_released_piece_footprint(
     reference: ImageArray,
     candidate: ImageArray,
     move: tuple[Square, Square],
+    *,
+    limit_destination_ratio: bool = True,
 ) -> bool:
     difference = cv2.absdiff(
         cv2.cvtColor(reference, cv2.COLOR_BGR2GRAY),
@@ -1538,9 +1565,14 @@ def _has_released_piece_footprint(
         ]
         changed_fractions.append(float(np.mean(region)))
     source_fraction, destination_fraction = changed_fractions
-    if source_fraction <= 0 or destination_fraction <= 0:
-        return False
     if max(source_fraction, destination_fraction) > 0.7:
+        return False
+    if not limit_destination_ratio:
+        return (
+            destination_fraction > 0
+            and destination_fraction >= 0.33 * source_fraction
+        )
+    if source_fraction <= 0 or destination_fraction <= 0:
         return False
     ratio = destination_fraction / source_fraction
     return 0.33 <= ratio <= 3.0

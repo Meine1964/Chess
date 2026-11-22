@@ -84,8 +84,8 @@ hide an unperformed opponent move.
 Opponent-move guidance shall remain projected until camera evidence shows that
 a real hand or arm entered the board region or a bounded guidance-display
 interval elapsed.
-Lichess guidance shall use the same calibrated boundary-crossing detector as
-the visible edge indicator. It shall:
+Lichess guidance shall use the calibrated boundary-crossing detector, which
+also drives the visible hand indicator while guidance is projected. It shall:
 
 - arm against the projected scene before accepting activity;
 - confirm entry when one connected component contains material activity inside

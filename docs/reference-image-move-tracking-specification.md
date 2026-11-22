@@ -375,6 +375,37 @@ the moving piece's color. An uncertain or wrong-color destination shall retain
 the normal evidence floor. This exception supports low-contrast quiet moves
 without globally lowering movement or ambiguity thresholds.
 
+In Offline legal play only, a free player move may additionally be inferred
+from its destination when the source evidence alone is too weak, for example a
+white pawn leaving a light square. This destination inference applies only
+when no regular signature, pending capture, castling, or en passant evidence
+explains the settled board, no large obstruction is present, and all of the
+following hold:
+
+- The permitted signature is an ordinary, non-capturing, non-promoting move,
+  and it is the only permitted signature of any kind ending on its
+  destination.
+- The destination change meets the normal evidence floor and piece-color
+  classification confirms the moving piece's color on the destination.
+- The source change reaches at least 40% of the normal floor (half the regular
+  reduced source floor of 70%), is stronger than every square outside the
+  signature, and the source is not classified as still holding a piece of
+  either color.
+- No other square exceeds the normal unexpected-change limit.
+
+The destination-inferred move still requires consecutive identical
+observations and the remaining obstruction checks. Its released-piece
+footprint check drops only the requirements that depend on a visible source:
+the vacated source may leave no strongly changed pixels, and the upper
+destination-to-source ratio bound does not apply, because a weak source is the
+reason for the inference. The destination must still show a changed footprint,
+neither square may exceed the hand-sized coverage bound, and the destination
+footprint must not be grossly smaller than the source footprint. The accepted
+update records `verification: destination-inferred` with the source and
+destination scores.
+Lichess play, required opponent signatures, compound replies, and Board setup
+/ diagnostic movement never use destination inference.
+
 If more squares remain materially changed than the active signature permits
 after normalization and boundary suppression, the observation shall normally
 be ambiguous. A
@@ -677,6 +708,12 @@ result.
 - An equivalent same-color adjacent residual remains ambiguous.
 - Thin grid-edge residuals do not become a false multi-square obstruction.
 - Moderate global exposure changes normalize away.
+- In Offline play, a low-contrast white pawn leaving light square `e2` for
+  `e3` is accepted by destination inference, and the same evidence is not
+  accepted without it. Destination inference rejects a source still
+  classified as occupied, an unconfirmed destination color, a stronger
+  competing square, a source below 40% of the floor, and a destination reached
+  by more than one permitted move.
 
 ### 20.4 Vacancy tests
 
@@ -772,3 +809,10 @@ supported legal special-move signatures. Absolute occupancy remains available
 for initialization, explicit and automatic starting-position reset
 verification, orientation, and reconciliation rather than as a competing
 general post-initialization move trigger.
+
+Offline destination inference (section 12) is implemented by
+`match_destination_inferred_move` in `legal_signature_matcher.py`, enabled
+only for Offline play through `ReferenceMoveTracker.observe(...,
+allow_destination_inference=True)`. Its thresholds are derived from hardware
+evidence (`e3=0.134`, `e2=0.046`, strongest other `0.031`); a hardware
+regression check of low-contrast quiet moves remains pending.

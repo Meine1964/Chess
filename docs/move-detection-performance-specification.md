@@ -35,8 +35,8 @@ polling `/api/account/playing` every five seconds.
 ## 3. Stages
 
 1. Measurement and optional live preview.
-2. Cheaper image processing: cropped, reduced-resolution board-edge detection
-   with masks cached per camera grid, and cheaper tracker registration.
+2. Cheaper image processing: cropped board-edge detection with geometry
+   cached per camera grid, and cheaper tracker brightness normalization.
 3. Shorter Offline blind period: accepted-move marking for 0.5 seconds and
    frame-confirmed projector black instead of a fixed one-second wait.
 4. Background detection with frame-to-frame motion comparison, a 50 ms
@@ -44,7 +44,7 @@ polling `/api/account/playing` every five seconds.
 5. Reliable Lichess event streaming, with polling retained as a diagnosed
    fallback.
 
-Stages 2-5 are planned and are specified in detail when they start.
+Stages 3-5 are planned and are specified in detail when they start.
 
 ## 4. Stage 1: Measurement and Optional Live Preview
 
@@ -116,3 +116,69 @@ occupancy tick mean 99 ms (max 391 ms), tick period mean 190 ms (max
 409 ms), board-edge detector mean 66 ms (max 209 ms), reference tracker mean
 60 ms (max 228 ms), and move latency after the last observed motion of 0.38,
 0.92, and 1.34 seconds.
+
+## 5. Stage 2: Cheaper Image Processing
+
+Stage 2 reduces processing cost without changing detection decisions.
+
+### 5.1 Cropped board-edge detection
+
+- The board-edge detector processes only a crop of the camera frame: the
+  bounding rectangle of the guidance region (board plus one-square halo)
+  expanded by 24 pixels and clipped to the frame.
+- The crop, the guidance, board, outside, and outer-halo masks, the
+  illumination smoothing kernel, the median square area, and the normalized
+  smoothing weights are computed once and reused while the camera grid and
+  frame size are unchanged.
+- A changed camera grid rebuilds the cached geometry. The crop itself is kept
+  while the new guidance bounding rectangle, expanded by 4 pixels, still fits
+  inside it, so small alignment remaps keep the detector baseline. When the
+  guidance region no longer fits, the detector builds a new crop and resets
+  its baseline and active state, as when it is first armed.
+- Reported component bounds remain in full-frame camera coordinates.
+- Region-weighted illumination smoothing treats pixels outside the crop as
+  outside the region (zero weight). The previous implementation reflected the
+  frame at its border; this only matters where the guidance region touches the
+  frame edge, and decisions were verified to be unchanged there.
+
+### 5.2 Exact cheaper statistics
+
+- The median brightness difference between two 8-bit images is computed from
+  a histogram of the differences and equals the floating-point median,
+  including the half-value result for an even pixel count.
+- Applying a brightness offset to an 8-bit image uses a lookup table that
+  reproduces the previous floating-point clip and truncation exactly.
+- The board-edge detector and the reference tracker's candidate brightness
+  normalization use these helpers.
+
+### 5.3 Unchanged behavior
+
+Registration of the canonical board keeps full-resolution phase correlation,
+because half-resolution correlation produced shift errors up to 0.6 pixels.
+Thresholds, morphology, component rules, and tracker decisions are unchanged.
+
+### 5.4 Acceptance criteria
+
+1. On recorded camera frames with simulated hand crossings, brightness
+   changes, and noise, the edge detector reports the same active and crossing
+   decisions and component statistics as before.
+2. Candidate normalization output is pixel-identical to the previous
+   implementation.
+3. The board-edge indicator and Offline move acceptance behave as before on
+   hardware, with lower `tracker.detection_timing` values.
+
+### 5.5 Implementation status
+
+Implemented in `src/chess_camera/image_statistics.py`,
+`src/chess_camera/guidance_activity.py`, and
+`src/chess_camera/reference_move_tracker.py`. Focused tests cover the exact
+statistics helpers and the crop-invariance of edge detection.
+
+A one-off comparison against the Stage 1 implementation on the recorded
+1920x1080 camera frame (40 frames with simulated crossings, gradients,
+brightness steps, and noise, and the same frames shifted so the guidance
+region touches the top of the frame) produced identical decisions and
+component statistics and pixel-identical normalization. Measured on the
+development machine, the board-edge detector mean dropped from 133 ms to
+32 ms and candidate normalization from 23 ms to 10 ms. Hardware timing is
+pending.

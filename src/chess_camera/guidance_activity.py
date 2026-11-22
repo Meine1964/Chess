@@ -7,7 +7,11 @@ import cv2
 import numpy as np
 
 from .board_detector import FloatArray, ImageArray
+from .image_statistics import median_uint8_difference, offset_uint8
 from .occupancy import rectify_board
+
+_EDGE_CROP_MARGIN = 24
+_EDGE_CROP_REQUIRED_MARGIN = 4
 
 
 BlackoutSettlingState = Literal["waiting", "stable", "timeout"]
@@ -160,6 +164,9 @@ class BoardEdgeActivityDetector:
         self._largest_component_bounds: tuple[int, int, int, int] | None = None
         self._observation_count = 0
         self._last_observation_seconds = 0.0
+        self._crop: tuple[int, int, int, int] | None = None
+        self._crop_frame_shape: tuple[int, int] | None = None
+        self._geometry: _EdgeGeometry | None = None
 
     @property
     def active(self) -> bool:
@@ -232,8 +239,10 @@ class BoardEdgeActivityDetector:
         grid = np.asarray(camera_grid, dtype=np.float32)
         if grid.shape != (9, 9, 2) or not np.isfinite(grid).all():
             raise ValueError("The camera grid must contain finite 9x9 points.")
+        geometry = self._geometry_for(frame.shape[:2], grid)
+        left, top, right, bottom = geometry.crop
         gray = cv2.GaussianBlur(
-            cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY),
+            cv2.cvtColor(frame[top:bottom, left:right], cv2.COLOR_BGR2GRAY),
             (5, 5),
             0,
         )
@@ -250,59 +259,29 @@ class BoardEdgeActivityDetector:
         if self._baseline is None:
             raise RuntimeError("Board-edge activity baseline is unavailable.")
 
-        guidance_mask = _guidance_region_mask(frame.shape[:2], grid)
-        board_mask = _board_region_mask(frame.shape[:2], grid)
-        outside_mask = cv2.bitwise_and(
-            guidance_mask,
-            cv2.bitwise_not(board_mask),
+        guidance = geometry.guidance
+        brightness_shift = median_uint8_difference(
+            gray[guidance],
+            self._baseline[guidance],
         )
-        square_area = _median_square_area(grid)
-        outer_rim_width = max(1, round(square_area**0.5 * 0.15))
-        outer_halo_mask = cv2.bitwise_and(
-            guidance_mask,
-            cv2.bitwise_not(
-                cv2.erode(
-                    guidance_mask,
-                    np.ones(
-                        (
-                            outer_rim_width * 2 + 1,
-                            outer_rim_width * 2 + 1,
-                        ),
-                        dtype=np.uint8,
-                    ),
-                    iterations=1,
-                )
-            ),
-        )
-        baseline_values = self._baseline[guidance_mask != 0].astype(
-            np.float32
-        )
-        current_values = gray[guidance_mask != 0].astype(np.float32)
-        brightness_shift = float(
-            np.median(current_values - baseline_values)
-        )
-        normalized = np.clip(
-            gray.astype(np.float32) - brightness_shift,
-            0,
-            255,
-        ).astype(np.uint8)
+        normalized = offset_uint8(gray, -brightness_shift)
         illumination_delta = (
             normalized.astype(np.float32)
             - self._baseline.astype(np.float32)
         )
-        illumination_delta[guidance_mask == 0] = 0
-        illumination_kernel = max(
-            3,
-            round(_median_square_area(grid) ** 0.5 * 2.0),
-        )
-        if illumination_kernel % 2 == 0:
-            illumination_kernel += 1
-        smooth_illumination = _smooth_guidance_illumination(
-            illumination_delta,
-            guidance_mask,
-            board_mask,
-            illumination_kernel,
-        )
+        illumination_delta[~guidance] = 0
+        smooth_illumination = np.zeros_like(illumination_delta)
+        kernel = (geometry.illumination_kernel, geometry.illumination_kernel)
+        for valid, weights, smoothed_weights in geometry.smoothing_regions:
+            weighted_delta = cv2.GaussianBlur(
+                illumination_delta * weights,
+                kernel,
+                0,
+                borderType=cv2.BORDER_CONSTANT,
+            )
+            smooth_illumination[valid] = (
+                weighted_delta[valid] / smoothed_weights[valid]
+            )
         photometric_normalized = np.clip(
             normalized.astype(np.float32) - smooth_illumination,
             0,
@@ -313,8 +292,7 @@ class BoardEdgeActivityDetector:
             photometric_normalized,
         )
         changed = np.where(
-            (difference >= self._pixel_difference_threshold)
-            & (guidance_mask != 0),
+            (difference >= self._pixel_difference_threshold) & guidance,
             255,
             0,
         ).astype(np.uint8)
@@ -331,28 +309,28 @@ class BoardEdgeActivityDetector:
         component_count, labels, statistics, _centroids = (
             cv2.connectedComponentsWithStats(changed)
         )
-        minimum_component = square_area * self._minimum_square_fraction
+        inside_counts = np.bincount(
+            labels[geometry.board],
+            minlength=component_count,
+        )
+        outside_counts = np.bincount(
+            labels[geometry.outside],
+            minlength=component_count,
+        )
+        outer_halo_counts = np.bincount(
+            labels[geometry.outer_halo],
+            minlength=component_count,
+        )
+        minimum_component = geometry.square_area * self._minimum_square_fraction
         components = [
             (
                 int(statistics[component, cv2.CC_STAT_AREA]),
-                int(
-                    np.count_nonzero(
-                        (labels == component) & (board_mask != 0)
-                    )
-                ),
-                int(
-                    np.count_nonzero(
-                        (labels == component) & (outside_mask != 0)
-                    )
-                ),
-                int(
-                    np.count_nonzero(
-                        (labels == component) & (outer_halo_mask != 0)
-                    )
-                ),
+                int(inside_counts[component]),
+                int(outside_counts[component]),
+                int(outer_halo_counts[component]),
                 (
-                    int(statistics[component, cv2.CC_STAT_LEFT]),
-                    int(statistics[component, cv2.CC_STAT_TOP]),
+                    int(statistics[component, cv2.CC_STAT_LEFT]) + left,
+                    int(statistics[component, cv2.CC_STAT_TOP]) + top,
                     int(statistics[component, cv2.CC_STAT_WIDTH]),
                     int(statistics[component, cv2.CC_STAT_HEIGHT]),
                 ),
@@ -397,8 +375,124 @@ class BoardEdgeActivityDetector:
         self._baseline = gray
         return False
 
+    def _geometry_for(
+        self,
+        frame_shape: tuple[int, int],
+        grid: FloatArray,
+    ) -> "_EdgeGeometry":
+        height, width = frame_shape
+        guidance_polygon = _guidance_region_polygon(frame_shape, grid)
+        x, y, polygon_width, polygon_height = cv2.boundingRect(
+            guidance_polygon
+        )
 
-def _guidance_region_mask(
+        def expanded(margin: int) -> tuple[int, int, int, int]:
+            return (
+                max(0, x - margin),
+                max(0, y - margin),
+                min(width, x + polygon_width + margin),
+                min(height, y + polygon_height + margin),
+            )
+
+        required = expanded(_EDGE_CROP_REQUIRED_MARGIN)
+        crop = self._crop
+        if (
+            crop is None
+            or self._crop_frame_shape != frame_shape
+            or required[0] < crop[0]
+            or required[1] < crop[1]
+            or required[2] > crop[2]
+            or required[3] > crop[3]
+        ):
+            if crop is not None:
+                self.reset()
+            crop = expanded(_EDGE_CROP_MARGIN)
+            self._crop = crop
+            self._crop_frame_shape = frame_shape
+        geometry = self._geometry
+        grid_key = grid.tobytes()
+        if (
+            geometry is None
+            or geometry.crop != crop
+            or geometry.grid_key != grid_key
+        ):
+            geometry = _edge_geometry(
+                crop,
+                grid_key,
+                guidance_polygon,
+                _board_region_polygon(frame_shape, grid),
+                _median_square_area(grid),
+            )
+            self._geometry = geometry
+        return geometry
+
+
+@dataclass(frozen=True)
+class _EdgeGeometry:
+    crop: tuple[int, int, int, int]
+    grid_key: bytes
+    guidance: np.ndarray
+    board: np.ndarray
+    outside: np.ndarray
+    outer_halo: np.ndarray
+    square_area: float
+    illumination_kernel: int
+    smoothing_regions: tuple[tuple[np.ndarray, np.ndarray, np.ndarray], ...]
+
+
+def _edge_geometry(
+    crop: tuple[int, int, int, int],
+    grid_key: bytes,
+    guidance_polygon: np.ndarray,
+    board_polygon: np.ndarray,
+    square_area: float,
+) -> _EdgeGeometry:
+    left, top, right, bottom = crop
+    offset = np.asarray([left, top], dtype=np.int32)
+    guidance_mask = np.zeros((bottom - top, right - left), dtype=np.uint8)
+    cv2.fillConvexPoly(guidance_mask, guidance_polygon - offset, 255)
+    board_mask = np.zeros_like(guidance_mask)
+    cv2.fillConvexPoly(board_mask, board_polygon - offset, 255)
+    outer_rim_width = max(1, round(square_area**0.5 * 0.15))
+    eroded = cv2.erode(
+        guidance_mask,
+        np.ones(
+            (outer_rim_width * 2 + 1, outer_rim_width * 2 + 1),
+            dtype=np.uint8,
+        ),
+        iterations=1,
+    )
+    guidance = guidance_mask != 0
+    board = board_mask != 0
+    illumination_kernel = max(3, round(square_area**0.5 * 2.0))
+    if illumination_kernel % 2 == 0:
+        illumination_kernel += 1
+    smoothing_regions = []
+    for region in (guidance & board, guidance & ~board):
+        weights = region.astype(np.float32)
+        smoothed_weights = cv2.GaussianBlur(
+            weights,
+            (illumination_kernel, illumination_kernel),
+            0,
+            borderType=cv2.BORDER_CONSTANT,
+        )
+        smoothing_regions.append(
+            (region & (smoothed_weights > 1e-6), weights, smoothed_weights)
+        )
+    return _EdgeGeometry(
+        crop=crop,
+        grid_key=grid_key,
+        guidance=guidance,
+        board=board,
+        outside=guidance & ~board,
+        outer_halo=guidance & (eroded == 0),
+        square_area=square_area,
+        illumination_kernel=illumination_kernel,
+        smoothing_regions=tuple(smoothing_regions),
+    )
+
+
+def _guidance_region_polygon(
     frame_shape: tuple[int, int],
     camera_grid: FloatArray,
 ) -> np.ndarray:
@@ -431,12 +525,10 @@ def _guidance_region_mask(
     ).astype(np.int32)
     polygon[:, 0] = np.clip(polygon[:, 0], 0, width - 1)
     polygon[:, 1] = np.clip(polygon[:, 1], 0, height - 1)
-    mask = np.zeros((height, width), dtype=np.uint8)
-    cv2.fillConvexPoly(mask, polygon, 255)
-    return mask
+    return polygon
 
 
-def _board_region_mask(
+def _board_region_polygon(
     frame_shape: tuple[int, int],
     camera_grid: FloatArray,
 ) -> np.ndarray:
@@ -454,9 +546,7 @@ def _board_region_mask(
     ).astype(np.int32)
     polygon[:, 0] = np.clip(polygon[:, 0], 0, width - 1)
     polygon[:, 1] = np.clip(polygon[:, 1], 0, height - 1)
-    mask = np.zeros((height, width), dtype=np.uint8)
-    cv2.fillConvexPoly(mask, polygon, 255)
-    return mask
+    return polygon
 
 
 def _median_square_area(camera_grid: FloatArray) -> float:
@@ -481,33 +571,3 @@ def _median_square_area(camera_grid: FloatArray) -> float:
     if median_area <= 0:
         raise ValueError("The camera grid contains degenerate squares.")
     return median_area
-
-
-def _smooth_guidance_illumination(
-    illumination_delta: np.ndarray,
-    activity_mask: np.ndarray,
-    board_mask: np.ndarray,
-    kernel_size: int,
-) -> np.ndarray:
-    smooth = np.zeros_like(illumination_delta, dtype=np.float32)
-    for region_mask in (
-        cv2.bitwise_and(activity_mask, board_mask),
-        cv2.bitwise_and(
-            activity_mask,
-            cv2.bitwise_not(board_mask),
-        ),
-    ):
-        weights = (region_mask != 0).astype(np.float32)
-        weighted_delta = cv2.GaussianBlur(
-            illumination_delta * weights,
-            (kernel_size, kernel_size),
-            0,
-        )
-        smoothed_weights = cv2.GaussianBlur(
-            weights,
-            (kernel_size, kernel_size),
-            0,
-        )
-        valid = (region_mask != 0) & (smoothed_weights > 1e-6)
-        smooth[valid] = weighted_delta[valid] / smoothed_weights[valid]
-    return smooth

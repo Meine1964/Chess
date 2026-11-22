@@ -7,6 +7,7 @@ from src.chess_camera.legal_game import (
 )
 from src.chess_camera.legal_signature_matcher import (
     find_illegal_removed_piece,
+    match_destination_inferred_move,
     match_legal_move_signature,
     match_pending_castling,
     match_pending_castling_relocation,
@@ -205,6 +206,74 @@ def test_color_confirmed_quiet_move_uses_lower_destination_floor() -> None:
     assert with_colors.signature is not None
     assert with_colors.signature.uci == "c2c4"
     assert wrong_destination.signature is None
+
+
+_INFERRED_COLORS = {
+    (6, 4): PieceColorClassification("empty", 0.03, 0.05),
+    (5, 4): PieceColorClassification("white", 0.04, 0.09),
+}
+
+
+def test_infers_unique_quiet_move_from_destination_with_weak_source() -> None:
+    signatures = LegalGame().physical_move_signatures
+    # Hardware observation: a white pawn leaving light square e2.
+    scores = _scores(((5, 4), 0.134), ((6, 4), 0.046), ((7, 0), 0.031))
+
+    regular = match_legal_move_signature(
+        scores,
+        signatures,
+        piece_colors=_INFERRED_COLORS,
+    )
+    inferred = match_destination_inferred_move(
+        scores,
+        signatures,
+        _INFERRED_COLORS,
+    )
+
+    assert regular.signature is None
+    assert inferred is not None
+    assert inferred.uci == "e2e3"
+
+
+def test_destination_inference_rejects_unproven_cases() -> None:
+    signatures = LegalGame().physical_move_signatures
+    scores = _scores(((5, 4), 0.134), ((6, 4), 0.046), ((7, 0), 0.031))
+    shared_destination_colors = {
+        (6, 5): PieceColorClassification("empty", 0.03, 0.05),
+        (5, 5): PieceColorClassification("white", 0.04, 0.09),
+    }
+
+    assert match_destination_inferred_move(
+        scores,
+        signatures,
+        {
+            **_INFERRED_COLORS,
+            (6, 4): PieceColorClassification("white", 0.03, 0.05),
+        },
+    ) is None
+    assert match_destination_inferred_move(
+        scores,
+        signatures,
+        {
+            **_INFERRED_COLORS,
+            (5, 4): PieceColorClassification("uncertain", 0.3, 0.01),
+        },
+    ) is None
+    assert match_destination_inferred_move(
+        _scores(((5, 4), 0.134), ((6, 4), 0.046), ((7, 0), 0.05)),
+        signatures,
+        _INFERRED_COLORS,
+    ) is None
+    assert match_destination_inferred_move(
+        _scores(((5, 4), 0.134), ((6, 4), 0.03)),
+        signatures,
+        _INFERRED_COLORS,
+    ) is None
+    assert match_destination_inferred_move(
+        _scores(((5, 5), 0.134), ((6, 5), 0.046)),
+        signatures,
+        shared_destination_colors,
+    ) is None
 
 
 def test_rejects_legal_move_when_source_change_is_only_noise() -> None:

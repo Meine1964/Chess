@@ -74,6 +74,7 @@ def _accepted_update(
     *,
     required_signature: LegalMoveSignature | None = None,
     compound_signatures: tuple[LegalMoveSignature, ...] = (),
+    allow_destination_inference: bool = False,
 ) -> object:
     update = None
     for _index in range(5):
@@ -85,6 +86,7 @@ def _accepted_update(
             legal_signatures,
             required_signature=required_signature,
             compound_signatures=compound_signatures,
+            allow_destination_inference=allow_destination_inference,
         )
         if update.state in (
             "accepted",
@@ -261,7 +263,7 @@ def test_compound_signature_accepts_only_clear_final_two_ply_position() -> None:
     with patch(
         "src.chess_camera.reference_move_tracker."
         "_has_released_piece_footprint",
-        side_effect=lambda _reference, _candidate, move: (
+        side_effect=lambda _reference, _candidate, move, **_kwargs: (
             move != opponent_move
         ),
     ):
@@ -625,6 +627,45 @@ def test_legal_signature_tracker_accepts_ordinary_capture(
         if signature.uci == uci
     )
     assert signature.kind == "capture"
+
+
+def test_offline_destination_inference_accepts_low_contrast_pawn_move() -> None:
+    game = LegalGame()
+    low_contrast_white = (200, 220, 235)
+    reference = _empty_board()
+    for square, piece in game.position.items():
+        _draw_piece(
+            reference,
+            square,
+            low_contrast_white if piece.isupper() else (20, 20, 20),
+        )
+    moved = reference.copy()
+    moved[600:700, 400:500] = _empty_board()[600:700, 400:500]
+    _draw_piece(moved, (5, 4), low_contrast_white)
+
+    results = []
+    for allow_inference in (False, True):
+        tracker = ReferenceMoveTracker()
+        tracker.set_reference(reference, _camera_grid(), 0)
+        results.append(
+            _accepted_update(
+                tracker,
+                moved,
+                game.position,
+                game.physical_move_signatures,
+                allow_destination_inference=allow_inference,
+            )
+        )
+    without_inference, with_inference = results
+
+    assert without_inference.state != "accepted"
+    assert with_inference.state == "accepted"
+    assert with_inference.move == ((6, 4), (5, 4))
+    assert with_inference.decision_details is not None
+    assert (
+        with_inference.decision_details["verification"]
+        == "destination-inferred"
+    )
 
 
 def test_two_action_capture_waits_for_attacker_before_accepting() -> None:

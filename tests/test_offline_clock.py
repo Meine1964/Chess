@@ -102,3 +102,29 @@ def test_offline_clock_restores_paused() -> None:
     assert snapshot.active_player == "black"
     assert snapshot.running is False
     assert snapshot.has_started is True
+
+
+def test_first_move_after_restore_resumes_started_clock() -> None:
+    clock = FakeClock()
+    game_clock = OfflineClock(60_000, 2_000, clock=clock)
+    game_clock.restore(42_000, 31_000, "white", has_started=True)
+    clock.now = 100.0
+
+    snapshot = game_clock.accept_move("black")
+
+    assert snapshot.white_time_ms == 42_000
+    assert snapshot.running is True
+    assert snapshot.active_player == "black"
+    clock.now = 103.0
+    assert game_clock.snapshot().black_time_ms == 28_000
+
+
+def test_explicit_pause_after_restore_cancels_automatic_resume() -> None:
+    game_clock = OfflineClock(60_000, 2_000)
+    game_clock.restore(42_000, 31_000, "white", has_started=True)
+    game_clock.pause()
+
+    snapshot = game_clock.accept_move("black")
+
+    assert snapshot.running is False
+    assert snapshot.active_player == "black"

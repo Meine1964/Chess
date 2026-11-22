@@ -10,6 +10,7 @@ from .piece_color_classifier import PieceColorClassification
 
 LEGAL_SOURCE_CHANGE_RATIO = 0.7
 COLOR_CONFIRMED_CAPTURE_CHANGE_RATIO = 0.3
+DESTINATION_INFERRED_SOURCE_CHANGE_RATIO = 0.4
 
 
 @dataclass(frozen=True)
@@ -213,6 +214,78 @@ def match_legal_move_signature(
         ranked,
         f"Legal physical signature {ranked[0].signature.uci} matched.",
     )
+
+
+def match_destination_inferred_move(
+    change_scores: FloatArray,
+    signatures: Sequence[LegalMoveSignature],
+    piece_colors: Mapping[Square, PieceColorClassification],
+    *,
+    minimum_square_change: float = 0.08,
+) -> LegalMoveSignature | None:
+    scores = np.asarray(change_scores, dtype=np.float32)
+    if scores.shape != (8, 8):
+        raise ValueError("Change scores must describe an 8x8 board.")
+    if minimum_square_change <= 0:
+        raise ValueError("The movement threshold must be positive.")
+    source_floor = (
+        minimum_square_change * DESTINATION_INFERRED_SOURCE_CHANGE_RATIO
+    )
+    destination_counts: dict[Square, int] = {}
+    for signature in signatures:
+        destination_counts[signature.destination] = (
+            destination_counts.get(signature.destination, 0) + 1
+        )
+    matches: list[LegalMoveSignature] = []
+    for signature in signatures:
+        if (
+            signature.kind != "ordinary"
+            or destination_counts[signature.destination] != 1
+        ):
+            continue
+        moving_piece = next(
+            (
+                change.after
+                for change in signature.changes
+                if change.square == signature.destination
+                and change.before is None
+            ),
+            None,
+        )
+        if moving_piece is None:
+            continue
+        destination_color = piece_colors.get(signature.destination)
+        source_color = piece_colors.get(signature.source)
+        if (
+            destination_color is None
+            or destination_color.label
+            != ("white" if moving_piece.isupper() else "black")
+            or source_color is None
+            or source_color.label in ("white", "black")
+        ):
+            continue
+        source_score = float(scores[signature.source])
+        destination_score = float(scores[signature.destination])
+        if (
+            source_score < source_floor
+            or destination_score < minimum_square_change
+        ):
+            continue
+        remaining = scores.copy()
+        remaining[signature.source] = 0
+        remaining[signature.destination] = 0
+        strongest_other = float(np.max(remaining))
+        unexpected_limit = max(
+            minimum_square_change,
+            min(source_score, destination_score) * 0.75,
+        )
+        if (
+            strongest_other >= source_score
+            or strongest_other > unexpected_limit
+        ):
+            continue
+        matches.append(signature)
+    return matches[0] if len(matches) == 1 else None
 
 
 def match_pending_capture(

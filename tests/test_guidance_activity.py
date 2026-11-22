@@ -98,6 +98,63 @@ def test_board_edge_indicator_requires_activity_across_boundary() -> None:
     assert detector.largest_component_pixels == 0
 
 
+def test_board_edge_indicator_is_independent_of_board_position_in_frame() -> None:
+    crossing = _frame()
+    cv2.rectangle(crossing, (350, 100), (550, 260), (20, 20, 20), -1)
+
+    def observe(offset_x: int, offset_y: int) -> tuple[object, ...]:
+        frame = np.full((1600, 1700, 3), 110, dtype=np.uint8)
+        quiet = frame.copy()
+        frame[offset_y : offset_y + 1200, offset_x : offset_x + 1200] = crossing
+        grid = _camera_grid() + np.float32((offset_x, offset_y))
+        detector = BoardEdgeActivityDetector(
+            arming_observations=2,
+            confirmation_observations=1,
+            quiet_observations=1,
+        )
+        detector.observe(quiet, grid)
+        detector.observe(quiet, grid)
+        active = detector.observe(frame, grid)
+        bounds = detector.largest_component_bounds
+        assert bounds is not None
+        return (
+            active,
+            detector.crossing_detected,
+            detector.largest_component_pixels,
+            detector.largest_component_inside_pixels,
+            detector.largest_component_outside_pixels,
+            detector.largest_component_outer_halo_pixels,
+            (bounds[0] - offset_x, bounds[1] - offset_y, *bounds[2:]),
+        )
+
+    reference = observe(0, 0)
+    assert reference[0] and reference[1]
+    assert observe(437, 291) == reference
+
+
+def test_board_edge_indicator_rearms_when_board_leaves_cached_crop() -> None:
+    frame = _frame()
+    crossing = frame.copy()
+    cv2.rectangle(crossing, (350, 100), (550, 260), (20, 20, 20), -1)
+    detector = BoardEdgeActivityDetector(
+        arming_observations=2,
+        confirmation_observations=1,
+        quiet_observations=1,
+    )
+    detector.observe(frame, _camera_grid())
+    detector.observe(frame, _camera_grid())
+
+    slightly_moved = _camera_grid() + np.float32((2, 1))
+    assert detector.observe(crossing, slightly_moved)
+
+    detector.reset()
+    detector.observe(frame, _camera_grid())
+    detector.observe(frame, _camera_grid())
+    far_moved = _camera_grid() + np.float32((60, 0))
+    assert not detector.observe(crossing, far_moved)
+    assert not detector.active
+
+
 
 
 
@@ -618,7 +675,82 @@ def test_lichess_blackout_rearms_edge_indicator_after_synchronization() -> None:
     assert window._board_edge_activity_suspended is False
     assert window._board_edge_indicator_active is False
     assert detector.active is False
-    projector_window.set_edge_activity_indicator.assert_called_with(False)
+    projector_window.set_edge_activity_indicator.assert_not_called()
+
+
+def _hand_indicator_window(**overrides: object) -> SimpleNamespace:
+    values: dict[str, object] = {
+        "_latest_frame": object(),
+        "_calibration_result": object(),
+        "_lichess_guidance_projection_active": False,
+        "_illegal_correction_projection_active": False,
+        "_board_edge_indicator_active": False,
+        "_hand_indicator_active": False,
+        "_projector_window": SimpleNamespace(
+            set_edge_activity_indicator=MagicMock()
+        ),
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_hand_indicator_follows_tracker_gate_on_black_board() -> None:
+    window = _hand_indicator_window(_board_edge_indicator_active=True)
+
+    for state, expected in (
+        ("activity", True),
+        ("waiting-for-clear", True),
+        ("settling", False),
+        ("candidate", False),
+        ("accepted", False),
+        (None, False),
+    ):
+        CameraWindow._update_hand_indicator(
+            window,
+            state,
+            tracker_ran=True,
+        )
+        assert window._hand_indicator_active is expected
+        window._projector_window.set_edge_activity_indicator.assert_called_with(
+            expected
+        )
+
+
+def test_hand_indicator_uses_edge_detector_only_during_projection() -> None:
+    window = _hand_indicator_window(
+        _lichess_guidance_projection_active=True,
+        _board_edge_indicator_active=True,
+    )
+
+    CameraWindow._update_hand_indicator(window, None, tracker_ran=False)
+    assert window._hand_indicator_active is True
+
+    window._lichess_guidance_projection_active = False
+    window._board_edge_indicator_active = False
+    CameraWindow._update_hand_indicator(window, None, tracker_ran=False)
+    assert window._hand_indicator_active is True
+
+    window._latest_frame = None
+    CameraWindow._update_hand_indicator(window, None, tracker_ran=False)
+    assert window._hand_indicator_active is False
+
+
+def test_edge_detector_does_not_run_on_black_board() -> None:
+    window = SimpleNamespace(
+        _latest_frame=object(),
+        _calibration_result=object(),
+        _calibrator=SimpleNamespace(active=False),
+        _camera_geometry_ready=True,
+        _startup_offline_reference_refresh_pending=True,
+        _lichess_guidance_projection_active=False,
+        _illegal_correction_projection_active=False,
+        _update_board_edge_activity_indicator=MagicMock(),
+        _start_pending_offline_reference_refresh=MagicMock(),
+    )
+
+    CameraWindow._update_occupancy(window)
+
+    window._update_board_edge_activity_indicator.assert_not_called()
 
 
 def test_board_edge_indicator_records_only_state_transitions() -> None:

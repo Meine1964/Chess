@@ -416,33 +416,53 @@ all-64 stepping remain planned test modes.
   indicator beside h4 with its center half a square outside the h-file.
 - Make the indicator available as an overlay in every projector display mode,
   including an otherwise black frame.
-- Illuminate the indicator only when camera activity contains a connected
+- The indicator means "a hand is over the board; moves are not registered".
+  It shows the sensor that actually gates move registration in the current
+  phase:
+  - While the reference move tracker observes the black board, illuminate
+    the indicator exactly while the tracker reports `activity` (frame-to-frame
+    motion) or `waiting-for-clear` (a hand or object obscures the board or the
+    moved piece). Clear it on any other tracker result, including settling,
+    candidate confirmation, accepted moves, and an unavailable tracker.
+  - While Lichess move guidance or an illegal-move correction is projected,
+    the tracker cannot observe the board, so illuminate the indicator from the
+    board-edge crossing detector described below.
+  - In short transitional phases where neither sensor runs (blackout
+    settling, accepted-move marking, reconciliation blackout), keep the last
+    indicator state. Without a camera frame or calibration, clear it.
+- The board-edge crossing detector runs only while Lichess guidance or an
+  illegal-move correction is projected. It detects a camera activity
   component with material pixels inside the board, outside the board, and at
   the outer rim of the one-square observation halo. This full connected path
   distinguishes a hand or arm entering from outside from a changed edge piece
   whose silhouette extends only a short distance beyond the playing grid.
-- Use an independent rolling camera baseline and illuminate on the first
-  qualifying crossing observation so projector content, board-confined
-  changes, and activity wholly outside the board do not illuminate the
-  indicator.
-- Clear the indicator on the first observation without a qualifying boundary
-  crossing.
-- Keep the indicator's measurements and display state independent of move
-  verification. Lichess may consume its first qualifying entry transition to
-  begin blackout, but shall suspend and clear indicator observation during
-  black-board manipulation and verification. Rearm it with a fresh baseline
-  only after guidance is reprojected or the accepted physical state is
-  synchronized, so an entering hand cannot become the baseline and its later
-  departure cannot create a false crossing.
-- Record every activation and clearing transition with the current camera
-  image, active state, current crossing decision, component area, inside-board
-  pixels, outside-board pixels, outer-halo-rim pixels, and component bounding
-  box. Expose the same latest measurements in runtime state so persistent
-  false crossings can be traced to their actual image region.
-- If the indicator remains active for three seconds, record a fresh
+- The crossing detector uses an independent camera baseline and confirms the
+  first qualifying crossing observation so projector content, board-confined
+  changes, and activity wholly outside the board do not trigger it. It clears
+  on the first observation without a qualifying boundary crossing.
+- Keep the crossing detector's measurements independent of move
+  verification. Lichess and illegal-move correction consume its first
+  qualifying entry transition to begin blackout, then suspend and clear
+  crossing observation during black-board manipulation and verification;
+  suspension does not clear the visible indicator, which the tracker takes
+  over. Rearm the detector with a fresh baseline only when guidance or
+  correction is projected again, so an entering hand cannot become the
+  baseline and its later departure cannot create a false crossing.
+- Record every crossing-detector activation and clearing transition with the
+  current camera image, active state, current crossing decision, component
+  area, inside-board pixels, outside-board pixels, outer-halo-rim pixels, and
+  component bounding box. Expose the same latest measurements in runtime
+  state, together with the visible hand-indicator state, so persistent false
+  crossings can be traced to their actual image region.
+- If the crossing detector remains active for three seconds, record a fresh
   `board-edge-indicator-still-active` event with the current camera image and
   component measurements. Repeat that evidence at no more than five-second
-  intervals until the indicator clears, then reset the stuck-duration timer.
+  intervals until it clears, then reset the stuck-duration timer.
+
+The previous design drove the indicator from the crossing detector at all
+times. A persistent scene change on the board frame could then keep the
+indicator on indefinitely while moves were still being registered, so the
+indicator did not reflect the actual registration gate.
 
 The operational indicator colors are currently fixed. Brightness, inset, and
 color controls remain possible future enhancements.

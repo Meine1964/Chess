@@ -39,6 +39,7 @@ class OfflineClock:
         self._active_player: PlayerColor = "white"
         self._running_since: float | None = None
         self._has_started = False
+        self._resume_on_next_move = False
         self._expired_player: PlayerColor | None = None
 
     @property
@@ -73,6 +74,7 @@ class OfflineClock:
         self._active_player = active_player
         self._running_since = None
         self._has_started = has_started
+        self._resume_on_next_move = has_started
         self._expired_player = (
             "white"
             if white_time_ms == 0
@@ -88,6 +90,7 @@ class OfflineClock:
         self._active_player = active_player
         self._running_since = None
         self._has_started = False
+        self._resume_on_next_move = False
         self._expired_player = None
         return self.snapshot()
 
@@ -99,6 +102,7 @@ class OfflineClock:
         if self._running_since is None:
             self._running_since = self._clock()
         self._has_started = True
+        self._resume_on_next_move = False
         return self.snapshot()
 
     def pause(self) -> OfflineClockSnapshot:
@@ -106,6 +110,7 @@ class OfflineClock:
         self._white_time_ms = snapshot.white_time_ms
         self._black_time_ms = snapshot.black_time_ms
         self._running_since = None
+        self._resume_on_next_move = False
         return OfflineClockSnapshot(
             snapshot.white_time_ms,
             snapshot.black_time_ms,
@@ -132,9 +137,14 @@ class OfflineClock:
             else:
                 self._black_time_ms += self._increment_ms
         self._active_player = next_player
-        should_run = was_running or not self._has_started
+        should_run = (
+            was_running
+            or not self._has_started
+            or self._resume_on_next_move
+        )
         self._running_since = self._clock() if should_run else None
         self._has_started = True
+        self._resume_on_next_move = False
         return self.snapshot()
 
     def snapshot(self) -> OfflineClockSnapshot:

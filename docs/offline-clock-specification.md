@@ -31,7 +31,13 @@ clocks without requiring a Lichess game or external clock.
   paused.
 - Leaving Offline mode pauses the Offline clock.
 - Restoring an application session shall never count application downtime;
-  restored clocks remain paused.
+  restored clocks remain paused until play resumes.
+- If the restored game's clock had already started, the first accepted move
+  after the restore resumes it automatically: the side to move next starts
+  running. The mover of that first move was untimed since the restore and
+  receives no increment. An explicit Start, Pause, Reset, or clock
+  reconfiguration before that move cancels the automatic resume, so an
+  explicit Pause still keeps the clock paused across moves.
 
 ## Move authority
 
@@ -84,7 +90,8 @@ advances the authoritative Offline `LegalGame`.
   started.
 - Persist no running monotonic timestamp.
 - Restore remaining values only for the saved Offline game and restore them
-  paused.
+  paused; a started restored clock resumes on the next accepted move as
+  described under Lifecycle.
 
 ## Acceptance Criteria
 
@@ -96,7 +103,9 @@ advances the authoritative Offline `LegalGame`.
 5. Promotion switches only after the promoted piece is confirmed.
 6. Timeout stops both clocks and projects the correct result and expiration
    flag.
-7. Restart restores saved values paused.
+7. Restart restores saved values paused, and the first accepted move after the
+   restart resumes a previously started clock without charging downtime or
+   adding an increment.
 8. Lichess clocks and controls remain unchanged.
 
 ## Implementation Status
@@ -108,7 +117,10 @@ Implemented in the Offline game UI and projector integration.
 - Accepted ordinary moves and confirmed promotions switch the clock from the
   authoritative `LegalGame` turn.
 - Timeout blocks further Offline move tracking until reset or a new game.
-- Saved remaining values restore paused with the saved Offline game.
+- Saved remaining values restore paused with the saved Offline game. A
+  previously started clock resumes on the first accepted move after the
+  restore (`OfflineClock.restore` arms the resume; Start, Pause, Reset, and
+  reconfiguration disarm it).
 
 Validation:
 

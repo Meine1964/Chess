@@ -208,6 +208,7 @@ _CALIBRATION_CLEAR_MAP_ACTION = (
 )
 _BOARD_EDGE_STUCK_DIAGNOSTIC_SECONDS = 3.0
 _BOARD_EDGE_STUCK_REPEAT_SECONDS = 5.0
+_HAND_TRACKER_STATES = frozenset({"activity", "waiting-for-clear"})
 _ILLEGAL_CORRECTION_FALLBACK_MILLISECONDS = 2000
 _ALIGNMENT_REMAP_PROTECTED_TRACKER_STATES = frozenset(
     {
@@ -1372,6 +1373,7 @@ class CameraWindow(QMainWindow):
         )
         self._board_edge_activity_detector = BoardEdgeActivityDetector()
         self._board_edge_indicator_active = False
+        self._hand_indicator_active = False
         self._board_edge_activity_suspended = False
         self._board_edge_indicator_active_since: float | None = None
         self._board_edge_indicator_last_stuck_diagnostic_at: float | None = None
@@ -4009,7 +4011,6 @@ class CameraWindow(QMainWindow):
         self._board_edge_indicator_active = False
         self._board_edge_indicator_active_since = None
         self._board_edge_indicator_last_stuck_diagnostic_at = None
-        self._projector_window.set_edge_activity_indicator(False)
 
     def _suspend_board_edge_activity_indicator(self) -> None:
         self._board_edge_activity_suspended = True
@@ -4038,7 +4039,6 @@ class CameraWindow(QMainWindow):
             return
         previous_active = self._board_edge_indicator_active
         self._board_edge_indicator_active = active
-        self._projector_window.set_edge_activity_indicator(active)
         observed_at = monotonic()
         if active:
             if (
@@ -4117,6 +4117,26 @@ class CameraWindow(QMainWindow):
             include_images=True,
         )
 
+    def _update_hand_indicator(
+        self,
+        tracker_state: str | None,
+        *,
+        tracker_ran: bool,
+    ) -> None:
+        if self._latest_frame is None or self._calibration_result is None:
+            active = False
+        elif (
+            self._lichess_guidance_projection_active
+            or self._illegal_correction_projection_active
+        ):
+            active = self._board_edge_indicator_active
+        elif tracker_ran:
+            active = tracker_state in _HAND_TRACKER_STATES
+        else:
+            return
+        self._hand_indicator_active = active
+        self._projector_window.set_edge_activity_indicator(active)
+
     def _timed_occupancy_tick(self) -> None:
         edge_detector = self._board_edge_activity_detector
         tracker = self._reference_move_tracker
@@ -4127,6 +4147,10 @@ class CameraWindow(QMainWindow):
         finished_at = perf_counter()
         edge_ran = edge_detector.observation_count != edge_count
         tracker_ran = tracker.observation_count != tracker_count
+        self._update_hand_indicator(
+            tracker.last_state if tracker_ran else None,
+            tracker_ran=tracker_ran,
+        )
         latency = self._detection_timing.record_tick(
             started_at,
             finished_at,
@@ -4164,7 +4188,11 @@ class CameraWindow(QMainWindow):
                 "Occupancy waiting for live camera-grid verification."
             )
             return
-        self._update_board_edge_activity_indicator()
+        if (
+            self._lichess_guidance_projection_active
+            or self._illegal_correction_projection_active
+        ):
+            self._update_board_edge_activity_indicator()
         if self._startup_offline_reference_refresh_pending:
             self._start_pending_offline_reference_refresh()
             return
@@ -4492,6 +4520,10 @@ class CameraWindow(QMainWindow):
                 compound_signatures=tuple(
                     candidate.verification_signature
                     for candidate in compound_candidates
+                ),
+                allow_destination_inference=(
+                    lichess_controller is None
+                    and self._game_mode == "offline-game"
                 ),
             )
         except (ValueError, cv2.error) as error:
@@ -8349,6 +8381,7 @@ class CameraWindow(QMainWindow):
         tracker_state: dict[str, object] = {
             "initialized": self._reference_move_tracker.initialized,
             "last_state": self._last_runtime_tracker_state,
+            "hand_indicator_active": self._hand_indicator_active,
             "board_edge_indicator": {
                 "active": self._board_edge_indicator_active,
                 "active_seconds": (
