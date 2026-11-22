@@ -1,4 +1,5 @@
 import os
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -9,6 +10,7 @@ from PySide6.QtWidgets import QApplication
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from src.chess_camera.projector import (
+    DEFAULT_BOARD_ILLUMINATION_PERCENT,
     PROJECTED_LEGAL_MOVE,
     PROJECTED_ON_DARK_SQUARE,
     PROJECTED_ILLEGAL_MOVE,
@@ -49,6 +51,61 @@ def test_projector_window_stays_above_screen_savers(
         window.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
         == Qt.WindowType.WindowStaysOnTopHint
     )
+
+
+def test_projector_grid_update_repaints_active_output(
+    application: QApplication,
+) -> None:
+    window = ProjectorWindow()
+    grid = np.zeros((9, 9, 2), dtype=np.float32)
+
+    with patch.object(window, "update") as update:
+        window.set_projector_grid(grid)
+
+    update.assert_called_once_with()
+
+
+def test_projector_illuminates_complete_board_at_configured_level(
+    application: QApplication,
+) -> None:
+    window = ProjectorWindow()
+    window.resize(320, 180)
+    x_values = np.linspace(80, 240, 9, dtype=np.float32)
+    y_values = np.linspace(10, 170, 9, dtype=np.float32)
+    x_grid, y_grid = np.meshgrid(x_values, y_values)
+    grid = np.stack((x_grid, y_grid), axis=2).astype(np.float32)
+    window.set_projector_grid(grid)
+    window.show_black()
+    window.show()
+    application.processEvents()
+
+    image = window.grab().toImage()
+    expected = round(255 * DEFAULT_BOARD_ILLUMINATION_PERCENT / 100)
+    assert image.pixelColor(160, 90).red() == expected
+    assert image.pixelColor(40, 90).red() == 0
+
+    window.set_board_illumination_percent(35)
+    application.processEvents()
+
+    assert window.grab().toImage().pixelColor(160, 90).red() == 89
+
+
+def test_calibration_suppression_makes_illuminated_board_black(
+    application: QApplication,
+) -> None:
+    window = ProjectorWindow()
+    window.resize(320, 180)
+    coordinates = np.linspace(40, 140, 9, dtype=np.float32)
+    x_grid, y_grid = np.meshgrid(coordinates, coordinates)
+    window.set_projector_grid(
+        np.stack((x_grid, y_grid), axis=2).astype(np.float32)
+    )
+    window.show_black()
+    window.set_calibration_overlays_suppressed(True)
+    window.show()
+    application.processEvents()
+
+    assert window.grab().toImage().pixelColor(90, 90).red() == 0
 
 
 def test_promotion_icons_rotate_toward_physical_viewer_edge() -> None:
@@ -372,7 +429,7 @@ def test_projector_renders_seven_segment_clocks_outside_board(
 
     assert black_clock_pixels > 30
     assert white_clock_pixels > 30
-    assert image.pixelColor(100, 90).red() == 0
+    assert image.pixelColor(100, 90).red() == 51
 
 
 def test_calibration_suppresses_clocks_and_activity_indicator(
@@ -464,7 +521,7 @@ def test_projector_places_timeout_result_between_clocks(
         for y in range(10, 36)
     )
     assert winner_digit_pixels < loser_digit_pixels
-    assert image.pixelColor(180, 90).red() == 0
+    assert image.pixelColor(180, 90).red() == 51
     assert image.pixelColor(90, 158).red() == 0
     expiration_flag_pixels = sum(
         image.pixelColor(x, y).red() > 150
@@ -568,7 +625,7 @@ def test_projector_places_agreed_draw_result_between_clocks(
         lower_fraction_points
     )
     assert upper_center_x == pytest.approx(lower_center_x, abs=1.0)
-    assert image.pixelColor(180, 90).red() == 0
+    assert image.pixelColor(180, 90).red() == 51
     assert image.pixelColor(90, 158).red() == 0
     expiration_flag_pixels = sum(
         image.pixelColor(x, y).red() > 150
@@ -646,7 +703,7 @@ def test_projector_renders_patterns_and_calibrated_squares(
     center = square_image.pixelColor(55, 29)
     gap = square_image.pixelColor(70, 38)
     assert center.red() == 255
-    assert gap.red() == 0
+    assert gap.red() == 51
 
     window.show_square(2, 3)
     application.processEvents()
@@ -654,7 +711,7 @@ def test_projector_renders_patterns_and_calibrated_squares(
     selected_center = selected_image.pixelColor(145, 64)
     adjacent_center = selected_image.pixelColor(175, 64)
     assert selected_center == PROJECTED_ON_DARK_SQUARE
-    assert adjacent_center.red() == 0
+    assert adjacent_center.red() == 51
 
     window.show_square(2, 3, light_square=True)
     application.processEvents()
@@ -682,7 +739,7 @@ def test_projector_renders_patterns_and_calibrated_squares(
     move_image = window.grab().toImage()
     assert move_image.pixelColor(115, 64) == PROJECTED_LEGAL_MOVE
     assert move_image.pixelColor(205, 99) == PROJECTED_LEGAL_MOVE
-    assert move_image.pixelColor(145, 64).red() == 0
+    assert move_image.pixelColor(145, 64).red() == 51
     assert move_image.pixelColor(295, 169).red() == 0
 
     window.show_move(
@@ -723,21 +780,21 @@ def test_projector_renders_patterns_and_calibrated_squares(
     application.processEvents()
     illegal_image = window.grab().toImage()
     assert illegal_image.pixelColor(145, 64) == PROJECTED_ILLEGAL_MOVE
-    assert illegal_image.pixelColor(175, 64).red() == 0
+    assert illegal_image.pixelColor(175, 64).red() == 51
 
     window.show_correction((2, 3), (4, 5))
     application.processEvents()
     correction_image = window.grab().toImage()
     assert correction_image.pixelColor(145, 64) == PROJECTED_ILLEGAL_MOVE
     assert correction_image.pixelColor(205, 99) == PROJECTED_ILLEGAL_MOVE
-    assert correction_image.pixelColor(175, 64).red() == 0
+    assert correction_image.pixelColor(175, 64).red() == 51
 
     window.show_reconciliation(((2, 3), (4, 5)))
     application.processEvents()
     reconciliation_image = window.grab().toImage()
     assert reconciliation_image.pixelColor(145, 64) == PROJECTED_ILLEGAL_MOVE
     assert reconciliation_image.pixelColor(205, 99) == PROJECTED_ILLEGAL_MOVE
-    assert reconciliation_image.pixelColor(175, 64).red() == 0
+    assert reconciliation_image.pixelColor(175, 64).red() == 51
 
     window.show_promotion_choices("top", "bottom")
     application.processEvents()

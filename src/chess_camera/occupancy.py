@@ -63,6 +63,7 @@ class SquareOccupancyDetector:
         required_observations: int = 3,
         required_agreement: int = 2,
         settling_observations: int = 8,
+        rebuild_models_after_motion: bool = False,
     ) -> None:
         if canonical_size < 320 or canonical_size % 8 != 0:
             raise ValueError(
@@ -80,6 +81,7 @@ class SquareOccupancyDetector:
         self._required_observations = required_observations
         self._required_agreement = required_agreement
         self._settling_observations = settling_observations
+        self._rebuild_models_after_motion = rebuild_models_after_motion
         self._settling_remaining = 0
         self._models: dict[int, _ParityModel] = {}
         self._history: deque[OccupancyGrid] = deque(
@@ -89,6 +91,9 @@ class SquareOccupancyDetector:
 
     def reset(self) -> None:
         self._models.clear()
+        self.reset_observations()
+
+    def reset_observations(self) -> None:
         self._history.clear()
         self._previous_motion_image = None
         self._settling_remaining = 0
@@ -116,6 +121,8 @@ class SquareOccupancyDetector:
             )
             changed_ratio = float(np.mean(difference > 15))
             if float(np.mean(difference)) > 6.0 and changed_ratio > 0.04:
+                if self._rebuild_models_after_motion:
+                    self._models.clear()
                 self._history.clear()
                 self._previous_motion_image = motion_image
                 self._settling_remaining = self._settling_observations

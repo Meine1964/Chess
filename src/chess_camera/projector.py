@@ -54,6 +54,7 @@ PROJECTED_ON_DARK_SQUARE = QColor("#00ffff")
 PROJECTED_LEGAL_MOVE = QColor("#ffffff")
 PROJECTED_ILLEGAL_MOVE = QColor("#ff0000")
 _MAX_EDGE_STROKE_COMPENSATION = 1.5
+DEFAULT_BOARD_ILLUMINATION_PERCENT = 20
 PROMOTION_GLYPHS: dict[PromotionPiece, str] = {
     "n": "♞",
     "b": "♝",
@@ -118,6 +119,9 @@ class ProjectorWindow(QWidget):
         )
         self._display_mode: DisplayMode = "black"
         self._calibration_overlays_suppressed = False
+        self._board_illumination_percent = (
+            DEFAULT_BOARD_ILLUMINATION_PERCENT
+        )
         self._pattern: QImage | None = None
         self._projector_grid: NDArray[np.float32] | None = None
         self._selected_square: tuple[int, int] | None = None
@@ -182,6 +186,16 @@ class ProjectorWindow(QWidget):
         self._calibration_overlays_suppressed = suppressed
         self.update()
 
+    def set_board_illumination_percent(self, percent: int) -> None:
+        if not 0 <= percent <= 100:
+            raise ValueError(
+                "Board illumination must be between 0% and 100%."
+            )
+        if self._board_illumination_percent == percent:
+            return
+        self._board_illumination_percent = percent
+        self.update()
+
     def set_turn_indicator(
         self,
         corner: TurnIndicatorCorner | None,
@@ -237,6 +251,7 @@ class ProjectorWindow(QWidget):
         if grid.shape != (9, 9, 2):
             raise ValueError("The projector grid must have shape (9, 9, 2).")
         self._projector_grid = np.asarray(grid, dtype=np.float32).copy()
+        self.update()
 
     def clear_projector_grid(self) -> None:
         self._projector_grid = None
@@ -389,6 +404,31 @@ class ProjectorWindow(QWidget):
     def paintEvent(self, event: QPaintEvent) -> None:
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor(0, 0, 0))
+        if (
+            not self._calibration_overlays_suppressed
+            and self._display_mode != "pattern"
+            and self._projector_grid is not None
+            and self._board_illumination_percent > 0
+        ):
+            intensity = round(
+                255 * self._board_illumination_percent / 100
+            )
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(intensity, intensity, intensity))
+            painter.drawPolygon(
+                self._polygon(
+                    board_quadrilateral_polygon(
+                        self._projector_grid,
+                        (
+                            (0.0, 0.0),
+                            (8.0, 0.0),
+                            (8.0, 8.0),
+                            (0.0, 8.0),
+                        ),
+                    )
+                )
+            )
         if self._display_mode == "pattern" and self._pattern is not None:
             painter.drawImage(self.rect(), self._pattern)
         elif self._display_mode == "grid" and self._projector_grid is not None:

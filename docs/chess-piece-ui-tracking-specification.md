@@ -217,10 +217,13 @@ reset to the standard starting position shall clear the highlight.
 
 In Offline legal mode, accepting a move shall illuminate its source and
 destination on the projector for exactly one second. The optional next-turn
-dot may appear concurrently. The projector shall then return to idle-dark
-output and allow one fixed second for camera exposure to settle before
-verification resumes. Red illegal-move correction projection and every other
-actionable projector mode shall continue to suppress the turn dot.
+dot may appear concurrently. The projector shall then remove the move
+illumination, return to the configured idle board illumination, and allow one
+fixed second for camera exposure to settle before verification resumes. The
+automatic starting-position detector shall discard every observation gathered
+before the accepted move; stale starting-position evidence must not reset the
+newly accepted logical position. Red illegal-move correction projection and
+every other actionable projector mode shall continue to suppress the turn dot.
 
 If that next manipulation produces a clear relocation which does not match
 any legal physical move signature, including a move by the wrong side, the
@@ -294,6 +297,14 @@ rather than collapsing it to the parity detector's `0` or `1` representative.
 This preserves the known White-side direction during midgame restart, when the
 starting-rank piece evidence needed to resolve the 180-degree ambiguity is no
 longer available.
+
+That retained direction is provisional when the restored logical position is
+the standard starting position. A stable physical starting arrangement shall
+always re-run piece-color orientation before automatic starting-position
+acceptance, even when parity agrees with the saved orientation. The measured
+White side shall replace the saved 180-degree direction and be persisted.
+Parity agreement alone shall never mark White-side orientation complete for a
+visible standard starting position.
 
 The projection restriction applies to every physical projection entry point,
 including Offline accepted-move marking and pending Lichess guidance. Logical
@@ -473,8 +484,10 @@ without requiring a mode-selection attempt. This passive start-only detector
 may use a lower-resolution canonical image and shorter observation window than
 general occupancy tracking because it accepts only the complete standard
 32-square pattern. It shall still require two agreeing classified observations
-after motion settling, report provisional recognition immediately, and target
-completion within one second after the board becomes clear.
+after motion settling, rebuild its square-appearance model after board motion
+so a model learned from a midgame position cannot prevent recognition of a
+newly arranged starting position, report provisional recognition immediately,
+and target completion within one second after the board becomes clear.
 
 - **Restore saved offline position** keeps the saved FEN authoritative and
   enters persistent correction guidance until the camera confirms that

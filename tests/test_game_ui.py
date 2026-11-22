@@ -712,6 +712,7 @@ def test_stable_starting_occupancy_triggers_automatic_reset() -> None:
         _piece_synchronizer=SimpleNamespace(position={}),
         _automatic_start_occupancy_detector=detector,
         _board_quarter_turns=0,
+        _piece_side_orientation_needs_detection=False,
         _activate_offline_after_reset=False,
         _automatic_start_reset_recovery=True,
         _occupancy_status=MagicMock(),
@@ -731,6 +732,57 @@ def test_stable_starting_occupancy_triggers_automatic_reset() -> None:
         "Starting position detected automatically; Offline game ready. "
         "White to move."
     )
+
+
+def test_automatic_starting_position_corrects_saved_opposite_side() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    from src.chess_camera.camera_app import CameraWindow
+    from src.chess_camera.chess_position import starting_occupied_squares
+
+    occupied = starting_occupied_squares()
+    detector = MagicMock()
+    detector.observe.return_value = SimpleNamespace(
+        state="stable",
+        result=SimpleNamespace(occupied_squares=occupied),
+    )
+    window = SimpleNamespace(
+        _automatic_start_reset=True,
+        _lichess_game_controller=None,
+        _latest_frame=object(),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(camera_grid=object())
+        ),
+        _game_mode="offline-game",
+        _legal_game=LegalGame(),
+        _piece_synchronizer=SimpleNamespace(
+            position=LegalGame().position
+        ),
+        _piece_side_orientation_needs_detection=True,
+        _automatic_start_occupancy_detector=detector,
+        _board_quarter_turns=0,
+        _settings=MagicMock(),
+        _refresh_pending_lichess_guidance=MagicMock(),
+        _activate_offline_after_reset=False,
+        _automatic_start_reset_recovery=False,
+        _occupancy_status=MagicMock(),
+        _piece_status=MagicMock(),
+        _complete_starting_position_reset=MagicMock(),
+    )
+
+    with patch(
+        "src.chess_camera.camera_app.detect_starting_position_orientation",
+        return_value=2,
+    ):
+        detected = CameraWindow._detect_automatic_starting_position(window)
+
+    assert detected is True
+    assert window._board_quarter_turns == 2
+    assert window._piece_side_orientation_needs_detection is False
+    window._settings.setValue.assert_called_once()
+    window._settings.sync.assert_called_once_with()
+    window._complete_starting_position_reset.assert_called_once_with(occupied)
 
 
 def test_completed_starting_reset_replaces_occupancy_overlay() -> None:
@@ -2312,6 +2364,7 @@ def test_first_accepted_black_move_determines_offline_turn() -> None:
         "Accepted a7-a6.",
     )
     tracker.rejected_move_is_restored.return_value = False
+    automatic_start_detector = MagicMock()
     window = SimpleNamespace(
         _latest_frame=object(),
         _calibration_result=SimpleNamespace(
@@ -2325,6 +2378,7 @@ def test_first_accepted_black_move_determines_offline_turn() -> None:
         _offline_turn_inference_pending=True,
         _pending_offline_games=None,
         _reference_move_tracker=tracker,
+        _automatic_start_occupancy_detector=automatic_start_detector,
         _board_quarter_turns=0,
         _occupancy_status=MagicMock(),
         _last_runtime_tracker_state="watching",
@@ -2353,6 +2407,7 @@ def test_first_accepted_black_move_determines_offline_turn() -> None:
     assert window._pending_offline_games is None
     assert window._legal_game.status.turn == "white"
     assert synchronizer.position[(2, 0)] == "p"
+    automatic_start_detector.reset_observations.assert_called_once_with()
     window._persist_game_state.assert_called_once_with()
     window._project_offline_accepted_move.assert_called_once_with(move)
 

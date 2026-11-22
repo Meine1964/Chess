@@ -166,6 +166,28 @@ def test_motion_requires_quiet_period_before_occupancy_resumes() -> None:
     assert resumed.state == "stable"
 
 
+def test_start_detector_rebuilds_appearance_model_after_motion() -> None:
+    detector = SquareOccupancyDetector(
+        required_observations=1,
+        required_agreement=1,
+        settling_observations=1,
+        rebuild_models_after_motion=True,
+    )
+    starting = _starting_position()
+    detector.observe(starting, _camera_grid())
+    obstructed = starting.copy()
+    cv2.rectangle(obstructed, (150, 100), (650, 700), (240, 30, 180), -1)
+
+    motion = detector.observe(obstructed, _camera_grid())
+    settling = detector.observe(obstructed, _camera_grid())
+    resumed = detector.observe(obstructed, _camera_grid())
+
+    assert motion.state == "motion"
+    assert settling.state == "settling"
+    assert resumed.state == "stable"
+    assert resumed.result is not None
+
+
 def test_piece_colors_put_white_starting_side_at_ui_bottom() -> None:
     starting = _starting_position()
     occupied = frozenset(

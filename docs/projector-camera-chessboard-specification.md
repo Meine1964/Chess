@@ -203,9 +203,16 @@ The application shall treat the projector as a display device and shall:
 - Use the MPR 600 projector's 1280x720 output resolution.
 - Prevent operating-system scaling from changing projection coordinates.
 - Keep user-interface controls on the primary monitor.
-- Support a completely black projector frame.
+- Support a completely black projector frame for calibration and states
+  without a verified projector grid.
 
-Black is the default background because it minimizes unwanted projected light.
+During normal operation with a verified projector grid, uniformly illuminate
+the complete 8x8 board polygon beneath clocks and other overlays. The
+illumination level shall be configurable from 0% through 100% in Settings,
+default to 20%, apply immediately, and persist across restarts. A value of 0%
+restores the previous black-board behavior. Calibration black references and
+calibration patterns shall suppress this fill so their pixel values remain
+authoritative.
 
 ### FR-3: Board detection
 
@@ -672,8 +679,9 @@ The current interface contains:
   alignment errors retain the highlight. Temporary operations automatically
   restore that square; an explicit Black action keeps output black until the
   highlighted square is clicked again.
-- While the projector is black, automatic board-orientation detection compares
-  inset brightness over all 64 physical squares. Standard orientation requires
+- While normal board illumination is stable, automatic board-orientation
+  detection compares inset brightness over all 64 physical squares. Standard
+  orientation requires
   the bottom-right square to be white; when the detected color parity is
   reversed, logical coordinates are rotated by 90 degrees. The result is
   remembered for starts where pieces obscure the board. When occupancy matches

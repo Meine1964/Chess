@@ -138,6 +138,7 @@ _CAMERA_SETTING = "camera/device_id"
 _CAMERA_NAME_SETTING = "camera/device_name"
 _PROJECTOR_SETTING = "projector/screen_name"
 _PROJECTOR_LABEL_SETTING = "projector/screen_label"
+_BOARD_ILLUMINATION_SETTING = "projector/board_illumination_percent"
 _SAVE_DIAGNOSTICS_SETTING = "diagnostics/save_snapshots"
 _LICHESS_GAME_SETTING = "lichess/selected_game_id"
 _PROMOTION_MODE_SETTING = "chess/promotion_mode"
@@ -1183,6 +1184,22 @@ class CameraWindow(QMainWindow):
         self._camera: QCamera | None = None
         self._active_device_index = -1
         self._projector_window = ProjectorWindow()
+        self._board_illumination_percent = min(
+            100,
+            max(
+                0,
+                _stored_integer(
+                    self._settings.value(
+                        _BOARD_ILLUMINATION_SETTING,
+                        20,
+                    ),
+                    20,
+                ),
+            ),
+        )
+        self._projector_window.set_board_illumination_percent(
+            self._board_illumination_percent
+        )
         self._calibrator = ProjectorCalibrationController(
             self._projector_window,
             self._detector,
@@ -1223,6 +1240,7 @@ class CameraWindow(QMainWindow):
             required_observations=2,
             required_agreement=2,
             settling_observations=3,
+            rebuild_models_after_motion=True,
         )
         self._board_edge_activity_detector = BoardEdgeActivityDetector()
         self._board_edge_indicator_active = False
@@ -2153,6 +2171,22 @@ class CameraWindow(QMainWindow):
         diagnostics_tab.setLayout(diagnostics_layout)
         tabs.addTab(diagnostics_tab, "Diagnostics")
 
+        projector_tab = QWidget()
+        projector_layout = QFormLayout()
+        board_illumination = QSpinBox()
+        board_illumination.setObjectName("boardIlluminationPercent")
+        board_illumination.setRange(0, 100)
+        board_illumination.setSuffix("%")
+        board_illumination.setValue(
+            getattr(self, "_board_illumination_percent", 20)
+        )
+        projector_layout.addRow(
+            "Board illumination:",
+            board_illumination,
+        )
+        projector_tab.setLayout(projector_layout)
+        tabs.addTab(projector_tab, "Projector")
+
         chess_tab = QWidget()
         chess_layout = QFormLayout()
         promotion_mode = QComboBox()
@@ -2334,6 +2368,14 @@ class CameraWindow(QMainWindow):
             self._set_project_turn_indicator(
                 project_turn_indicator.isChecked()
             )
+            if board_illumination.value() != getattr(
+                self,
+                "_board_illumination_percent",
+                20,
+            ):
+                self._set_board_illumination_percent(
+                    board_illumination.value()
+                )
             offline_clock_values = (
                 offline_clock_enabled.isChecked(),
                 offline_clock_initial_minutes.value(),
@@ -2405,6 +2447,16 @@ class CameraWindow(QMainWindow):
 
     def _save_diagnostics_preference_changed(self, checked: bool) -> None:
         self._settings.setValue(_SAVE_DIAGNOSTICS_SETTING, checked)
+        self._settings.sync()
+
+    def _set_board_illumination_percent(self, percent: int) -> None:
+        if not 0 <= percent <= 100:
+            raise ValueError(
+                "Board illumination must be between 0% and 100%."
+            )
+        self._board_illumination_percent = percent
+        self._projector_window.set_board_illumination_percent(percent)
+        self._settings.setValue(_BOARD_ILLUMINATION_SETTING, percent)
         self._settings.sync()
 
     def _set_promotion_mode(self, mode: str) -> None:
@@ -4073,6 +4125,7 @@ class CameraWindow(QMainWindow):
             self._game_mode == "offline-game"
             and self._legal_game.fen == starting_game.fen
             and self._piece_synchronizer.position == starting_game.position
+            and not self._piece_side_orientation_needs_detection
         ):
             return False
         try:
@@ -4087,6 +4140,32 @@ class CameraWindow(QMainWindow):
             return False
         if update.result is None:
             return False
+        if (
+            update.state == "stable"
+            and self._piece_side_orientation_needs_detection
+        ):
+            try:
+                self._board_quarter_turns = (
+                    detect_starting_position_orientation(
+                        self._latest_frame,
+                        self._calibration_result.mapping.camera_grid,
+                        update.result.occupied_squares,
+                        self._board_quarter_turns,
+                    )
+                )
+            except ValueError as error:
+                self._piece_status.setText(
+                    "Starting position detected, but White-side orientation "
+                    f"is unresolved: {error}"
+                )
+                return True
+            self._piece_side_orientation_needs_detection = False
+            self._settings.setValue(
+                _BOARD_ORIENTATION_SETTING,
+                self._board_quarter_turns,
+            )
+            self._settings.sync()
+            self._refresh_pending_lichess_guidance()
         occupied_ui = frozenset(
             rotate_square(row, column, -self._board_quarter_turns)
             for row, column in update.result.occupied_squares
@@ -4410,6 +4489,7 @@ class CameraWindow(QMainWindow):
                 f"Reference move rejected: {error}"
             )
             return
+        self._automatic_start_occupancy_detector.reset_observations()
         if inferred_offline_turn and offline_move_game is not None:
             self._legal_game = offline_move_game
             self._offline_turn_inference_pending = False
@@ -8238,6 +8318,7 @@ class CameraWindow(QMainWindow):
         if (
             complete_orientation_retained
             and self._piece_side_orientation_needs_detection
+            and self._piece_synchronizer.position != LegalGame().position
         ):
             self._piece_side_orientation_needs_detection = False
             self._refresh_pending_lichess_guidance()

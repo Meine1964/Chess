@@ -738,6 +738,7 @@ def test_lichess_ai_defaults_apply_and_cancel_transactionally(
     )
 
     from src.chess_camera.camera_app import CameraWindow
+    from src.chess_camera.projector import ProjectorWindow
 
     class SettingsTestWindow(CameraWindow):
         def __init__(self) -> None:
@@ -755,6 +756,8 @@ def test_lichess_ai_defaults_apply_and_cancel_transactionally(
             self._promotion_mode = "auto-queen"
             self._automatic_start_reset = True
             self._project_turn_indicator = True
+            self._board_illumination_percent = 20
+            self._projector_window = ProjectorWindow()
 
         def _refresh_projector_screens(
             self,
@@ -764,6 +767,13 @@ def test_lichess_ai_defaults_apply_and_cancel_transactionally(
 
         def _set_promotion_mode(self, mode: str) -> None:
             assert mode == "auto-queen"
+
+        def _set_project_turn_indicator(self, enabled: bool) -> None:
+            self._project_turn_indicator = enabled
+            self._settings.setValue(
+                "chess/project_turn_indicator",
+                enabled,
+            )
 
     window = SettingsTestWindow()
     invocation = 0
@@ -800,6 +810,11 @@ def test_lichess_ai_defaults_apply_and_cancel_transactionally(
         assert level is not None
         assert clock_limit is not None
         assert clock_increment is not None
+        board_illumination = dialog.findChild(
+            QSpinBox,
+            "boardIlluminationPercent",
+        )
+        assert board_illumination is not None
         if invocation == 0:
             assert (
                 level.value(),
@@ -814,7 +829,9 @@ def test_lichess_ai_defaults_apply_and_cancel_transactionally(
                 600,
                 5,
             )
+            assert board_illumination.value() == 20
             level.setValue(6)
+            board_illumination.setValue(35)
             color.setCurrentIndex(color.findData("black"))
             clock_limit.setCurrentIndex(clock_limit.findData(5400))
             clock_increment.setCurrentIndex(
@@ -828,6 +845,8 @@ def test_lichess_ai_defaults_apply_and_cancel_transactionally(
             assert apply_button is not None
             apply_button.click()
         else:
+            assert board_illumination.value() == 35
+            board_illumination.setValue(70)
             level.setValue(2)
             color.setCurrentIndex(color.findData("random"))
             clock_enabled.setChecked(False)
@@ -841,6 +860,14 @@ def test_lichess_ai_defaults_apply_and_cancel_transactionally(
 
     assert window._settings.value("lichess/ai_level", type=int) == 6
     assert window._settings.value("lichess/ai_color") == "black"
+    assert (
+        window._settings.value(
+            "projector/board_illumination_percent",
+            type=int,
+        )
+        == 35
+    )
+    assert window._board_illumination_percent == 35
     assert (
         window._settings.value("lichess/ai_clock_enabled", type=bool) is True
     )

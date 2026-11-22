@@ -641,6 +641,7 @@ def test_parity_detection_preserves_matching_complete_orientation() -> None:
         ),
         _board_quarter_turns=2,
         _piece_side_orientation_needs_detection=True,
+        _piece_synchronizer=SimpleNamespace(position={}),
         _settings=MagicMock(),
         _refresh_pending_lichess_guidance=MagicMock(),
     )
@@ -657,6 +658,42 @@ def test_parity_detection_preserves_matching_complete_orientation() -> None:
     window._settings.setValue.assert_not_called()
     window._settings.sync.assert_not_called()
     window._refresh_pending_lichess_guidance.assert_called_once_with()
+
+
+def test_parity_detection_keeps_starting_side_check_pending() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    from src.chess_camera.camera_app import CameraWindow
+    from src.chess_camera.legal_game import LegalGame
+
+    window = SimpleNamespace(
+        _board_orientation_needs_detection=True,
+        _latest_frame=np.zeros((20, 20, 3), dtype=np.uint8),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(
+                camera_grid=np.zeros((9, 9, 2), dtype=np.float32)
+            )
+        ),
+        _board_quarter_turns=2,
+        _piece_side_orientation_needs_detection=True,
+        _piece_synchronizer=SimpleNamespace(
+            position=LegalGame().position
+        ),
+        _settings=MagicMock(),
+        _refresh_pending_lichess_guidance=MagicMock(),
+    )
+
+    with patch(
+        "src.chess_camera.camera_app.detect_board_orientation",
+        return_value=0,
+    ):
+        CameraWindow._detect_current_board_orientation(window)
+
+    assert window._board_quarter_turns == 2
+    assert window._board_orientation_needs_detection is False
+    assert window._piece_side_orientation_needs_detection is True
+    window._refresh_pending_lichess_guidance.assert_not_called()
 
 
 def test_square_projection_waits_for_white_side_orientation() -> None:
@@ -2019,7 +2056,7 @@ def test_quick_realign_uses_independent_validation_phase() -> None:
     assert projector.grid is not None
 
 
-def test_adaptive_calibration_uses_bounded_averaged_discovery() -> None:
+def test_adaptive_calibration_waits_for_stable_discovery_frames() -> None:
     from unittest.mock import MagicMock, patch
 
     class FakeProjector:
@@ -2072,39 +2109,30 @@ def test_adaptive_calibration_uses_bounded_averaged_discovery() -> None:
     )
     with patch(
         "src.chess_camera.calibration_controller.fit_coded_pattern_mapping",
-        side_effect=[
-            CalibrationError("No markers yet."),
-            (detection, mapping),
-        ],
+        return_value=(detection, mapping),
     ):
         for _index in range(2):
             controller.accept_frame(
-                np.full((60, 80, 3), 100, dtype=np.uint8)
+                np.zeros((60, 80, 3), dtype=np.uint8)
+            )
+            assert controller._collecting
+        for value in (100, 200, 201):
+            controller.accept_frame(
+                np.full((60, 80, 3), value, dtype=np.uint8)
             )
             assert controller._collecting
         controller.accept_frame(
-            np.full((60, 80, 3), 100, dtype=np.uint8)
+            np.full((60, 80, 3), 199, dtype=np.uint8)
         )
         assert not controller._collecting
         assert projector.blackouts == 1
         assert delays[-1] == 25
         assert detector.detect.call_count == 0
         controller._fit_adaptive_discovery_candidate()
-        assert delays[-1] == 250
-
-        controller._collecting = True
-        controller._frame_accumulator = None
-        controller._frame_count = 0
-        for _index in range(3):
-            controller.accept_frame(
-                np.full((60, 80, 3), 100, dtype=np.uint8)
-            )
-        assert projector.blackouts == 2
-        controller._fit_adaptive_discovery_candidate()
 
     assert not controller._collecting
     assert controller._adaptive_rough_mapping is mapping
-    assert np.all(controller._captures["coded"] == 100)
+    assert np.all(controller._captures["coded"] == 200)
 
     controller._adaptive_phase = "gray-code"
     projector_mask = np.ones((180, 320), dtype=bool)
@@ -2128,6 +2156,40 @@ def test_adaptive_calibration_uses_bounded_averaged_discovery() -> None:
     controller.accept_frame(np.full((60, 80, 3), 102, dtype=np.uint8))
     assert not controller._collecting
     assert np.all(controller._captures["x_0_normal"] == 101)
+
+
+def test_adaptive_discovery_fit_failure_stops_without_reflashing() -> None:
+    from unittest.mock import MagicMock, patch
+
+    projector = MagicMock()
+    controller = ProjectorCalibrationController(projector, MagicMock())
+    controller._schedule = lambda _delay, _callback: None
+    controller._active = True
+    controller._collecting = False
+    controller._adaptive_cropped_mode = True
+    controller._adaptive_phase = "discovery"
+    controller._projector_size = (320, 180)
+    controller._captures["black"] = np.zeros((60, 80), dtype=np.uint8)
+    controller._detection = _detection()
+    controller._coded_pattern = coded_marker_pattern(320, 180)
+    controller._adaptive_discovery_candidate = np.full(
+        (60, 80),
+        100,
+        dtype=np.uint8,
+    )
+    failures: list[str] = []
+    controller.failed.connect(failures.append)
+
+    with patch(
+        "src.chess_camera.calibration_controller.fit_coded_pattern_mapping",
+        side_effect=CalibrationError("No markers detected."),
+    ):
+        controller._fit_adaptive_discovery_candidate()
+
+    assert not controller.active
+    assert failures == ["Coded discovery failed: No markers detected."]
+    projector.show_pattern.assert_not_called()
+    projector.show_black.assert_called_once_with()
 
 
 def test_adaptive_gray_code_patterns_are_black_outside_board_mask() -> None:
