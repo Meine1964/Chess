@@ -269,6 +269,7 @@ _OFFLINE_CLOCK_WHITE_TIME_SETTING = "game/offline_clock_white_time_ms"
 _OFFLINE_CLOCK_BLACK_TIME_SETTING = "game/offline_clock_black_time_ms"
 _OFFLINE_CLOCK_HAS_STARTED_SETTING = "game/offline_clock_has_started"
 _BOARD_ORIENTATION_SETTING = "board/automatic_clockwise_quarter_turns"
+_BOARD_FLIPPED_SETTING = "ui/board_flipped"
 _INTERACTION_FONT_POINT_SIZE = 12
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _INTEGRATED_CAMERA_TERMS = (
@@ -1179,6 +1180,7 @@ class LichessGameSelectionDialog(QDialog):
         self._details.setWordWrap(True)
         self._board = ChessboardWidget()
         self._board.setMinimumSize(360, 360)
+        self._board.flip_requested.connect(self._board.set_flipped)
         self._buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
             | QDialogButtonBox.StandardButton.Cancel
@@ -1205,6 +1207,7 @@ class LichessGameSelectionDialog(QDialog):
         if not 0 <= index < len(self._games):
             return
         game = self._games[index]
+        self._board.set_flipped(game.color == "black")
         position = LegalGame(game.current_fen).position
         self._board.set_pieces(position)
         self._board.set_occupied_squares(position)
@@ -1639,6 +1642,18 @@ class CameraWindow(QMainWindow):
         self._lichess_board_widget.addAction(
             self._current_lichess_game_action
         )
+        self._board_flipped = _stored_boolean(
+            self._settings.value(_BOARD_FLIPPED_SETTING, False),
+            False,
+        )
+        for board in (self._board_widget, self._lichess_board_widget):
+            board.set_flipped(self._board_flipped)
+            board.flip_requested.connect(
+                lambda flipped: CameraWindow._set_board_flipped(
+                    self,
+                    flipped,
+                )
+            )
         self._restore_piece_position()
         self._restore_game_mode()
         self._board_widget.setEnabled(False)
@@ -2089,18 +2104,9 @@ class CameraWindow(QMainWindow):
             )
         self._lichess_game_information_status.setWordWrap(True)
 
-        black_information_layout = QHBoxLayout()
-        black_information_layout.addWidget(self._lichess_black_player)
-        black_information_layout.addStretch(1)
-        black_information_layout.addWidget(
-            self._lichess_connection_button
-        )
-        black_information_layout.addStretch(1)
-        black_information_layout.addWidget(self._lichess_black_clock)
-        white_information_layout = QHBoxLayout()
-        white_information_layout.addWidget(self._lichess_white_player)
-        white_information_layout.addStretch(1)
-        white_information_layout.addWidget(self._lichess_white_clock)
+        self._lichess_top_player_layout = QHBoxLayout()
+        self._lichess_bottom_player_layout = QHBoxLayout()
+        CameraWindow._arrange_lichess_player_rows(self)
         lichess_controls_layout = QHBoxLayout()
         lichess_controls_layout.addStretch(1)
         lichess_controls_layout.addWidget(self._lichess_takeback_button)
@@ -2121,9 +2127,9 @@ class CameraWindow(QMainWindow):
         lichess_panel = QGroupBox("Lichess position")
         _set_readable_interaction_font(lichess_panel)
         lichess_panel_layout = QVBoxLayout()
-        lichess_panel_layout.addLayout(black_information_layout)
+        lichess_panel_layout.addLayout(self._lichess_top_player_layout)
         lichess_panel_layout.addWidget(self._lichess_board_widget)
-        lichess_panel_layout.addLayout(white_information_layout)
+        lichess_panel_layout.addLayout(self._lichess_bottom_player_layout)
         lichess_panel_layout.addWidget(
             self._lichess_game_information_status
         )
@@ -6988,6 +6994,35 @@ class CameraWindow(QMainWindow):
             "Projector is black; checking reconciliation occupancy again."
         )
 
+    def _set_board_flipped(self, flipped: bool) -> None:
+        self._board_flipped = flipped
+        self._board_widget.set_flipped(flipped)
+        self._lichess_board_widget.set_flipped(flipped)
+        self._settings.setValue(_BOARD_FLIPPED_SETTING, flipped)
+        CameraWindow._arrange_lichess_player_rows(self)
+
+    def _arrange_lichess_player_rows(self) -> None:
+        players = (
+            (self._lichess_black_player, self._lichess_black_clock),
+            (self._lichess_white_player, self._lichess_white_clock),
+        )
+        (top_player, top_clock), (bottom_player, bottom_clock) = (
+            players[::-1] if self._board_flipped else players
+        )
+        top = self._lichess_top_player_layout
+        bottom = self._lichess_bottom_player_layout
+        for layout in (top, bottom):
+            while layout.count():
+                layout.takeAt(0)
+        top.addWidget(top_player)
+        top.addStretch(1)
+        top.addWidget(self._lichess_connection_button)
+        top.addStretch(1)
+        top.addWidget(top_clock)
+        bottom.addWidget(bottom_player)
+        bottom.addStretch(1)
+        bottom.addWidget(bottom_clock)
+
     def _physical_board_square(
         self,
         row: int,
@@ -8077,6 +8112,7 @@ class CameraWindow(QMainWindow):
                 self._clear_lichess_game_information(
                     "Loading Lichess game information."
                 )
+                CameraWindow._set_board_flipped(self, event.color == "black")
             self._lichess_game_id = event.game_id
             self._lichess_player_color = event.color
             self._lichess_opponent_name = event.opponent_name

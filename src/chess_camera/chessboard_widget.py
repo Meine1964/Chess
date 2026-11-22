@@ -12,7 +12,7 @@ from PySide6.QtGui import (
     QPixmap,
 )
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import QSizePolicy, QWidget
+from PySide6.QtWidgets import QSizePolicy, QStyle, QWidget
 
 from .chess_position import PieceCode, Position, piece_asset_filename
 
@@ -62,6 +62,7 @@ class ChessboardWidget(QWidget):
     square_clicked = Signal(int, int)
     copy_fen_requested = Signal()
     copy_board_requested = Signal()
+    flip_requested = Signal(bool)
 
     def __init__(self) -> None:
         super().__init__()
@@ -93,12 +94,45 @@ class ChessboardWidget(QWidget):
         self._copy_board_action.triggered.connect(
             self.copy_board_requested.emit
         )
+        self._flipped = False
+        self._flip_action = QAction(
+            self.style().standardIcon(
+                QStyle.StandardPixmap.SP_BrowserReload
+            ),
+            "Flip board",
+            self,
+        )
+        self._flip_action.setCheckable(True)
+        self._flip_action.triggered.connect(self._request_flip)
         self.addActions(
-            (self._copy_fen_action, self._copy_board_action)
+            (
+                self._copy_fen_action,
+                self._copy_board_action,
+                self._flip_action,
+            )
         )
         self.setContextMenuPolicy(
             Qt.ContextMenuPolicy.ActionsContextMenu
         )
+
+    @property
+    def flipped(self) -> bool:
+        return self._flipped
+
+    def _request_flip(self) -> None:
+        self.flip_requested.emit(self._flip_action.isChecked())
+
+    def set_flipped(self, flipped: bool) -> None:
+        self._flip_action.setChecked(flipped)
+        if flipped == self._flipped:
+            return
+        self._flipped = flipped
+        self.update()
+
+    def _board_square(self, view_row: int, view_column: int) -> tuple[int, int]:
+        if self._flipped:
+            return 7 - view_row, 7 - view_column
+        return view_row, view_column
 
     @property
     def selected_square(self) -> tuple[int, int] | None:
@@ -272,7 +306,7 @@ class ChessboardWidget(QWidget):
                 self.height(),
             )
             if square is not None:
-                self.square_clicked.emit(*square)
+                self.square_clicked.emit(*self._board_square(*square))
                 event.accept()
                 return
         super().mousePressEvent(event)
@@ -286,11 +320,12 @@ class ChessboardWidget(QWidget):
         left = (self.width() - board_size) / 2
         top = (self.height() - board_size) / 2
         square_size = board_size / 8
-        for row in range(8):
-            for column in range(8):
+        for view_row in range(8):
+            for view_column in range(8):
+                row, column = self._board_square(view_row, view_column)
                 rectangle = QRectF(
-                    left + column * square_size,
-                    top + row * square_size,
+                    left + view_column * square_size,
+                    top + view_row * square_size,
                     square_size,
                     square_size,
                 )
@@ -378,7 +413,7 @@ class ChessboardWidget(QWidget):
                 font.setPixelSize(max(10, round(square_size * 0.18)))
                 painter.setFont(font)
                 label_margin = max(2.0, square_size * 0.05)
-                if column == 7:
+                if view_column == 7:
                     painter.drawText(
                         rectangle.adjusted(
                             label_margin,
@@ -390,7 +425,7 @@ class ChessboardWidget(QWidget):
                         | Qt.AlignmentFlag.AlignTop,
                         str(8 - row),
                     )
-                if row == 7:
+                if view_row == 7:
                     painter.drawText(
                         rectangle.adjusted(
                             label_margin,

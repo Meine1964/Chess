@@ -519,9 +519,40 @@ extensible right-click context menu with:
   metadata is available and shall open a selectable, read-only dialog showing
   the game ID, players, clocks, game status/result, and physical
   synchronization status.
+- **Flip board**: a checkable action on both boards that shows the boards
+  from Black's side. One shared orientation applies to the Physical and
+  Lichess boards; toggling it on either board flips both.
 
 The menu shall remain available on the display-only Lichess board; enabling
 the context menu shall not make its squares selectable.
+
+### 5.0 Board orientation
+
+- Flipping is a view transform only. Positions, moves, highlights, guidance,
+  and clicks keep UI coordinates (row 0 = rank 8); the widget draws UI square
+  `(row, column)` at view square `(7 - row, 7 - column)` when flipped and maps
+  clicks back before emitting them. The physical-board rotation, projector
+  output, move detection, and Lichess synchronization are unaffected.
+- When flipped, rank labels run 1-8 from top to bottom along the right edge
+  and file labels run h-a along the bottom edge. Pieces stay upright. Copy
+  Board copies the board as displayed; Copy FEN is unchanged.
+- The Lichess panel shows the player row of the side at the top of the board
+  above it: Black above and White below when not flipped, White above and
+  Black below when flipped.
+- The orientation is stored in the application settings and restored at
+  startup.
+- When a Lichess game becomes the attached game, set the orientation to the
+  player's color (flipped for Black). A manual flip afterwards persists until
+  another game is attached.
+- The Current Lichess game picker preview shows each game from the player's
+  color.
+- Implemented in `ChessboardWidget` (`set_flipped`, view-to-UI square
+  mapping) and `CameraWindow._set_board_flipped` /
+  `_arrange_lichess_player_rows`. Covered by
+  `tests/test_chessboard_widget.py` (flipped drawing and clicks, linked flip
+  with row swap and persistence, picker preview) and
+  `tests/test_projector_calibration.py` (automatic flip once per newly
+  attached game).
 
 ### 5.1 Rendering order
 

@@ -2073,7 +2073,7 @@ def test_lichess_attachment_mismatch_starts_live_reconciliation() -> None:
 
 def test_new_lichess_game_preserves_complete_orientation() -> None:
     from types import SimpleNamespace
-    from unittest.mock import MagicMock
+    from unittest.mock import MagicMock, patch
 
     from src.chess_camera.camera_app import CameraWindow
     from src.chess_camera.lichess_client import AccountGameEvent
@@ -2109,8 +2109,11 @@ def test_new_lichess_game_preserves_complete_orientation() -> None:
         _record_runtime_diagnostic=MagicMock(),
     )
 
-    CameraWindow._lichess_account_event_received(window, event)
+    with patch.object(CameraWindow, "_set_board_flipped") as set_flipped:
+        CameraWindow._lichess_account_event_received(window, event)
+        CameraWindow._lichess_account_event_received(window, event)
 
+    set_flipped.assert_called_once_with(window, False)
     assert window._board_orientation_needs_detection is False
     assert window._piece_side_orientation_needs_detection is False
     assert window._reconciliation_requested is True

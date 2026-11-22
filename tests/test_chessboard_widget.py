@@ -4,8 +4,9 @@ from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
-from PySide6.QtCore import QPointF, QSettings, Qt
+from PySide6.QtCore import QPoint, QPointF, QSettings, Qt
 from PySide6.QtGui import QAction, QColor
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QComboBox, QMainWindow, QToolButton
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -184,6 +185,85 @@ def test_board_copy_handlers_use_physical_defaults_and_lichess_authority(
     CameraWindow._copy_lichess_board_fen(window)
     assert application.clipboard().text() == authoritative_fen
     assert status_bar.showMessage.call_count == 2
+
+
+def test_flipped_widget_draws_and_clicks_from_black_side(
+    application: QApplication,
+) -> None:
+    widget = ChessboardWidget()
+    widget.resize(320, 320)
+    flip_requests = MagicMock()
+    widget.flip_requested.connect(flip_requests)
+    clicks = MagicMock()
+    widget.square_clicked.connect(clicks)
+    widget.setEnabled(True)
+    actions = {action.text(): action for action in widget.actions()}
+
+    actions["Flip board"].trigger()
+    flip_requests.assert_called_once_with(True)
+    assert not widget.flipped
+
+    widget.set_flipped(True)
+    widget.set_occupied_squares({(0, 0)})
+    widget.show()
+    application.processEvents()
+    image = widget.grab().toImage()
+
+    assert actions["Flip board"].isChecked()
+    assert QColor(image.pixel(300, 300)).name() == "#111111"
+    assert QColor(image.pixel(20, 20)).name() != "#111111"
+    QTest.mouseClick(
+        widget,
+        Qt.MouseButton.LeftButton,
+        pos=QPoint(20, 300),
+    )
+    clicks.assert_called_once_with(0, 7)
+    widget.close()
+
+
+def test_set_board_flipped_flips_both_boards_and_swaps_lichess_rows(
+    application: QApplication,
+) -> None:
+    from types import SimpleNamespace
+
+    from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton
+
+    from src.chess_camera.camera_app import (
+        _BOARD_FLIPPED_SETTING,
+        CameraWindow,
+    )
+
+    window = SimpleNamespace(
+        _board_flipped=False,
+        _board_widget=ChessboardWidget(),
+        _lichess_board_widget=ChessboardWidget(),
+        _settings=MagicMock(),
+        _lichess_black_player=QLabel("Black"),
+        _lichess_black_clock=QLabel("5:00"),
+        _lichess_white_player=QLabel("White"),
+        _lichess_white_clock=QLabel("4:00"),
+        _lichess_connection_button=QPushButton("Connect"),
+        _lichess_top_player_layout=QHBoxLayout(),
+        _lichess_bottom_player_layout=QHBoxLayout(),
+    )
+    CameraWindow._arrange_lichess_player_rows(window)
+    top = window._lichess_top_player_layout
+    bottom = window._lichess_bottom_player_layout
+    assert top.itemAt(0).widget() is window._lichess_black_player
+
+    CameraWindow._set_board_flipped(window, True)
+
+    assert window._board_widget.flipped
+    assert window._lichess_board_widget.flipped
+    window._settings.setValue.assert_called_once_with(
+        _BOARD_FLIPPED_SETTING,
+        True,
+    )
+    assert top.itemAt(0).widget() is window._lichess_white_player
+    assert top.itemAt(2).widget() is window._lichess_connection_button
+    assert top.itemAt(4).widget() is window._lichess_white_clock
+    assert bottom.itemAt(0).widget() is window._lichess_black_player
+    assert bottom.count() == 3
 
 
 def test_widget_renders_black_dot_at_occupied_square_center(
@@ -471,11 +551,13 @@ def test_multiple_game_dialog_previews_position_without_hash(
     )
     dialog = LichessGameSelectionDialog(games)
 
+    assert dialog._board.flipped
     assert "oldGame1" not in dialog._selector.itemText(0)
     assert dialog._selector.itemText(0) == (
         "Older opponent - playing Black, your turn"
     )
     dialog._selector.setCurrentIndex(1)
+    assert not dialog._board.flipped
     assert dialog.selected_game_id == "newGame2"
     assert dialog._board.pieces[(4, 4)] == "P"
     assert dialog._board.last_move == ((6, 4), (4, 4))
