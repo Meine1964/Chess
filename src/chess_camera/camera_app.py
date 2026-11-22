@@ -83,6 +83,7 @@ from .diagnostics import DiagnosticStore, RuntimeDiagnosticLog
 from .guidance_activity import (
     BlackoutSettlingDetector,
     BoardEdgeActivityDetector,
+    BoardEdgeHandGate,
 )
 from .legal_game import (
     GameMode,
@@ -209,6 +210,12 @@ _CALIBRATION_CLEAR_MAP_ACTION = (
 _BOARD_EDGE_STUCK_DIAGNOSTIC_SECONDS = 3.0
 _BOARD_EDGE_STUCK_REPEAT_SECONDS = 5.0
 _HAND_TRACKER_STATES = frozenset({"activity", "waiting-for-clear"})
+_BOARD_EDGE_GATE_BASELINE_STATES = frozenset(
+    {"watching", "accepted", "compound-accepted"}
+)
+# After these states the tracker has no settled observation, so its next
+# observation cannot register a move.
+_BOARD_EDGE_GATE_SKIPPED_STATES = frozenset({"watching", "activity"})
 _ILLEGAL_CORRECTION_FALLBACK_MILLISECONDS = 2000
 _ALIGNMENT_REMAP_PROTECTED_TRACKER_STATES = frozenset(
     {
@@ -1372,6 +1379,8 @@ class CameraWindow(QMainWindow):
             rebuild_models_after_motion=True,
         )
         self._board_edge_activity_detector = BoardEdgeActivityDetector()
+        self._board_edge_hand_gate = BoardEdgeHandGate()
+        self._board_edge_gate_blocking = False
         self._board_edge_indicator_active = False
         self._hand_indicator_active = False
         self._board_edge_activity_suspended = False
@@ -1385,6 +1394,9 @@ class CameraWindow(QMainWindow):
             self._reset_board_edge_activity_indicator
         )
         self._lichess_blackout_settling_detector = (
+            BlackoutSettlingDetector()
+        )
+        self._offline_blackout_settling_detector = (
             BlackoutSettlingDetector()
         )
         self._promotion_activity_detector = (
@@ -4130,12 +4142,95 @@ class CameraWindow(QMainWindow):
             or self._illegal_correction_projection_active
         ):
             active = self._board_edge_indicator_active
+        elif self._board_edge_gate_blocking:
+            active = True
         elif tracker_ran:
             active = tracker_state in _HAND_TRACKER_STATES
         else:
             return
         self._hand_indicator_active = active
         self._projector_window.set_edge_activity_indicator(active)
+
+    def _board_edge_gate_blocks(self) -> bool:
+        if self._latest_frame is None or self._calibration_result is None:
+            return False
+        gate = self._board_edge_hand_gate
+        if not gate.has_baseline:
+            self._board_edge_gate_blocking = False
+            return False
+        if (
+            not self._board_edge_gate_blocking
+            and self._reference_move_tracker.last_state
+            in _BOARD_EDGE_GATE_SKIPPED_STATES
+        ):
+            return False
+        was_blocking = self._board_edge_gate_blocking
+        try:
+            blocking = gate.observe(
+                self._latest_frame,
+                self._calibration_result.mapping.camera_grid,
+            )
+        except (ValueError, RuntimeError, cv2.error) as error:
+            gate.reset()
+            self._board_edge_gate_blocking = False
+            self._projector_status.setText(
+                f"Board-edge hand gate unavailable: {error}"
+            )
+            return False
+        self._board_edge_gate_blocking = blocking
+        if blocking:
+            self._reference_move_tracker.reset_activity()
+            self._occupancy_status.setText(
+                "A hand or object crosses the board edge; moves are not "
+                "registered until it leaves."
+            )
+        if gate.released:
+            event = "board-edge-gate-released"
+            message = (
+                "Board-edge crossing stayed still for five seconds; "
+                "adopted it as the new gate baseline."
+            )
+        elif blocking and not was_blocking:
+            event = "board-edge-gate-blocking"
+            message = "Board-edge hand gate is blocking move registration."
+        elif was_blocking and not blocking:
+            event = "board-edge-gate-cleared"
+            message = "Board-edge hand gate cleared."
+        else:
+            return blocking
+        bounds = gate.largest_component_bounds
+        self._record_runtime_diagnostic(
+            event,
+            message,
+            details={
+                "blocking": blocking,
+                "component_pixels": gate.largest_component_pixels,
+                "inside_pixels": gate.largest_component_inside_pixels,
+                "outside_pixels": gate.largest_component_outside_pixels,
+                "outer_halo_pixels": (
+                    gate.largest_component_outer_halo_pixels
+                ),
+                "square_inner_coverage": round(
+                    gate.largest_square_coverage, 3
+                ),
+                "component_bounds": (
+                    None if bounds is None else list(bounds)
+                ),
+            },
+            include_images=True,
+        )
+        return blocking
+
+    def _capture_board_edge_gate_baseline(self) -> None:
+        if self._latest_frame is None or self._calibration_result is None:
+            return
+        try:
+            self._board_edge_hand_gate.capture_baseline(
+                self._latest_frame,
+                self._calibration_result.mapping.camera_grid,
+            )
+        except (ValueError, RuntimeError, cv2.error):
+            self._board_edge_hand_gate.reset()
 
     def _timed_occupancy_tick(self) -> None:
         edge_detector = self._board_edge_activity_detector
@@ -4147,6 +4242,11 @@ class CameraWindow(QMainWindow):
         finished_at = perf_counter()
         edge_ran = edge_detector.observation_count != edge_count
         tracker_ran = tracker.observation_count != tracker_count
+        if (
+            tracker_ran
+            and tracker.last_state in _BOARD_EDGE_GATE_BASELINE_STATES
+        ):
+            self._capture_board_edge_gate_baseline()
         self._update_hand_indicator(
             tracker.last_state if tracker_ran else None,
             tracker_ran=tracker_ran,
@@ -4216,14 +4316,11 @@ class CameraWindow(QMainWindow):
             return
         if self._offline_move_marking_active:
             self._occupancy_status.setText(
-                "Accepted move is marked for one second."
+                "Accepted move is marked for half a second."
             )
             return
         if self._offline_move_marking_blackout_pending:
-            self._occupancy_status.setText(
-                "Accepted-move marking removed; waiting for projector black "
-                "to settle."
-            )
+            self._observe_offline_move_marking_blackout()
             return
         if self._lichess_guidance_projection_active:
             self._observe_lichess_guidance_activity()
@@ -4257,7 +4354,8 @@ class CameraWindow(QMainWindow):
             and not self._reconciliation_requested
             and not self._offline_restore_requested
         ):
-            self._update_reference_move_tracking()
+            if not self._board_edge_gate_blocks():
+                self._update_reference_move_tracking()
             return
         try:
             update = self._occupancy_detector.observe(
@@ -5251,6 +5349,8 @@ class CameraWindow(QMainWindow):
             if controller is not None
             else self._legal_game.legal_move_signatures
         )
+        if self._board_edge_gate_blocks():
+            return
         try:
             update = self._reference_move_tracker.observe(
                 self._latest_frame,
@@ -5796,10 +5896,10 @@ class CameraWindow(QMainWindow):
         self._offline_move_marking_blackout_pending = False
         self._alignment_monitor.set_paused("Offline accepted move marking")
         self._projector_status.setText(
-            "Showing the accepted Offline move for 1 second."
+            "Showing the accepted Offline move for 0.5 seconds."
         )
         QTimer.singleShot(
-            1000,
+            500,
             lambda: self._finish_offline_move_marking(generation),
         )
 
@@ -5813,6 +5913,7 @@ class CameraWindow(QMainWindow):
         self._offline_move_marking_blackout_pending = True
         self._projector_window.show_black()
         self._alignment_monitor.set_black()
+        self._offline_blackout_settling_detector.reset()
         self._reference_move_tracker.reset_activity()
         self._projector_status.setText(
             "Accepted-move marking removed; projector black is settling."
@@ -5822,9 +5923,41 @@ class CameraWindow(QMainWindow):
             lambda: self._finish_offline_move_marking_blackout(generation),
         )
 
+    def _observe_offline_move_marking_blackout(self) -> None:
+        if (
+            self._latest_frame is None
+            or self._calibration_result is None
+            or not self._offline_move_marking_blackout_pending
+        ):
+            return
+        try:
+            update = self._offline_blackout_settling_detector.observe(
+                self._latest_frame,
+                self._calibration_result.mapping.camera_grid,
+            )
+        except (ValueError, RuntimeError, cv2.error) as error:
+            self._occupancy_status.setText(
+                "Adaptive projector-black settling unavailable; waiting for "
+                f"the one-second fallback: {error}"
+            )
+            return
+        if update.state in ("stable", "timeout"):
+            self._finish_offline_move_marking_blackout(
+                self._offline_move_marking_generation,
+                update.state,
+            )
+            return
+        self._occupancy_status.setText(
+            "Accepted-move marking removed; waiting for projector black to "
+            f"settle ({update.stable_observations}/"
+            f"{update.required_observations} stable observations after "
+            "400 ms)."
+        )
+
     def _finish_offline_move_marking_blackout(
         self,
         generation: int,
+        reason: Literal["stable", "timeout", "fallback"] = "fallback",
     ) -> None:
         if (
             generation != self._offline_move_marking_generation
@@ -5835,7 +5968,11 @@ class CameraWindow(QMainWindow):
         self._offline_move_marking_blackout_pending = False
         self._reference_move_tracker.reset_activity()
         self._projector_status.setText(
-            "Projector black settled; watching for the next Offline move."
+            "Projector black confirmed by the camera; watching for the next "
+            "Offline move."
+            if reason == "stable"
+            else "Projector black reached the one-second fallback; watching "
+            "for the next Offline move."
         )
 
     def _update_lichess_synchronization_projection(self) -> None:
@@ -8382,6 +8519,13 @@ class CameraWindow(QMainWindow):
             "initialized": self._reference_move_tracker.initialized,
             "last_state": self._last_runtime_tracker_state,
             "hand_indicator_active": self._hand_indicator_active,
+            "board_edge_gate": {
+                "blocking": self._board_edge_gate_blocking,
+                "has_baseline": self._board_edge_hand_gate.has_baseline,
+                "crossing_detected": (
+                    self._board_edge_hand_gate.crossing_detected
+                ),
+            },
             "board_edge_indicator": {
                 "active": self._board_edge_indicator_active,
                 "active_seconds": (

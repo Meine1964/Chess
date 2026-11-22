@@ -824,8 +824,9 @@ unavailable or has not stabilized. Transient tracker activity shall be reset
 when black settling completes, and only then may change scores, color
 evidence, obstruction, or move settling be evaluated. The durable UI guidance
 shall remain visible during physical confirmation. This adaptive timing shall
-apply only to projected Lichess move guidance; startup, reconciliation,
-illegal-correction, and other blackout workflows retain their existing timing.
+apply only to projected Lichess move guidance and to the blackout after
+Offline accepted-move marking; startup, reconciliation, illegal-correction,
+and other blackout workflows retain their existing timing.
 
 Guidance may be shown again when:
 

@@ -234,6 +234,47 @@ class BoardEdgeActivityDetector:
         frame: ImageArray,
         camera_grid: FloatArray,
     ) -> bool:
+        geometry, gray = self._prepare(frame, camera_grid)
+        if self._arming_count < self._arming_observations:
+            self._baseline = gray
+            self._arming_count += 1
+            self._clear_measurements()
+            return False
+        if self._baseline is None:
+            raise RuntimeError("Board-edge activity baseline is unavailable.")
+
+        crossing = self._measure_crossing(gray, geometry)
+        self._crossing_detected = crossing
+        if crossing:
+            self._crossing_count += 1
+            self._quiet_count = 0
+            if self._crossing_count >= self._confirmation_observations:
+                self._active = True
+            return self._active
+
+        self._crossing_count = 0
+        if self._active:
+            self._quiet_count += 1
+            if self._quiet_count < self._quiet_observations:
+                return True
+        self._active = False
+        self._quiet_count = 0
+        self._baseline = gray
+        return False
+
+    def _clear_measurements(self) -> None:
+        self._crossing_detected = False
+        self._largest_component_pixels = 0
+        self._largest_component_inside_pixels = 0
+        self._largest_component_outside_pixels = 0
+        self._largest_component_outer_halo_pixels = 0
+        self._largest_component_bounds = None
+
+    def _prepare(
+        self,
+        frame: ImageArray,
+        camera_grid: FloatArray,
+    ) -> tuple["_EdgeGeometry", np.ndarray]:
         if frame.ndim != 3 or frame.shape[2] != 3:
             raise ValueError("Board-edge activity requires a BGR camera frame.")
         grid = np.asarray(camera_grid, dtype=np.float32)
@@ -246,19 +287,50 @@ class BoardEdgeActivityDetector:
             (5, 5),
             0,
         )
-        if self._arming_count < self._arming_observations:
-            self._baseline = gray
-            self._arming_count += 1
-            self._crossing_detected = False
-            self._largest_component_pixels = 0
-            self._largest_component_inside_pixels = 0
-            self._largest_component_outside_pixels = 0
-            self._largest_component_outer_halo_pixels = 0
-            self._largest_component_bounds = None
-            return False
+        return geometry, gray
+
+    def _measure_crossing(
+        self,
+        gray: np.ndarray,
+        geometry: "_EdgeGeometry",
+    ) -> bool:
+        _labels, components = self._changed_components(gray, geometry)
+        minimum_component = geometry.square_area * self._minimum_square_fraction
+        self._record_component(
+            max(
+                components,
+                key=lambda candidate: (
+                    min(candidate[1], candidate[2]),
+                    candidate[0],
+                ),
+                default=(0, 0, 0, 0, None),
+            )
+        )
+        crossing = (
+            self._largest_component_inside_pixels >= minimum_component
+            and self._largest_component_outside_pixels >= minimum_component
+            and self._largest_component_outer_halo_pixels
+            >= max(1.0, minimum_component * 0.1)
+        )
+        return crossing
+
+    def _record_component(self, component: "_Component") -> None:
+        (
+            self._largest_component_pixels,
+            self._largest_component_inside_pixels,
+            self._largest_component_outside_pixels,
+            self._largest_component_outer_halo_pixels,
+            self._largest_component_bounds,
+        ) = component
+
+    def _changed_components(
+        self,
+        gray: np.ndarray,
+        geometry: "_EdgeGeometry",
+    ) -> tuple[np.ndarray, list["_Component"]]:
         if self._baseline is None:
             raise RuntimeError("Board-edge activity baseline is unavailable.")
-
+        left, top = geometry.crop[:2]
         guidance = geometry.guidance
         brightness_shift = median_uint8_difference(
             gray[guidance],
@@ -321,8 +393,7 @@ class BoardEdgeActivityDetector:
             labels[geometry.outer_halo],
             minlength=component_count,
         )
-        minimum_component = geometry.square_area * self._minimum_square_fraction
-        components = [
+        components: list[_Component] = [
             (
                 int(statistics[component, cv2.CC_STAT_AREA]),
                 int(inside_counts[component]),
@@ -337,43 +408,7 @@ class BoardEdgeActivityDetector:
             )
             for component in range(1, component_count)
         ]
-        (
-            self._largest_component_pixels,
-            self._largest_component_inside_pixels,
-            self._largest_component_outside_pixels,
-            self._largest_component_outer_halo_pixels,
-            self._largest_component_bounds,
-        ) = max(
-            components,
-            key=lambda candidate: (
-                min(candidate[1], candidate[2]),
-                candidate[0],
-            ),
-            default=(0, 0, 0, 0, None),
-        )
-        crossing = (
-            self._largest_component_inside_pixels >= minimum_component
-            and self._largest_component_outside_pixels >= minimum_component
-            and self._largest_component_outer_halo_pixels
-            >= max(1.0, minimum_component * 0.1)
-        )
-        self._crossing_detected = crossing
-        if crossing:
-            self._crossing_count += 1
-            self._quiet_count = 0
-            if self._crossing_count >= self._confirmation_observations:
-                self._active = True
-            return self._active
-
-        self._crossing_count = 0
-        if self._active:
-            self._quiet_count += 1
-            if self._quiet_count < self._quiet_observations:
-                return True
-        self._active = False
-        self._quiet_count = 0
-        self._baseline = gray
-        return False
+        return labels, components
 
     def _geometry_for(
         self,
@@ -422,9 +457,188 @@ class BoardEdgeActivityDetector:
                 guidance_polygon,
                 _board_region_polygon(frame_shape, grid),
                 _median_square_area(grid),
+                _inner_square_polygons(frame_shape, grid),
             )
             self._geometry = geometry
         return geometry
+
+
+class BoardEdgeHandGate(BoardEdgeActivityDetector):
+    """Blocks registration while an arm crosses the edge of a clean board."""
+
+    def __init__(
+        self,
+        *,
+        still_release_seconds: float = 5.0,
+        still_pixel_fraction: float = 0.01,
+        minimum_square_coverage: float = 0.1,
+        clock: Callable[[], float] = monotonic,
+    ) -> None:
+        super().__init__()
+        if still_release_seconds <= 0:
+            raise ValueError("The stillness release duration must be positive.")
+        if not 0 <= still_pixel_fraction < 1:
+            raise ValueError("The stillness pixel fraction is invalid.")
+        if not 0 < minimum_square_coverage <= 1:
+            raise ValueError("The minimum square coverage is invalid.")
+        self._still_release_seconds = still_release_seconds
+        self._still_pixel_fraction = still_pixel_fraction
+        self._minimum_square_coverage = minimum_square_coverage
+        self._largest_square_coverage = 0.0
+        self._clock = clock
+        self._baseline_grid_key: bytes | None = None
+        self._previous_gray: np.ndarray | None = None
+        self._still_since: float | None = None
+        self._released = False
+
+    @property
+    def has_baseline(self) -> bool:
+        return self._baseline is not None
+
+    @property
+    def largest_square_coverage(self) -> float:
+        """Largest inner-square fraction covered by the reported component."""
+        return self._largest_square_coverage
+
+    @property
+    def released(self) -> bool:
+        """Whether the latest observation released a still crossing."""
+        return self._released
+
+    def _clear_measurements(self) -> None:
+        super()._clear_measurements()
+        self._largest_square_coverage = 0.0
+
+    def reset(self) -> None:
+        super().reset()
+        self._largest_square_coverage = 0.0
+        self._baseline_grid_key = None
+        self._previous_gray = None
+        self._still_since = None
+        self._released = False
+
+    def capture_baseline(
+        self,
+        frame: ImageArray,
+        camera_grid: FloatArray,
+    ) -> None:
+        geometry, gray = self._prepare(frame, camera_grid)
+        self._baseline = gray
+        self._baseline_grid_key = geometry.grid_key
+        self._previous_gray = None
+        self._still_since = None
+        self._released = False
+        self._active = False
+        self._clear_measurements()
+
+    def _observe(
+        self,
+        frame: ImageArray,
+        camera_grid: FloatArray,
+    ) -> bool:
+        self._released = False
+        geometry, gray = self._prepare(frame, camera_grid)
+        if (
+            self._baseline is None
+            or self._baseline_grid_key != geometry.grid_key
+            or self._baseline.shape != gray.shape
+        ):
+            self.reset()
+            return False
+        crossing = self._measure_crossing(gray, geometry)
+        self._crossing_detected = crossing
+        previous = self._previous_gray
+        self._previous_gray = gray
+        if not crossing:
+            self._active = False
+            self._still_since = None
+            return False
+        now = self._clock()
+        if previous is None or not self._is_still(previous, gray, geometry):
+            self._still_since = now
+        elif self._still_since is None:
+            self._still_since = now
+        if now - self._still_since >= self._still_release_seconds:
+            self._baseline = gray
+            self._still_since = None
+            self._active = False
+            self._released = True
+            return False
+        self._active = True
+        return True
+
+    def _measure_crossing(
+        self,
+        gray: np.ndarray,
+        geometry: "_EdgeGeometry",
+    ) -> bool:
+        labels, components = self._changed_components(gray, geometry)
+        if not components:
+            self._clear_measurements()
+            return False
+        component_count = len(components) + 1
+        square_pixels = np.bincount(
+            labels[geometry.square_inner].astype(np.intp) * 64
+            + geometry.square_inner_labels,
+            minlength=component_count * 64,
+        ).reshape(component_count, 64)
+        coverages = (square_pixels / geometry.square_inner_pixels).max(axis=1)
+        minimum_component = geometry.square_area * self._minimum_square_fraction
+        minimum_rim = max(1.0, minimum_component * 0.1)
+
+        def ranking(index: int) -> tuple[bool, float, int]:
+            _area, _inside, outside, rim, _bounds = components[index]
+            coverage = float(coverages[index + 1])
+            qualifies = (
+                coverage >= self._minimum_square_coverage
+                and outside >= minimum_component
+                and rim >= minimum_rim
+            )
+            return qualifies, coverage, outside
+
+        selected = max(range(len(components)), key=ranking)
+        self._record_component(components[selected])
+        self._largest_square_coverage = float(coverages[selected + 1])
+        return ranking(selected)[0]
+
+    def _is_still(
+        self,
+        previous: np.ndarray,
+        current: np.ndarray,
+        geometry: "_EdgeGeometry",
+    ) -> bool:
+        bounds = self._largest_component_bounds
+        if bounds is None:
+            return False
+        left, top = geometry.crop[:2]
+        margin = round(geometry.square_area**0.5)
+        height, width = current.shape
+        x0 = max(0, bounds[0] - left - margin)
+        y0 = max(0, bounds[1] - top - margin)
+        x1 = min(width, bounds[0] - left + bounds[2] + margin)
+        y1 = min(height, bounds[1] - top + bounds[3] + margin)
+        region = geometry.guidance[y0:y1, x0:x1]
+        region_pixels = np.count_nonzero(region)
+        if region_pixels == 0:
+            return False
+        previous_region = previous[y0:y1, x0:x1]
+        current_region = current[y0:y1, x0:x1]
+        shift = median_uint8_difference(
+            current_region[region],
+            previous_region[region],
+        )
+        difference = cv2.absdiff(
+            previous_region,
+            offset_uint8(current_region, -shift),
+        )
+        changed = np.count_nonzero(
+            (difference >= self._pixel_difference_threshold) & region
+        )
+        return changed <= region_pixels * self._still_pixel_fraction
+
+
+_Component = tuple[int, int, int, int, tuple[int, int, int, int] | None]
+_SQUARE_SCORE_INSET = 0.12
 
 
 @dataclass(frozen=True)
@@ -438,6 +652,9 @@ class _EdgeGeometry:
     square_area: float
     illumination_kernel: int
     smoothing_regions: tuple[tuple[np.ndarray, np.ndarray, np.ndarray], ...]
+    square_inner: np.ndarray
+    square_inner_labels: np.ndarray
+    square_inner_pixels: np.ndarray
 
 
 def _edge_geometry(
@@ -446,6 +663,7 @@ def _edge_geometry(
     guidance_polygon: np.ndarray,
     board_polygon: np.ndarray,
     square_area: float,
+    inner_square_polygons: list[np.ndarray],
 ) -> _EdgeGeometry:
     left, top, right, bottom = crop
     offset = np.asarray([left, top], dtype=np.int32)
@@ -453,6 +671,15 @@ def _edge_geometry(
     cv2.fillConvexPoly(guidance_mask, guidance_polygon - offset, 255)
     board_mask = np.zeros_like(guidance_mask)
     cv2.fillConvexPoly(board_mask, board_polygon - offset, 255)
+    square_labels = np.full(guidance_mask.shape, -1, dtype=np.int16)
+    for index, polygon in enumerate(inner_square_polygons):
+        cv2.fillConvexPoly(square_labels, polygon - offset, index)
+    square_inner = square_labels >= 0
+    square_inner_labels = square_labels[square_inner].astype(np.intp)
+    square_inner_pixels = np.maximum(
+        np.bincount(square_inner_labels, minlength=64),
+        1,
+    ).astype(np.float64)
     outer_rim_width = max(1, round(square_area**0.5 * 0.15))
     eroded = cv2.erode(
         guidance_mask,
@@ -489,7 +716,50 @@ def _edge_geometry(
         square_area=square_area,
         illumination_kernel=illumination_kernel,
         smoothing_regions=tuple(smoothing_regions),
+        square_inner=square_inner,
+        square_inner_labels=square_inner_labels,
+        square_inner_pixels=square_inner_pixels,
     )
+
+
+def _inner_square_polygons(
+    frame_shape: tuple[int, int],
+    camera_grid: FloatArray,
+) -> list[np.ndarray]:
+    height, width = frame_shape
+    low = _SQUARE_SCORE_INSET
+    high = 1.0 - _SQUARE_SCORE_INSET
+    polygons = []
+    for row in range(8):
+        for column in range(8):
+            top_left = camera_grid[row, column]
+            top_right = camera_grid[row, column + 1]
+            bottom_right = camera_grid[row + 1, column + 1]
+            bottom_left = camera_grid[row + 1, column]
+
+            def point(u: float, v: float) -> np.ndarray:
+                return np.asarray(
+                    (1 - u) * (1 - v) * top_left
+                    + u * (1 - v) * top_right
+                    + u * v * bottom_right
+                    + (1 - u) * v * bottom_left,
+                    dtype=np.float32,
+                )
+
+            polygon = np.rint(
+                np.asarray(
+                    [
+                        point(low, low),
+                        point(high, low),
+                        point(high, high),
+                        point(low, high),
+                    ]
+                )
+            ).astype(np.int32)
+            polygon[:, 0] = np.clip(polygon[:, 0], 0, width - 1)
+            polygon[:, 1] = np.clip(polygon[:, 1], 0, height - 1)
+            polygons.append(polygon)
+    return polygons
 
 
 def _guidance_region_polygon(

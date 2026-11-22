@@ -540,6 +540,7 @@ def test_verified_replacement_submits_selected_promotion() -> None:
         _fail_promotion_selection=MagicMock(),
         _begin_lichess_local_move_submission=begin_submission,
         _show_promotion_confirmation=MagicMock(),
+        _board_edge_gate_blocks=lambda: False,
     )
 
     CameraWindow._verify_promotion_replacement(window)

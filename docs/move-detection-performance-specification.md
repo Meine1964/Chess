@@ -44,7 +44,7 @@ polling `/api/account/playing` every five seconds.
 5. Reliable Lichess event streaming, with polling retained as a diagnosed
    fallback.
 
-Stages 3-5 are planned and are specified in detail when they start.
+Stages 4-5 are planned and are specified in detail when they start.
 
 ## 4. Stage 1: Measurement and Optional Live Preview
 
@@ -180,5 +180,64 @@ brightness steps, and noise, and the same frames shifted so the guidance
 region touches the top of the frame) produced identical decisions and
 component statistics and pixel-identical normalization. Measured on the
 development machine, the board-edge detector mean dropped from 133 ms to
-32 ms and candidate normalization from 23 ms to 10 ms. Hardware timing is
-pending.
+32 ms and candidate normalization from 23 ms to 10 ms.
+
+Hardware check with the preview off (50 ticks, Offline play, with the Option 1
+hand indicator in place so the board-edge detector no longer runs on the
+black board): occupancy tick mean 57 ms (max 278 ms), tick period mean 141 ms
+(max 327 ms), reference tracker mean 49 ms (max 181 ms), and move latency
+after the last observed motion of 0.44, 0.45, 0.62, and 0.67 seconds.
+
+## 6. Stage 3: Shorter Offline Blind Period
+
+After an accepted Offline move, ordinary move verification is paused while
+the accepted squares are marked and while projector black settles. A quick
+reply made during this pause is only evaluated after it ends. Stage 3 shortens
+the pause without weakening the settling guarantee.
+
+### 6.1 Behavior
+
+- The accepted-move marking is shown for 0.5 seconds instead of one second.
+- After the marking is removed, a dedicated `BlackoutSettlingDetector`
+  instance, separate from the Lichess guidance detector, observes each
+  occupancy tick with the parameters proven for Lichess guidance: frames from
+  the first 400 ms are discarded, and three consecutive observations with
+  stable global luminance and stable per-square exposure end the pause early.
+  An unstable observation resets the count.
+- The detector's own one-second limit and the generation-guarded one-second
+  timer both remain fallbacks, so the pause never exceeds the previous fixed
+  one second. If the detector cannot run (no frame, no calibration, or an
+  error), the timer ends the pause.
+- A hand or other motion during settling keeps the observations unstable, so
+  the pause ends at the fallback, as before Stage 3.
+- When the pause ends for any reason, transient tracker activity is reset, as
+  before. The runtime event stream is not extended for each pause, but the
+  projector status reports whether settling was confirmed by frames or ended
+  at the fallback.
+
+### 6.2 Unchanged behavior
+
+The next-turn dot, the generation guards, the alignment-monitor pause and
+black transitions, the committed reference, and every Lichess, illegal
+correction, reconciliation, and startup blackout are unchanged.
+
+### 6.3 Acceptance criteria
+
+1. The Offline marking is visible for 0.5 seconds.
+2. With a still board, verification resumes after frame-confirmed black,
+   typically about 0.4 seconds plus three observations after the blackout.
+3. With motion during settling, verification resumes at the one-second
+   fallback.
+4. No false move or ambiguity is reported after an Offline acceptance.
+
+### 6.4 Implementation status
+
+Implemented in `CameraWindow` (`_project_offline_accepted_move`,
+`_finish_offline_move_marking`, `_observe_offline_move_marking_blackout`, and
+`_finish_offline_move_marking_blackout`). Focused tests cover the 0.5-second
+marking, early frame-confirmed completion, the one-second fallback, and stale
+generation handling. Hardware check (2026-11-22, together with the
+board-edge hand gate refinement): the user judged Offline move registration
+acceptably fast; the recorded move latency was 0.48 s, with a 109.5 ms mean
+tick period and a 29.2 ms mean tick. Only one latency sample was retained, so
+a multi-move average remains to be recorded.

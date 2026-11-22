@@ -420,7 +420,8 @@ all-64 stepping remain planned test modes.
   It shows the sensor that actually gates move registration in the current
   phase:
   - While the reference move tracker observes the black board, illuminate
-    the indicator exactly while the tracker reports `activity` (frame-to-frame
+    the indicator while the board-edge hand gate described below blocks
+    registration, or while the tracker reports `activity` (frame-to-frame
     motion) or `waiting-for-clear` (a hand or object obscures the board or the
     moved piece). Clear it on any other tracker result, including settling,
     candidate confirmation, accepted moves, and an unavailable tracker.
@@ -458,6 +459,61 @@ all-64 stepping remain planned test modes.
   `board-edge-indicator-still-active` event with the current camera image and
   component measurements. Repeat that evidence at no more than five-second
   intervals until it clears, then reset the stuck-duration timer.
+
+#### Board-edge hand gate
+
+A hand that rests still across a corner can look like a settled legal move to
+the reference tracker: a hand over a1 and b1 changes the same two squares as
+Ra1-b1, and skin on light squares can stay below the tracker's obstruction
+threshold. The board image alone cannot separate these cases; only the arm's
+continuation beyond the board edge can. The board-edge hand gate therefore
+blocks move registration on the black board while an arm crosses the edge.
+
+- The gate uses the same changed-pixel segmentation as the crossing detector,
+  but a crossing component must also cover at least 10 % of the inner scoring
+  region of at least one square (the square inset by 12 % on every side, the
+  region the tracker's square change score uses), as well as material pixels
+  outside the board and at the outer rim of the one-square observation halo.
+  The player's sleeve and body often overhang the near frame and cast slivers
+  of shadow along the edge squares; such crossings cannot change a square
+  score and must not block. Measured on the board image, the tracker's lowest
+  change threshold needs about 15-20 % inner coverage even for a high-contrast
+  sleeve, so 10 % keeps a safety margin while ignoring edge slivers.
+- It compares against a clean baseline instead of a rolling one, so a hand
+  that rests still can never become part of the comparison image. The
+  baseline is the camera crop of the most recent tracker observation that
+  either matched the accepted reference with no motion (`watching`) or
+  accepted a move. Both observations themselves passed the gate.
+- Before every black-board tracker observation, including promotion
+  replacement verification, evaluate the gate. While it blocks, do not
+  observe the tracker, reset its activity so a complete settling and
+  candidate sequence must follow, and report that a hand or object crosses the
+  board edge. Capture the baseline after the occupancy tick in which the
+  tracker reported `watching`, `accepted`, or `compound-accepted`.
+- The crossing measurement costs about 30 ms. Skip it while the gate is not
+  blocking and the tracker's latest state is `watching` or `activity`: both
+  discard settled observations, and the tracker needs two settled
+  observations before it can register anything, so the next observation
+  cannot be a decision. Every settling, candidate, and decision observation,
+  and every observation while the gate blocks, is evaluated.
+- Without a baseline, or after the camera grid changes, the gate does not
+  block until the next qualifying tracker observation captures a new
+  baseline. An evaluation error likewise discards the baseline and reports
+  the error; tracking continues as before the gate existed.
+- Stillness backstop: when the crossing stays still for five seconds, adopt
+  the current image as the baseline and stop blocking. Stillness is judged
+  only within the crossing component's bounds enlarged by one square width:
+  no more than 1 % of those pixels may change by the crossing threshold
+  between consecutive observations, after brightness compensation. Distant
+  motion, such as the projected clock digits on the frame or the player
+  moving elsewhere, must not restart the five seconds.
+  This releases an object left across the edge or a far-edge piece whose
+  silhouette reaches the halo rim. Any later movement is measured against
+  that new baseline.
+- Record `board-edge-gate-blocking`, `board-edge-gate-cleared`, and
+  `board-edge-gate-released` transitions with the camera image and component
+  measurements, including the largest inner-square coverage fraction, and
+  expose the gate state in runtime state.
 
 The previous design drove the indicator from the crossing detector at all
 times. A persistent scene change on the board frame could then keep the

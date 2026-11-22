@@ -458,16 +458,19 @@ An accepted move shall be applied atomically:
 7. Return to `watching`.
 
 Offline legal play shall project the accepted source and destination for
-exactly one second after the move and its new reference have been committed.
+exactly 0.5 seconds after the move and its new reference have been committed.
 The marking may include the optional next-turn dot. Ordinary move verification
-shall remain paused while the marking is visible. After one second, the
-projector shall return to black and verification shall remain paused for a
-fixed one-second camera-exposure settling interval before resuming against the
-committed reference.
+shall remain paused while the marking is visible. After 0.5 seconds, the
+projector shall return to black and verification shall remain paused until
+camera frames confirm that projector black has settled: frames from the first
+400 ms are discarded, then three consecutive stable black-projector
+observations end the pause early. A one-second timer from the start of the
+blackout remains the mandatory fallback. Verification then resumes against
+the committed reference.
 
 This brief lifecycle shall use generation-guarded timers so stale callbacks
-cannot clear a newer marking. It shall not use hand detection, adaptive
-settling, automatic reprojection, or a configurable duration. Diagnostic
+cannot clear a newer marking. It shall not use hand detection, automatic
+reprojection, or a configurable duration. Diagnostic
 movement may retain temporary accepted-square projection, and illegal
 correction may retain its red projection. Every gameplay projection state shall
 preserve the current side-to-move dot without blinking; calibration output may

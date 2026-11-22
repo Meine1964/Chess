@@ -8,6 +8,7 @@ from src.chess_camera.camera_app import CameraWindow
 from src.chess_camera.guidance_activity import (
     BlackoutSettlingDetector,
     BlackoutSettlingUpdate,
+    BoardEdgeHandGate,
     BoardEdgeActivityDetector,
 )
 from src.chess_camera.legal_game import LegalGame
@@ -96,6 +97,96 @@ def test_board_edge_indicator_requires_activity_across_boundary() -> None:
 
     assert not detector.observe(completed_edge_change, _camera_grid())
     assert detector.largest_component_pixels == 0
+
+
+def test_hand_gate_blocks_resting_arm_against_clean_baseline() -> None:
+    clean = _frame()
+    gate = BoardEdgeHandGate()
+    assert not gate.observe(clean, _camera_grid())
+
+    gate.capture_baseline(clean, _camera_grid())
+    reaching = clean.copy()
+    cv2.rectangle(reaching, (350, 100), (550, 260), (20, 20, 20), -1)
+    resting = clean.copy()
+    cv2.rectangle(resting, (360, 100), (560, 270), (20, 20, 20), -1)
+    for frame in (reaching, resting, resting, resting):
+        assert gate.observe(frame, _camera_grid())
+
+    edge_square_change = clean.copy()
+    cv2.rectangle(
+        edge_square_change, (350, 175), (550, 260), (20, 20, 20), -1
+    )
+    assert not gate.observe(edge_square_change, _camera_grid())
+    assert gate.has_baseline
+
+
+def test_hand_gate_releases_crossing_still_for_five_seconds() -> None:
+    now = 0.0
+    clean = _frame()
+    gate = BoardEdgeHandGate(clock=lambda: now)
+    gate.capture_baseline(clean, _camera_grid())
+    crossing = clean.copy()
+    cv2.rectangle(crossing, (350, 100), (550, 260), (20, 20, 20), -1)
+    moved = clean.copy()
+    cv2.rectangle(moved, (380, 100), (580, 260), (20, 20, 20), -1)
+
+    assert gate.observe(crossing, _camera_grid())
+    now = 4.0
+    assert gate.observe(moved, _camera_grid())
+    now = 8.9
+    assert gate.observe(moved, _camera_grid())
+    assert not gate.released
+    now = 9.0
+    assert not gate.observe(moved, _camera_grid())
+    assert gate.released
+    now = 9.2
+    assert not gate.observe(moved, _camera_grid())
+    assert not gate.released
+
+
+def test_hand_gate_ignores_sleeve_overhanging_only_edge_square_margins() -> None:
+    clean = _frame()
+    gate = BoardEdgeHandGate()
+    gate.capture_baseline(clean, _camera_grid())
+    sleeve = clean.copy()
+    cv2.rectangle(sleeve, (350, 90), (550, 207), (20, 20, 20), -1)
+
+    assert not gate.observe(sleeve, _camera_grid())
+    assert gate.largest_component_inside_pixels >= 600
+    assert gate.largest_square_coverage < 0.1
+
+    reaching = clean.copy()
+    cv2.rectangle(reaching, (350, 90), (550, 240), (20, 20, 20), -1)
+    assert gate.observe(reaching, _camera_grid())
+    assert gate.largest_square_coverage >= 0.1
+
+
+def test_hand_gate_release_ignores_distant_motion() -> None:
+    now = 0.0
+    clean = _frame()
+    gate = BoardEdgeHandGate(clock=lambda: now)
+    gate.capture_baseline(clean, _camera_grid())
+    crossing = clean.copy()
+    cv2.rectangle(crossing, (350, 100), (550, 260), (20, 20, 20), -1)
+    ticking = crossing.copy()
+    cv2.rectangle(ticking, (850, 1020), (950, 1080), (200, 200, 200), -1)
+
+    for now, frame in ((0.0, crossing), (2.5, ticking), (4.9, crossing)):
+        assert gate.observe(frame, _camera_grid())
+    now = 5.0
+    assert not gate.observe(ticking, _camera_grid())
+    assert gate.released
+
+
+def test_hand_gate_drops_baseline_when_camera_grid_changes() -> None:
+    clean = _frame()
+    gate = BoardEdgeHandGate()
+    gate.capture_baseline(clean, _camera_grid())
+    crossing = clean.copy()
+    cv2.rectangle(crossing, (350, 100), (550, 260), (20, 20, 20), -1)
+
+    assert not gate.observe(crossing, _camera_grid() + 2.0)
+    assert not gate.has_baseline
 
 
 def test_board_edge_indicator_is_independent_of_board_position_in_frame() -> None:
@@ -519,37 +610,51 @@ def test_boundary_entry_starts_lichess_guidance_blackout() -> None:
     window._record_runtime_diagnostic.assert_called_once()
 
 
-def test_offline_move_marking_uses_fixed_one_second_intervals() -> None:
-    move = ((6, 4), (4, 4))
+def _offline_marking_window() -> SimpleNamespace:
     window = SimpleNamespace(
         _board_orientation_needs_detection=False,
         _piece_side_orientation_needs_detection=False,
-        _calibration_result=object(),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(camera_grid=object())
+        ),
+        _latest_frame=object(),
         _open_projector=MagicMock(return_value=True),
         _physical_board_square=lambda row, column: (row, column),
         _projector_window=MagicMock(),
         _offline_move_marking_generation=0,
         _offline_move_marking_active=False,
         _offline_move_marking_blackout_pending=False,
+        _offline_blackout_settling_detector=MagicMock(),
         _alignment_monitor=MagicMock(),
         _reference_move_tracker=MagicMock(),
         _projector_status=MagicMock(),
+        _occupancy_status=MagicMock(),
     )
     window._finish_offline_move_marking = lambda generation: (
         CameraWindow._finish_offline_move_marking(window, generation)
     )
-    window._finish_offline_move_marking_blackout = lambda generation: (
-        CameraWindow._finish_offline_move_marking_blackout(
-            window,
-            generation,
+    window._finish_offline_move_marking_blackout = (
+        lambda generation, reason="fallback": (
+            CameraWindow._finish_offline_move_marking_blackout(
+                window,
+                generation,
+                reason,
+            )
         )
     )
+    return window
+
+
+def test_offline_move_marking_shows_half_second_with_one_second_fallback(
+) -> None:
+    move = ((6, 4), (4, 4))
+    window = _offline_marking_window()
 
     with patch(
         "src.chess_camera.camera_app.QTimer.singleShot"
     ) as single_shot:
         CameraWindow._project_offline_accepted_move(window, move)
-        assert single_shot.call_args.args[0] == 1000
+        assert single_shot.call_args.args[0] == 500
         finish_marking = single_shot.call_args.args[1]
         finish_marking()
         assert single_shot.call_args.args[0] == 1000
@@ -563,8 +668,37 @@ def test_offline_move_marking_uses_fixed_one_second_intervals() -> None:
         destination_is_light=True,
     )
     window._projector_window.show_black.assert_called_once_with()
+    window._offline_blackout_settling_detector.reset.assert_called_once_with()
     assert window._offline_move_marking_active is False
     assert window._offline_move_marking_blackout_pending is False
+    assert window._reference_move_tracker.reset_activity.call_count == 2
+
+
+def test_offline_blackout_ends_early_when_frames_confirm_black() -> None:
+    window = _offline_marking_window()
+    with patch("src.chess_camera.camera_app.QTimer.singleShot") as single_shot:
+        CameraWindow._project_offline_accepted_move(
+            window,
+            ((6, 4), (4, 4)),
+        )
+        single_shot.call_args.args[1]()
+        stale_fallback = single_shot.call_args.args[1]
+    detector = window._offline_blackout_settling_detector
+
+    detector.observe.return_value = BlackoutSettlingUpdate("waiting", 2, 3, 650)
+    CameraWindow._observe_offline_move_marking_blackout(window)
+    assert window._offline_move_marking_blackout_pending is True
+
+    detector.observe.return_value = BlackoutSettlingUpdate("stable", 3, 3, 700)
+    CameraWindow._observe_offline_move_marking_blackout(window)
+
+    assert window._offline_move_marking_blackout_pending is False
+    assert window._reference_move_tracker.reset_activity.call_count == 2
+    window._projector_status.setText.assert_called_with(
+        "Projector black confirmed by the camera; watching for the next "
+        "Offline move."
+    )
+    stale_fallback()
     assert window._reference_move_tracker.reset_activity.call_count == 2
 
 
@@ -685,6 +819,7 @@ def _hand_indicator_window(**overrides: object) -> SimpleNamespace:
         "_lichess_guidance_projection_active": False,
         "_illegal_correction_projection_active": False,
         "_board_edge_indicator_active": False,
+        "_board_edge_gate_blocking": False,
         "_hand_indicator_active": False,
         "_projector_window": SimpleNamespace(
             set_edge_activity_indicator=MagicMock()
@@ -733,6 +868,111 @@ def test_hand_indicator_uses_edge_detector_only_during_projection() -> None:
     window._latest_frame = None
     CameraWindow._update_hand_indicator(window, None, tracker_ran=False)
     assert window._hand_indicator_active is False
+
+
+def test_hand_indicator_shows_board_edge_gate_on_black_board() -> None:
+    window = _hand_indicator_window(_board_edge_gate_blocking=True)
+
+    CameraWindow._update_hand_indicator(window, None, tracker_ran=False)
+
+    assert window._hand_indicator_active is True
+
+
+def _edge_gate_window(gate: MagicMock) -> SimpleNamespace:
+    return SimpleNamespace(
+        _latest_frame=_frame(),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(camera_grid=_camera_grid())
+        ),
+        _board_edge_hand_gate=gate,
+        _board_edge_gate_blocking=False,
+        _reference_move_tracker=MagicMock(),
+        _occupancy_status=MagicMock(),
+        _projector_status=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
+    )
+
+
+def test_board_edge_gate_blocks_tracker_and_records_transitions() -> None:
+    gate = MagicMock(
+        has_baseline=True,
+        released=False,
+        largest_component_bounds=(1, 2, 3, 4),
+    )
+    gate.observe.return_value = True
+    window = _edge_gate_window(gate)
+
+    assert CameraWindow._board_edge_gate_blocks(window)
+    assert CameraWindow._board_edge_gate_blocks(window)
+    gate.observe.return_value = False
+    assert not CameraWindow._board_edge_gate_blocks(window)
+
+    assert window._reference_move_tracker.reset_activity.call_count == 2
+    assert [
+        call.args[0] for call in window._record_runtime_diagnostic.mock_calls
+    ] == ["board-edge-gate-blocking", "board-edge-gate-cleared"]
+
+
+def test_board_edge_gate_without_baseline_does_not_block() -> None:
+    gate = MagicMock(has_baseline=False)
+    window = _edge_gate_window(gate)
+
+    assert not CameraWindow._board_edge_gate_blocks(window)
+    gate.observe.assert_not_called()
+
+
+def test_board_edge_gate_skips_ticks_that_cannot_register() -> None:
+    gate = MagicMock(has_baseline=True, released=False)
+    gate.observe.return_value = True
+    window = _edge_gate_window(gate)
+
+    for state in ("watching", "activity"):
+        window._reference_move_tracker.last_state = state
+        assert not CameraWindow._board_edge_gate_blocks(window)
+    gate.observe.assert_not_called()
+
+    window._reference_move_tracker.last_state = "settling"
+    assert CameraWindow._board_edge_gate_blocks(window)
+    window._reference_move_tracker.last_state = "activity"
+    assert CameraWindow._board_edge_gate_blocks(window)
+    assert gate.observe.call_count == 2
+
+
+def test_blocking_edge_gate_skips_reference_tracker_observation() -> None:
+    window = SimpleNamespace(
+        _latest_frame=object(),
+        _calibration_result=object(),
+        _calibrator=SimpleNamespace(active=False),
+        _camera_geometry_ready=True,
+        _lichess_guidance_projection_active=False,
+        _illegal_correction_projection_active=False,
+        _startup_offline_reference_refresh_pending=False,
+        _activate_offline_after_reset=False,
+        _pending_promotion_selection=None,
+        _illegal_correction_blackout_pending=False,
+        _offline_move_marking_active=False,
+        _offline_move_marking_blackout_pending=False,
+        _lichess_guidance_blackout_pending=False,
+        _reconciliation_blackout_pending=False,
+        _alignment_monitor=SimpleNamespace(output_mode="black"),
+        _detect_current_board_orientation=MagicMock(),
+        _board_orientation_needs_detection=False,
+        _detect_automatic_starting_position=MagicMock(return_value=False),
+        _reference_move_tracker=SimpleNamespace(initialized=True),
+        _piece_side_orientation_needs_detection=False,
+        _reset_to_start_requested=False,
+        _reconciliation_requested=False,
+        _offline_restore_requested=False,
+        _board_edge_gate_blocks=MagicMock(return_value=True),
+        _update_reference_move_tracking=MagicMock(),
+    )
+
+    CameraWindow._update_occupancy(window)
+    window._update_reference_move_tracking.assert_not_called()
+
+    window._board_edge_gate_blocks.return_value = False
+    CameraWindow._update_occupancy(window)
+    window._update_reference_move_tracking.assert_called_once_with()
 
 
 def test_edge_detector_does_not_run_on_black_board() -> None:
