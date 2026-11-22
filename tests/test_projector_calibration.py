@@ -1,5 +1,6 @@
 import json
 from collections.abc import Callable
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -1169,6 +1170,54 @@ def test_focus_and_point_ok_returns_to_black_without_calibrating() -> None:
     assert window._focus_dialog is None
     assert window._focus_guide_grid is None
     window._start_adaptive_projector_calibration.assert_not_called()
+
+
+def test_live_preview_is_forced_only_while_focusing() -> None:
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    window = SimpleNamespace(
+        _live_preview_action=MagicMock(isChecked=lambda: False),
+        _focus_dialog=None,
+        _focus_pattern_preview_active=False,
+    )
+    assert not CameraWindow._live_preview_wanted(window)
+    window._focus_dialog = MagicMock()
+    assert CameraWindow._live_preview_wanted(window)
+    window._focus_dialog = None
+    window._focus_pattern_preview_active = True
+    assert CameraWindow._live_preview_wanted(window)
+    CameraWindow._end_focus_pattern_preview(window)
+    assert not CameraWindow._live_preview_wanted(window)
+
+
+def test_resume_live_camera_shows_notice_when_preview_is_off() -> None:
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    window = SimpleNamespace(
+        _snapshot_visible=True,
+        _clearance_view_visible=True,
+        _snapshot_button=MagicMock(),
+        _resume_button=MagicMock(),
+        _live_preview_action=MagicMock(isChecked=lambda: False),
+        _focus_dialog=None,
+        _focus_pattern_preview_active=False,
+        _current_pixmap=object(),
+        _preview=MagicMock(),
+        _detection_status=MagicMock(),
+        _latest_frame=np.zeros((4, 4, 3), dtype=np.uint8),
+        _display_frame=MagicMock(),
+    )
+
+    CameraWindow._resume_live_camera(window)
+
+    assert not window._snapshot_visible
+    assert window._current_pixmap is None
+    window._display_frame.assert_not_called()
+    assert "Live preview is off" in window._preview.setText.call_args.args[0]
 
 
 def test_silent_dialog_helpers_use_no_icon() -> None:

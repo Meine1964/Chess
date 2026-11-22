@@ -569,6 +569,7 @@ def test_main_commands_are_available_from_menus(
             action_names = (
                 "_snapshot_button",
                 "_resume_button",
+                "_live_preview_action",
                 "_reset_pieces_button",
                 "_reconcile_button",
                 "_open_projector_button",
@@ -616,6 +617,7 @@ def test_main_commands_are_available_from_menus(
     assert {
         "_snapshot_button",
         "_resume_button",
+        "_live_preview_action",
         "_reset_pieces_button",
         "_reconcile_button",
     } <= camera_actions

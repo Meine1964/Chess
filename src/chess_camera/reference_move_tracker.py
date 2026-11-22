@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from time import perf_counter
 from typing import Literal
 
 import cv2
@@ -102,10 +103,25 @@ class ReferenceMoveTracker:
             tuple[Square, Square], ...
         ] = ()
         self._compound_correction_squares: tuple[Square, ...] = ()
+        self._observation_count = 0
+        self._last_observation_seconds = 0.0
+        self._last_state: ReferenceTrackerState | None = None
 
     @property
     def initialized(self) -> bool:
         return self._reference is not None
+
+    @property
+    def observation_count(self) -> int:
+        return self._observation_count
+
+    @property
+    def last_observation_seconds(self) -> float:
+        return self._last_observation_seconds
+
+    @property
+    def last_state(self) -> ReferenceTrackerState | None:
+        return self._last_state
 
     @property
     def reference(self) -> ImageArray | None:
@@ -202,6 +218,36 @@ class ReferenceMoveTracker:
         *,
         required_signature: LegalMoveSignature | None = None,
         compound_signatures: tuple[LegalMoveSignature, ...] = (),
+    ) -> ReferenceTrackerUpdate:
+        started = perf_counter()
+        state: ReferenceTrackerState | None = None
+        try:
+            update = self._observe(
+                frame,
+                camera_grid,
+                ui_quarter_turns,
+                position,
+                physical_signatures,
+                required_signature=required_signature,
+                compound_signatures=compound_signatures,
+            )
+            state = update.state
+            return update
+        finally:
+            self._observation_count += 1
+            self._last_observation_seconds = perf_counter() - started
+            self._last_state = state
+
+    def _observe(
+        self,
+        frame: ImageArray,
+        camera_grid: FloatArray,
+        ui_quarter_turns: int,
+        position: Position,
+        physical_signatures: tuple[LegalMoveSignature, ...],
+        *,
+        required_signature: LegalMoveSignature | None,
+        compound_signatures: tuple[LegalMoveSignature, ...],
     ) -> ReferenceTrackerUpdate:
         if self._reference is None:
             return ReferenceTrackerUpdate(

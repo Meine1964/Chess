@@ -20,6 +20,10 @@ main window.
 
 - **Take snapshot**
 - **Resume live camera**
+- **Show live preview**, a persistent checkable choice that defaults to off.
+  The focus dialog and the projector focus pattern always show the live
+  preview. See
+  [move-detection-performance-specification.md](move-detection-performance-specification.md).
 - **Reset pieces to starting position**, visible only when automatic
   starting-position reset is disabled.
 - **Reconcile physical board**, dynamically renamed to **Stop reconciliation**
@@ -229,8 +233,8 @@ in the dropdown immediately without closing or reopening the dialog, while the
 currently selected identity remains unchanged until the user explicitly
 chooses and applies another display.
 
-The diagnostic-snapshot checkbox and the selected Lichess game ID shall also
-persist. A remembered Lichess game may be restored only when that exact game
+The diagnostic-snapshot checkbox, the live-preview choice, and the selected
+Lichess game ID shall also persist. A remembered Lichess game may be restored only when that exact game
 is still present in the ongoing-game list; the application shall not replace a
 remembered game with a different ongoing game. When no game has previously
 been selected, the existing single-ongoing-game automatic selection may become

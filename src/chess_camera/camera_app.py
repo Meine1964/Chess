@@ -5,7 +5,7 @@ import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from time import monotonic
+from time import monotonic, perf_counter
 from typing import Literal, cast
 
 import cv2
@@ -78,6 +78,7 @@ from .chess_position import (
     starting_occupied_squares,
 )
 from .chessboard_widget import ChessboardWidget, rotate_square
+from .detection_timing import DetectionTimingMonitor
 from .diagnostics import DiagnosticStore, RuntimeDiagnosticLog
 from .guidance_activity import (
     BlackoutSettlingDetector,
@@ -158,6 +159,10 @@ _PROJECTOR_SETTING = "projector/screen_name"
 _PROJECTOR_LABEL_SETTING = "projector/screen_label"
 _BOARD_ILLUMINATION_SETTING = "projector/board_illumination_percent"
 _SAVE_DIAGNOSTICS_SETTING = "diagnostics/save_snapshots"
+_LIVE_PREVIEW_SETTING = "camera/live_preview"
+_LIVE_PREVIEW_OFF_TEXT = (
+    "Live preview is off. Enable it with Camera > Show live preview."
+)
 _LICHESS_GAME_SETTING = "lichess/selected_game_id"
 _PROMOTION_MODE_SETTING = "chess/promotion_mode"
 _AUTOMATIC_START_RESET_SETTING = "chess/automatic_start_reset"
@@ -1370,6 +1375,10 @@ class CameraWindow(QMainWindow):
         self._board_edge_activity_suspended = False
         self._board_edge_indicator_active_since: float | None = None
         self._board_edge_indicator_last_stuck_diagnostic_at: float | None = None
+        self._focus_pattern_preview_active = False
+        self._projector_window.projection_changed.connect(
+            self._end_focus_pattern_preview
+        )
         self._projector_window.projection_changed.connect(
             self._reset_board_edge_activity_indicator
         )
@@ -1380,6 +1389,7 @@ class CameraWindow(QMainWindow):
             ManipulationSettlingDetector()
         )
         self._reference_move_tracker = ReferenceMoveTracker()
+        self._detection_timing = DetectionTimingMonitor()
         self._piece_synchronizer = PiecePositionSynchronizer()
         self._legal_game = LegalGame()
         self._offline_clock_enabled = _stored_boolean(
@@ -1655,6 +1665,19 @@ class CameraWindow(QMainWindow):
         self._resume_button = QAction("Resume live camera", self)
         self._resume_button.triggered.connect(self._resume_live_camera)
         self._resume_button.setEnabled(False)
+        self._live_preview_action = QAction("Show live preview", self)
+        self._live_preview_action.setCheckable(True)
+        self._live_preview_action.setChecked(
+            _stored_boolean(
+                self._settings.value(_LIVE_PREVIEW_SETTING, False),
+                False,
+            )
+        )
+        self._live_preview_action.toggled.connect(
+            self._live_preview_preference_changed
+        )
+        if not self._live_preview_action.isChecked():
+            self._preview.setText(_LIVE_PREVIEW_OFF_TEXT)
         self._save_diagnostics = QCheckBox("Save diagnostic snapshots")
         self._save_diagnostics.setChecked(
             _stored_boolean(
@@ -2098,7 +2121,7 @@ class CameraWindow(QMainWindow):
         )
         self._occupancy_timer = QTimer(self)
         self._occupancy_timer.setInterval(100)
-        self._occupancy_timer.timeout.connect(self._update_occupancy)
+        self._occupancy_timer.timeout.connect(self._timed_occupancy_tick)
         self._occupancy_timer.start()
         self._lichess_clock_timer = QTimer(self)
         self._lichess_clock_timer.setInterval(250)
@@ -2132,6 +2155,7 @@ class CameraWindow(QMainWindow):
         camera_menu = self.menuBar().addMenu("&Camera")
         camera_menu.addAction(self._snapshot_button)
         camera_menu.addAction(self._resume_button)
+        camera_menu.addAction(self._live_preview_action)
         camera_menu.addSeparator()
         camera_menu.addAction(self._reset_pieces_button)
         camera_menu.addAction(self._reconcile_button)
@@ -2577,6 +2601,30 @@ class CameraWindow(QMainWindow):
     def _save_diagnostics_preference_changed(self, checked: bool) -> None:
         self._settings.setValue(_SAVE_DIAGNOSTICS_SETTING, checked)
         self._settings.sync()
+
+    def _live_preview_preference_changed(self, checked: bool) -> None:
+        self._settings.setValue(_LIVE_PREVIEW_SETTING, checked)
+        self._settings.sync()
+        if not checked and not self._snapshot_visible:
+            CameraWindow._show_live_preview_off(self)
+
+    def _live_preview_wanted(self) -> bool:
+        return (
+            self._live_preview_action.isChecked()
+            or self._focus_dialog is not None
+            or self._focus_pattern_preview_active
+        )
+
+    def _end_focus_pattern_preview(self) -> None:
+        self._focus_pattern_preview_active = False
+
+    def _show_live_preview_off(self) -> None:
+        self._current_pixmap = None
+        self._preview.clear()
+        self._preview.setText(_LIVE_PREVIEW_OFF_TEXT)
+        self._detection_status.setText(
+            "Live preview off. Take a snapshot to detect the board."
+        )
 
     def _set_board_illumination_percent(self, percent: int) -> None:
         if not 0 <= percent <= 100:
@@ -3202,6 +3250,7 @@ class CameraWindow(QMainWindow):
         self._projector_window.show_pattern(
             focus_pattern(geometry.width(), geometry.height())
         )
+        self._focus_pattern_preview_active = True
         self._suspend_selected_square()
         self._alignment_monitor.set_paused("focus pattern")
         self._projector_status.setText(
@@ -4067,6 +4116,41 @@ class CameraWindow(QMainWindow):
             details=details,
             include_images=True,
         )
+
+    def _timed_occupancy_tick(self) -> None:
+        edge_detector = self._board_edge_activity_detector
+        tracker = self._reference_move_tracker
+        edge_count = edge_detector.observation_count
+        tracker_count = tracker.observation_count
+        started_at = perf_counter()
+        self._update_occupancy()
+        finished_at = perf_counter()
+        edge_ran = edge_detector.observation_count != edge_count
+        tracker_ran = tracker.observation_count != tracker_count
+        latency = self._detection_timing.record_tick(
+            started_at,
+            finished_at,
+            edge_seconds=(
+                edge_detector.last_observation_seconds if edge_ran else None
+            ),
+            tracker_seconds=(
+                tracker.last_observation_seconds if tracker_ran else None
+            ),
+            edge_active=edge_ran and edge_detector.active,
+            tracker_state=tracker.last_state if tracker_ran else None,
+        )
+        if latency is not None:
+            self._record_runtime_diagnostic(
+                "move-detection-timing",
+                (
+                    f"Move accepted {latency:.2f} seconds after the last "
+                    "observed motion."
+                ),
+                details={
+                    "latency_seconds": round(latency, 3),
+                    "timing": self._detection_timing.snapshot(),
+                },
+            )
 
     def _update_occupancy(self) -> None:
         if (
@@ -8311,6 +8395,7 @@ class CameraWindow(QMainWindow):
                     )
                 ),
             },
+            "detection_timing": self._detection_timing.snapshot(),
             "lichess_guidance": {
                 "projection_active": (
                     self._lichess_guidance_projection_active
@@ -9328,16 +9413,21 @@ class CameraWindow(QMainWindow):
         self._latest_frame = camera_frame.copy()
         self._alignment_monitor.accept_frame(self._latest_frame)
         self._calibrator.accept_frame(camera_frame)
-        if not self._snapshot_visible:
-            guide_grid = self._focus_guide_grid
-            self._display_frame(
-                camera_frame
-                if guide_grid is None
-                else _draw_board_guide(camera_frame, guide_grid)
-            )
-            self._detection_status.setText(
-                "Live preview. Take a snapshot to detect the board."
-            )
+        if self._snapshot_visible:
+            return
+        if not CameraWindow._live_preview_wanted(self):
+            if self._current_pixmap is not None:
+                CameraWindow._show_live_preview_off(self)
+            return
+        guide_grid = self._focus_guide_grid
+        self._display_frame(
+            camera_frame
+            if guide_grid is None
+            else _draw_board_guide(camera_frame, guide_grid)
+        )
+        self._detection_status.setText(
+            "Live preview. Take a snapshot to detect the board."
+        )
 
     def _take_snapshot(self) -> None:
         if self._latest_frame is None:
@@ -9423,6 +9513,9 @@ class CameraWindow(QMainWindow):
         self._clearance_view_visible = False
         self._snapshot_button.setEnabled(True)
         self._resume_button.setEnabled(False)
+        if not CameraWindow._live_preview_wanted(self):
+            CameraWindow._show_live_preview_off(self)
+            return
         self._detection_status.setText(
             "Live preview. Take a snapshot to detect the board."
         )

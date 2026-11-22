@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from time import monotonic
+from time import monotonic, perf_counter
 from typing import Literal
 
 import cv2
@@ -158,10 +158,20 @@ class BoardEdgeActivityDetector:
         self._largest_component_outside_pixels = 0
         self._largest_component_outer_halo_pixels = 0
         self._largest_component_bounds: tuple[int, int, int, int] | None = None
+        self._observation_count = 0
+        self._last_observation_seconds = 0.0
 
     @property
     def active(self) -> bool:
         return self._active
+
+    @property
+    def observation_count(self) -> int:
+        return self._observation_count
+
+    @property
+    def last_observation_seconds(self) -> float:
+        return self._last_observation_seconds
 
     @property
     def crossing_detected(self) -> bool:
@@ -201,6 +211,18 @@ class BoardEdgeActivityDetector:
         self._largest_component_bounds = None
 
     def observe(
+        self,
+        frame: ImageArray,
+        camera_grid: FloatArray,
+    ) -> bool:
+        started = perf_counter()
+        try:
+            return self._observe(frame, camera_grid)
+        finally:
+            self._observation_count += 1
+            self._last_observation_seconds = perf_counter() - started
+
+    def _observe(
         self,
         frame: ImageArray,
         camera_grid: FloatArray,

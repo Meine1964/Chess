@@ -98,6 +98,28 @@ def _accepted_update(
     return update
 
 
+def test_tracker_records_observation_timing_and_last_state() -> None:
+    tracker = ReferenceMoveTracker()
+
+    assert tracker.observe(_empty_board(), _camera_grid(), 0, {}).state == (
+        "uninitialized"
+    )
+    assert tracker.last_state == "uninitialized"
+
+    tracker.set_reference(_empty_board(), _camera_grid(), 0)
+    with pytest.raises(ValueError):
+        tracker.observe(
+            _empty_board(),
+            np.zeros((2, 2, 2), dtype=np.float32),
+            0,
+            {},
+        )
+
+    assert tracker.observation_count == 2
+    assert tracker.last_state is None
+    assert tracker.last_observation_seconds >= 0.0
+
+
 def test_staged_reference_remains_provisional_until_commit() -> None:
     tracker = ReferenceMoveTracker()
     reference = _empty_board()

@@ -28,6 +28,19 @@ def _frame() -> np.ndarray:
 
 
 
+def test_board_edge_indicator_records_observation_timing() -> None:
+    detector = BoardEdgeActivityDetector()
+
+    detector.observe(_frame(), _camera_grid())
+    try:
+        detector.observe(np.zeros((10, 10), dtype=np.uint8), _camera_grid())
+    except ValueError:
+        pass
+
+    assert detector.observation_count == 2
+    assert detector.last_observation_seconds >= 0.0
+
+
 def test_board_edge_indicator_requires_activity_across_boundary() -> None:
     frame = _frame()
 
