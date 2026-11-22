@@ -52,10 +52,10 @@ populated complementary-coded calibration methods unchanged.
 - Failure shall preserve the previous verified calibration and shall not
   automatically invoke either existing calibration method.
 - Game clocks, game results, and the board-edge occlusion/activity indicator
-  shall remain suppressed throughout discovery, Gray-code capture, validation,
-  and the final five-second calibrated-grid preview.
-- After successful validation, display the calibrated grid for five seconds
-  before returning to black and restoring any remembered square.
+  shall remain suppressed throughout discovery, Gray-code capture, and
+  validation.
+- After successful validation, return to black immediately, without a
+  calibrated-grid preview, and restore any remembered square.
 
 ## Isolation
 
@@ -77,8 +77,8 @@ populated complementary-coded calibration methods unchanged.
 5. The third action participates in the existing active/cancel UI lifecycle.
 6. Focused controller and pattern tests cover masking, capture timing, final
    dense fitting, and isolation of existing modes.
-7. Calibration overlays remain absent throughout capture and the completion
-   preview, and the preview remains visible for five seconds.
+7. Calibration overlays remain absent throughout capture, and success returns
+   the projector to black without a grid preview.
 
 ## Implementation Status
 

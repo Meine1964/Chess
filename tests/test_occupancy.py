@@ -60,10 +60,15 @@ def _starting_position() -> np.ndarray:
 def _observe_stable(
     detector: SquareOccupancyDetector,
     image: np.ndarray,
+    ui_quarter_turns: int = 0,
 ) -> object:
     update = None
     for _index in range(15):
-        update = detector.observe(image, _camera_grid())
+        update = detector.observe(
+            image,
+            _camera_grid(),
+            ui_quarter_turns,
+        )
     assert update is not None
     return update
 
@@ -90,6 +95,38 @@ def test_starting_position_stabilizes_to_32_occupied_squares() -> None:
     assert update.result.occupied_count == 32
     assert update.result.empty_count == 32
     assert update.result.unknown_count == 0
+
+
+def test_rotated_starting_positions_use_logical_middle_ranks() -> None:
+    rotations = (
+        (cv2.ROTATE_90_CLOCKWISE, 1),
+        (cv2.ROTATE_180, 2),
+        (cv2.ROTATE_90_COUNTERCLOCKWISE, 3),
+    )
+
+    for rotation, quarter_turns in rotations:
+        detector = SquareOccupancyDetector()
+        image = cv2.rotate(_starting_position(), rotation)
+
+        update = _observe_stable(detector, image, quarter_turns)
+
+        assert update.state == "stable"
+        assert update.result is not None
+        assert update.result.occupied_count == 32
+        assert update.result.empty_count == 32
+
+
+def test_orientation_parity_change_rebuilds_empty_models() -> None:
+    detector = SquareOccupancyDetector()
+    rotated = cv2.rotate(_starting_position(), cv2.ROTATE_90_CLOCKWISE)
+    _observe_stable(detector, rotated, 0)
+    detector.reset_observations()
+
+    update = _observe_stable(detector, rotated, 1)
+
+    assert update.result is not None
+    assert update.result.occupied_count == 32
+    assert update.result.empty_count == 32
 
 
 def test_first_observation_provides_provisional_occupancy() -> None:

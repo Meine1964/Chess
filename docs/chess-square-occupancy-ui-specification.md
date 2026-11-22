@@ -116,13 +116,13 @@ The occupancy subsystem shall consume:
 The subsystem shall not infer board geometry independently. Geometry remains
 owned by the board-localization and calibration subsystems.
 
-The calibrated HDMI display need not remain connected for camera-only
-occupancy and piece synchronization. When the saved camera identity,
-resolution, and camera-space board grid still match, the application shall
-load that camera geometry independently, disable projector-dependent actions,
-and continue occupancy detection. Camera-only occupancy shall remain frozen
-until the alignment monitor has checked and, when necessary, remapped the
-saved camera grid against the live board. It shall not substitute another
+Occupancy requires a calibration that matches both the active camera and the
+selected projector display. Camera-only operation is not supported: when the
+calibrated display is unavailable or no saved calibration matches both
+devices, occupancy shall pause and the condition shall be reported
+non-modally. A loaded saved calibration shall keep occupancy frozen until the
+alignment monitor has checked and, when necessary, remapped the saved camera
+grid against the live board. The application shall not substitute another
 display's projector mapping or automatically open an unrelated screen.
 
 ## 5. Coordinate Systems
@@ -220,8 +220,19 @@ For the first milestone, the application may assume that occupancy detection
 is initialized while the physical pieces are in the standard starting
 position.
 
-The middle four ranks provide 32 known-empty reference squares. These samples
-shall initialize both light-square and dark-square empty models.
+The middle four logical ranks provide 32 known-empty reference squares. The
+detected quarter-turn parity shall map those logical ranks into physical
+camera-grid coordinates before model construction:
+
+- At zero or two quarter turns, physical rows `2` through `5` provide the
+  references.
+- At one or three quarter turns, physical columns `2` through `5` provide the
+  references.
+
+These samples shall initialize both light-square and dark-square empty models.
+The detector shall discard and rebuild its empty models whenever the supplied
+quarter-turn parity changes. It shall never train the empty model from fixed
+physical rows when the logical middle ranks run through physical columns.
 
 The known-empty references establish appearance only. The occupied outer
 ranks shall still be classified from image evidence; they shall not be marked
@@ -455,6 +466,7 @@ Tests shall cover:
 Tests shall include:
 
 - Standard starting position.
+- Standard starting position at all four quarter-turn orientations.
 - One piece removed from the starting position.
 - One piece moved into a middle-rank square.
 - Several midgame occupancy layouts.
@@ -474,6 +486,8 @@ The first occupancy milestone is accepted when:
 5. No dots change while a hand is moving over the board.
 6. Rejected observations do not erase the last confirmed result.
 7. All four supported board orientations map physical squares correctly.
+   Each orientation shall also produce 32 occupied squares without training
+   the empty model from an occupied starting rank.
 8. Occupancy dots remain visible while square selection still works.
 9. Calibration invalidation clears the dots.
 10. The detector reports an inconclusive state instead of inventing a complete
@@ -522,7 +536,10 @@ remain pending.
 - Compute deterministic occupancy features.
 - Classify every square as empty or occupied.
 
-Implemented experimentally.
+Implemented with orientation-aware logical middle-rank selection. Automated
+tests cover all four quarter-turn orientations and model rebuilding after a
+parity change. Replay of the recorded 90-degree hardware frame detects all 32
+starting pieces.
 
 ### Milestone 4: Temporal stability
 

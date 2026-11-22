@@ -62,7 +62,6 @@ The first implementation shall support:
 - Deliberately non-legal chess relocations.
 - Persistent UI source/destination highlighting.
 - Optional two-second physical source/destination projection.
-- Camera-only operation when the calibrated projector is disconnected.
 - Conservative rejection without loss of the accepted position.
 
 ### 3.2 Excluded from the first implementation
@@ -569,18 +568,20 @@ acceptance. The exception shall never commit an illegal move; it only permits
 the existing legality rejection and red correction workflow on both source and
 destination to run.
 
-## 17. Camera-Only Operation
+## 17. Calibration Requirement
 
-The tracker shall operate without an attached projector when:
+The tracker shall operate only with a saved or fresh calibration that matches
+both the active camera and the selected projector display, including their
+identities and resolutions. A saved calibration shall be used for occupancy
+and move detection only after the alignment monitor has checked, and when
+necessary remapped, the saved camera grid against the live board.
 
-- The camera identity and resolution match saved camera calibration.
-- The live camera grid has been checked or remapped.
-- The projector is absent, closed, or black.
-
-Projector controls and physical illumination shall be unavailable, but move
-detection, UI updates, reference storage, and persistence shall continue.
-
-The application shall not open an unrelated display as a substitute projector.
+Camera-only operation without a calibrated projector is not supported. When
+the calibrated projector is unavailable or no saved calibration matches both
+devices, occupancy and move tracking shall pause, the condition shall be
+reported non-modally, and calibration shall start only on explicit user
+action. The application shall not open an unrelated display as a substitute
+projector.
 
 ## 18. Diagnostics
 
@@ -697,7 +698,7 @@ result.
 - Logical position survives process restart.
 - Trusted reference survives process restart.
 - Untrusted reference pauses acceptance until recaptured.
-- Camera-only startup verifies the grid before comparison.
+- Startup with a saved calibration verifies the live grid before comparison.
 - Board remapping preserves the logical position and reference semantics.
 - Explicit reset verifies live starting occupancy before replacing either the
   logical position or reference.
@@ -716,7 +717,8 @@ The replacement tracker is accepted when:
 6. Non-legal one-piece relocations are tracked.
 7. Ambiguous changes preserve the previous reference and position.
 8. Board remapping does not create false moves or clear pieces.
-9. Camera-only operation works without opening a substitute projector.
+9. Tracking pauses without a calibration matching both camera and projector,
+   and never opens a substitute projector.
 10. UI highlighting and optional physical projection use only accepted moves.
 11. Explicit reset succeeds from a verified physical starting setup and never
     resets from stale cached occupancy.

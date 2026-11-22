@@ -84,6 +84,7 @@ class SquareOccupancyDetector:
         self._rebuild_models_after_motion = rebuild_models_after_motion
         self._settling_remaining = 0
         self._models: dict[int, _ParityModel] = {}
+        self._model_orientation_parity: int | None = None
         self._history: deque[OccupancyGrid] = deque(
             maxlen=required_observations
         )
@@ -91,6 +92,7 @@ class SquareOccupancyDetector:
 
     def reset(self) -> None:
         self._models.clear()
+        self._model_orientation_parity = None
         self.reset_observations()
 
     def reset_observations(self) -> None:
@@ -102,7 +104,15 @@ class SquareOccupancyDetector:
         self,
         frame: ImageArray,
         camera_grid: FloatArray,
+        ui_quarter_turns: int = 0,
     ) -> OccupancyUpdate:
+        if ui_quarter_turns not in (0, 1, 2, 3):
+            raise ValueError("Board orientation must be a quarter-turn count.")
+        orientation_parity = ui_quarter_turns % 2
+        if self._model_orientation_parity != orientation_parity:
+            self._models.clear()
+            self._history.clear()
+            self._model_orientation_parity = orientation_parity
         canonical = rectify_board(
             frame,
             camera_grid,
@@ -145,7 +155,10 @@ class SquareOccupancyDetector:
 
         square_regions = extract_square_regions(canonical)
         if not self._models:
-            self._models = _build_empty_models(square_regions)
+            self._models = _build_empty_models(
+                square_regions,
+                orientation_parity,
+            )
         labels, scores = _classify_squares(square_regions, self._models)
         labels = suppress_piece_spillover(labels, scores)
         labels = resolve_binary_occupancy(labels, scores)
@@ -383,7 +396,10 @@ def _rotate_square(
 
 def _build_empty_models(
     square_regions: list[list[ImageArray]],
+    orientation_parity: int,
 ) -> dict[int, _ParityModel]:
+    if orientation_parity not in (0, 1):
+        raise ValueError("Board orientation parity must be zero or one.")
     models: dict[int, _ParityModel] = {}
     lab_regions = [
         [cv2.cvtColor(region, cv2.COLOR_BGR2LAB) for region in row]
@@ -392,8 +408,13 @@ def _build_empty_models(
     for parity in (0, 1):
         references = [
             lab_regions[row][column]
-            for row in range(2, 6)
+            for row in range(8)
             for column in range(8)
+            if (
+                2 <= row < 6
+                if orientation_parity == 0
+                else 2 <= column < 6
+            )
             if (row + column) % 2 == parity
         ]
         pixels = np.concatenate(

@@ -175,6 +175,249 @@ restored only when camera identity, resolution, orientation, and logical
 position all match. Invalid persisted data shall be rejected rather than
 partially loaded.
 
+### 4.4 Startup verification and Offline readiness
+
+**Status:** Implemented. This section supersedes conflicting startup behavior
+described elsewhere in this document and in the related specifications.
+
+#### 4.4.1 Orientation and persisted state
+
+The logical UI board has rank 8 at the top, rank 1 at the bottom, file a at
+the left, and file h at the right. Physical rows and columns are the indices
+of the calibrated camera grid, not absolute directions in the room or on the
+monitor. The complete board orientation is the number of clockwise
+quarter-turns mapping a logical UI square to a physical grid square:
+
+| Quarter-turns | Rotation | Logical h1 maps to physical `(row, column)` |
+| --- | --- | --- |
+| 0 | 0 degrees | `(7, 7)` |
+| 1 | 90 degrees clockwise | `(7, 0)` |
+| 2 | 180 degrees | `(0, 0)` |
+| 3 | 270 degrees clockwise | `(0, 7)` |
+
+This value is relative to the camera-grid indexing; it is not itself the
+camera's angle in the room. Camera-grid redetection or changed calibration may
+change the required value. Square-color parity determines only whether the
+value is even or odd; identifying the White side resolves the remaining
+180-degree ambiguity.
+
+The persisted piece map uses logical UI coordinates. The complete orientation,
+Offline legal FEN, Offline clock values, and canonical move reference are
+stored separately but must describe a compatible saved session. The FEN
+contains chess state such as side to move and castling rights; occupancy alone
+cannot reconstruct that state. A saved reference is reusable only when its
+camera identity, resolution, complete orientation, and logical position match.
+Restored settings are provisional until the startup checks below succeed.
+
+#### 4.4.2 Ordered startup checks
+
+1. **Check calibration.** Check that the selected camera and projector are
+   available, that saved calibration belongs to the active hardware and
+   resolutions, and that live camera geometry and projector mapping are
+   sufficiently verified for use. A matching saved record alone is not proof
+   that the equipment or board has not moved. Keep projection black except
+   for an authorized calibration or verification pattern. If a necessary
+   check cannot be completed, or either calibration is invalid or unavailable,
+   report the specific condition non-modally and do not enter startup Offline
+   readiness. Full calibration, including any checkerboard or other pattern
+   required by the chosen method, shall begin only on an explicit user action;
+   it shall not start automatically on a failed check.
+
+   Concretely, the saved calibration is loaded when its projector display
+   name and resolution match the selected projector. Camera-only operation is
+   not supported. A loaded saved calibration keeps occupancy, startup checks,
+   and move tracking paused until the alignment monitor reports a live
+   camera-grid check with the projector black. A fresh explicit calibration
+   counts as live verified. Load failures and hardware mismatches are shown
+   in the projector status and runtime diagnostics, never in a dialog.
+
+   **Automatic alignment recovery.** A valid projector calibration lets the
+   application recover the camera grid and the board position without a full
+   calibration:
+
+   - When the saved camera identity and resolution also match and the stable
+     live camera grid is within 1.5 camera pixels of the saved grid, the
+     saved calibration is accepted directly.
+   - When the live grid differs by more than that, or the saved record
+     belongs to a different camera identity or resolution, the application
+     shall not assume what moved. With the projector black it captures a
+     black reference, then projects a verification pattern cropped to the
+     saved projector board grid, followed by its inverse. The pattern lights
+     a fixed set of 32 of the 64 board squares. Unlike a plain checkerboard,
+     the set is asymmetric: under every other board rotation or reflection,
+     and under every one-square shift, it agrees with itself on only about
+     half the squares (absolute correlation at most 0.1). A replaced camera's
+     grid indexing can therefore be identified.
+   - Each pattern is measured from the first camera frame whose capture
+     started at least 0.5 seconds after the projector confirmed that pattern
+     is displayed; earlier frames are ignored. If a pattern is not displayed
+     within 3 seconds of its request, recovery fails.
+   - The pattern frame `P`, inverse frame `Q`, and black reference `B` give
+     the normalized response `(P - Q) / (P + Q - 2B + 20)`. It is near +1
+     where the pattern lit the surface, near -1 where the inverse did, and
+     near 0 where no projected light falls, regardless of whether the surface
+     is a light or dark board square.
+   - Each hypothesis predicts a camera grid. For every board square that the
+     saved piece map marks as empty (all squares when fewer than 16 are
+     empty), the median response is sampled over the central 40% of the
+     predicted square and multiplied by +1 or -1 according to the pattern.
+     The hypothesis score is the mean of these values.
+     - **Camera moved or replaced** (projector and board fixed): the
+       pattern stays on the same physical squares, so it is predicted on the
+       newly detected camera grid. Because a replaced camera may index the
+       grid differently, all eight grid orderings are tested. Adoption keeps
+       the projector grid unchanged and refits the camera-to-projector
+       homography to the new camera grid.
+     - **Board moved** (camera and projector fixed): the pattern stays where
+       the board used to be, so it is predicted on the saved camera grid.
+       Adoption uses the existing board remap of the projector grid. This
+       hypothesis is not tested after a camera hardware change.
+   - The best hypothesis is adopted when its score is at least 0.4 and every
+     rival whose predicted grid differs by more than a quarter square scores
+     at least 0.2 lower. Rivals within a quarter square predict nearly the
+     same mapping and do not make the result ambiguous. An adopted result is
+     activated as live verified and saved as the new calibration record for
+     the active camera and projector, after the previous record is copied to
+     `calibrations/before-recovery-<timestamp>.json`. The camera calibration
+     indicator keeps showing which hypothesis was recovered. The projector
+     returns to black and startup continues with occupancy.
+   - If three pattern pairs yield no acceptable hypothesis (for example,
+     both camera and board moved, or the board was obstructed), the
+     calibration is marked unusable for this run, the saved record is kept,
+     and the user is told non-modally to run a calibration explicitly.
+   - Every step is written to the runtime diagnostics event file
+     `diagnostics/runtime-events.jsonl` with camera images: the recovery
+     start (reason, displacement, number of scored squares), the measurement
+     (black, pattern, inverse, and normalized-response images, display
+     delays, every hypothesis's score and grid center, the selected
+     hypothesis, the last rejection reason), the backup file name, and the
+     adoption or failure.
+   - Recovery runs only for startup verification of a loaded saved
+     calibration. During play, board movement is still remapped as a board
+     movement and verified by the projected-square alignment checks.
+
+   *Implementation status:* implemented in `AlignmentMonitor`
+   (`recovery_pattern_image`, `score_recovery_hypotheses`,
+   `select_recovery_hypothesis`, `camera_moved_mapping`) and `CameraWindow`
+   (`_restore_saved_calibration`, recovery signal handlers), with
+   `CalibrationStore.load_for_projector` reporting whether the camera also
+   matches and `CalibrationStore.backup` preserving the replaced record.
+   History: the first implementation projected one square and measured it
+   near each hypothesis's own expected point using the first frame after the
+   request. In a real run the square was not yet visible, camera noise
+   "confirmed" the wrong hypothesis, and the bad mapping overwrote the saved
+   record. A second implementation measured one light centroid after a
+   settling delay; on a board moved by about 1 cm the square straddled a light
+   and a dark board square, the reflectance difference biased the centroid
+   by 17% of a square, and the correct hypothesis was rejected. The
+   normalized, whole-board pattern comparison replaces both. Tests:
+   `tests/test_alignment_monitor.py` (pattern asymmetry, hypothesis
+   selection with board reflectance, frames before a pattern is visible are
+   ignored, camera change with different grid indexing, missing pattern
+   fails after three attempts, display timeout, small drift without
+   recovery) and `tests/test_projector_calibration.py` (store matching and
+   backup, occupied-square exclusion, dialog-free failure). Known
+   limitations: simultaneous camera and board movement requires explicit
+   calibration, and if no camera frame is available when recovery completes,
+   the recovered calibration is used but not saved.
+2. **Load the saved session provisionally.** Read and validate any saved
+   physical piece map, orientation, legal FEN, reference metadata, and Offline
+   clocks without overwriting them. Missing, invalid, or mutually inconsistent
+   data shall be reported and shall not be treated as a verified saved game.
+   The checkerboard's parity can constrain the saved orientation, but cannot
+   alone prove which side is White.
+3. **Observe occupancy.** With the projector black, discard exposure
+   transitions and wait for a stable, quiet, unobstructed observation. Use the
+   confirmed camera-grid parity to select orientation-aware empty-square
+   models. An inconclusive observation, hand, motion, or calibration loss shall
+   wait or report the problem; it shall not modify the saved game or reference.
+4. **Evaluate the starting layout first.** If the stable occupancy matches
+   all 32 standard starting squares under the geometric parity, determine
+   which side is White from piece-color evidence and establish the complete
+   orientation. With automatic starting-position reset enabled, atomically
+   accept the standard physical and legal position, capture a clear black-frame
+   reference, reset both Offline clocks to their configured initial values,
+   persist the new session, and enter Offline play with White to move and
+   clocks paused. If White-side evidence is inconclusive, do not reset or
+   project moves; continue waiting and report the reason. When automatic reset
+   is disabled, leave the session unchanged until the user explicitly requests
+   a reset.
+5. **Otherwise compare with the saved position.** Map the stable physical
+   occupancy through the validated saved orientation and compare it with the
+   occupied squares of the saved piece map. When the saved Offline FEN and
+   physical piece map agree, their orientation is compatible with current
+   geometry, and the physical occupancy matches, restore the saved Offline
+   game and its saved clock values paused. Verify or establish a compatible
+   clean reference before enabling move tracking; never adopt an obstructed
+   or projector-contaminated frame. The implementation performs this
+   comparison through physical reconciliation against the saved piece map,
+   which also rejects confident contradictory piece-color evidence when a
+   compatible saved reference is available.
+6. **Handle mismatch without changing authority.** If no valid saved session
+   matches, keep the previous saved position, FEN, clocks, orientation, and
+   reference unchanged. Report the mismatch non-modally and wait for the user
+   to arrange the board or explicitly choose a recovery action. Do not start
+   a new game, infer or submit a move, or mark an inferred illegal move.
+   Mismatching squares may be listed in the UI and briefly projected with the
+   existing red reconciliation markers. Arranging the standard start (with
+   automatic reset enabled) ends the pending check under step 4.
+
+The starting-layout check intentionally takes precedence over a saved game
+when automatic reset is enabled. Occupancy cannot distinguish same-color piece
+types, swapped pieces, or every different position with identical occupied
+squares. Consequently the automatic starting reset assumes the user has
+physically arranged the correct pieces, and may replace a saved game even if a
+different physical position happens to have the same occupancy. A saved-game
+occupancy match likewise confirms occupied squares, not the identity of every
+piece. Where available, confident contradictory color evidence shall prevent
+adoption rather than be ignored.
+
+This startup Offline readiness sequence requires both verified camera and
+projector calibration. It does not alter Lichess game authority and
+reconciliation; an active Lichess game cancels any pending startup Offline
+check, and the sequence shall not interrupt an active Lichess game or
+automatically reset it.
+
+#### 4.4.3 Deferred single-move recovery
+
+Recognizing one physical move made while the application was stopped and
+marking it as an erroneous move is deferred. A normal relocation generally
+changes two occupancy squares, not one; captures and special moves may have
+different or ambiguous occupancy signatures. A future design must use
+sufficient evidence to distinguish legal and illegal candidates, captures,
+special moves, and visually indistinguishable states before offering
+correction. Until then, a mismatch shall follow step 6 above.
+
+#### 4.4.4 Acceptance criteria
+
+- Missing or incompatible projector calibration blocks startup Offline
+  readiness and reports which check failed without opening a startup dialog
+  or automatically projecting a calibration pattern.
+- With a valid projector calibration, a moved board, a moved camera, or a
+  replaced camera is recovered by an asymmetric verification pattern and its
+  inverse, scored over the empty board squares independently of board
+  reflectance; the chosen
+  hypothesis is saved, reported in the status text, and recorded in the
+  runtime diagnostics file. An unmatched verification keeps the saved record
+  and asks for explicit calibration without a dialog.
+- After explicit successful calibration, startup proceeds to stable occupancy;
+  interruptions or failed calibration do not replace saved game state.
+- The four orientation values map UI squares to camera-grid squares as listed,
+  and parity alone never establishes the White side.
+- At each orientation, a clear standard setup is recognized from live evidence,
+  White-side orientation is determined, and automatic reset creates the
+  starting game with configured clocks paused.
+- A non-starting physical board matching a compatible saved Offline session
+  restores its FEN and saved clocks paused without counting application
+  downtime or resetting the game.
+- A changed, missing, invalid, or incompatible saved session never silently
+  overwrites prior state; a non-starting occupancy mismatch remains pending.
+- Motion, obstruction, insufficient piece-color evidence, projected light,
+  and incompatible reference metadata prevent unsafe acceptance.
+- Starting-layout precedence and the limits of occupancy-only identity
+  checking remain explicit to the user.
+- No single-move correction is inferred as part of this first implementation.
+
 ## 5. UI Rendering
 
 Both the Physical position and Lichess position boards shall expose an
@@ -517,13 +760,14 @@ projector-contaminated. Turn inference and ordinary Offline move tracking
 shall begin only after the clean reference is installed.
 
 The same clean-reference requirement applies when a matching saved Offline
-game is restored during application startup. Restoring the saved legal state
-shall schedule an automatic clean capture after the camera and calibration
-are available. Move tracking shall remain paused until a stable quiet camera
-observation replaces the appearance reference and has been persisted. The
-accepted physical piece map remains authoritative during this recapture;
-binary occupancy shall not block it because occupancy may be incomplete for
-otherwise visible pieces.
+game is restored during application startup. After live calibration
+verification, startup shall first compare stable physical occupancy with the
+saved piece map, as specified in section 4.4. Only a matching observation,
+taken after projector blackout and exposure settling, replaces and persists
+the appearance reference. Move tracking shall remain paused until then. If
+occupancy detection is unreliable for a visibly correct board, the user may
+explicitly choose **Stop reconciliation** to accept the current board and
+capture a clean reference; this is never done automatically.
 
 For an Offline game started from the current position, the provisional legal
 position shall grant castling rights for each king and corresponding rook

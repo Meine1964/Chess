@@ -1248,6 +1248,15 @@ class CameraWindow(QMainWindow):
         self._alignment_monitor.camera_grid_checked.connect(
             self._camera_grid_checked
         )
+        self._alignment_monitor.recovery_projection_requested.connect(
+            self._alignment_recovery_projection_requested
+        )
+        self._alignment_monitor.recovery_completed.connect(
+            self._alignment_recovery_completed
+        )
+        self._alignment_monitor.recovery_failed.connect(
+            self._alignment_recovery_failed
+        )
         self._occupancy_detector = SquareOccupancyDetector()
         self._automatic_start_occupancy_detector = SquareOccupancyDetector(
             canonical_size=400,
@@ -1377,7 +1386,6 @@ class CameraWindow(QMainWindow):
         self._offline_move_marking_active = False
         self._offline_move_marking_blackout_pending = False
         self._offline_move_marking_generation = 0
-        self._calibration_grid_preview_generation = 0
         self._illegal_correction_projection_active = False
         self._illegal_correction_blackout_pending = False
         self._illegal_correction_generation = 0
@@ -1405,7 +1413,6 @@ class CameraWindow(QMainWindow):
         self._last_rejected_move: (
             tuple[tuple[int, int], tuple[int, int]] | None
         ) = None
-        self._camera_only_calibration = False
         self._camera_geometry_ready = False
         self._calibration_result: CalibrationResult | None = None
         self._verified_calibration_result: CalibrationResult | None = None
@@ -2641,7 +2648,6 @@ class CameraWindow(QMainWindow):
         )
         self._restore_saved_calibration()
         self._restore_move_reference()
-        self._start_pending_offline_reference_refresh()
         self._record_runtime_diagnostic(
             "camera-started",
             f"Camera started: {device.description()}.",
@@ -3053,7 +3059,6 @@ class CameraWindow(QMainWindow):
     def _show_calibrated_grid(self) -> None:
         if not self._open_projector():
             return
-        self._calibration_grid_preview_generation += 1
         self._projector_window.set_calibration_overlays_suppressed(False)
         try:
             self._projector_window.show_grid()
@@ -3130,18 +3135,10 @@ class CameraWindow(QMainWindow):
         result: CalibrationResult,
     ) -> None:
         self._activate_calibration_result(result)
-        self._projector_window.set_calibration_overlays_suppressed(True)
-        self._calibration_grid_preview_generation += 1
-        preview_generation = self._calibration_grid_preview_generation
-        QTimer.singleShot(
-            5000,
-            lambda: self._finish_calibration_grid_preview(
-                preview_generation
-            ),
-        )
-        self._alignment_monitor.set_paused(
-            "calibration grid preview; select Black or a square to resume"
-        )
+        self._projector_window.show_black()
+        self._projector_window.set_calibration_overlays_suppressed(False)
+        self._alignment_monitor.set_black()
+        self._restore_remembered_square()
         self._calibration_progress.setVisible(True)
         if self._latest_frame is None:
             return
@@ -3200,19 +3197,6 @@ class CameraWindow(QMainWindow):
             },
             include_images=True,
         )
-
-    def _finish_calibration_grid_preview(self, generation: int) -> None:
-        if generation != self._calibration_grid_preview_generation:
-            return
-        self._projector_window.set_calibration_overlays_suppressed(False)
-        if self._projector_window.output_mode != "grid":
-            return
-        self._projector_window.show_black()
-        self._alignment_monitor.set_black()
-        self._projector_status.setText(
-            "Calibration grid preview finished; projector returned to black."
-        )
-        self._restore_remembered_square()
 
     def _projector_calibration_failed(self, message: str) -> None:
         self._projector_window.set_calibration_overlays_suppressed(False)
@@ -3378,10 +3362,7 @@ class CameraWindow(QMainWindow):
 
     def _board_square_clicked(self, row: int, column: int) -> None:
         clicked_square = f"{chr(ord('a') + column)}{8 - row}"
-        if (
-            self._calibration_result is None
-            or self._camera_only_calibration
-        ):
+        if self._calibration_result is None:
             self._projector_status.setText(
                 "No matching projector calibration is available."
             )
@@ -3393,7 +3374,6 @@ class CameraWindow(QMainWindow):
                     "calibration_available": (
                         self._calibration_result is not None
                     ),
-                    "camera_only_calibration": self._camera_only_calibration,
                 },
                 include_images=True,
             )
@@ -3521,10 +3501,13 @@ class CameraWindow(QMainWindow):
     def _activate_calibration_result(
         self,
         result: CalibrationResult,
+        *,
+        live_verified: bool = True,
+        camera_changed: bool = False,
+        recovery_occupied_squares: frozenset[tuple[int, int]] = frozenset(),
     ) -> None:
         CameraWindow._cancel_pending_alignment_mapping(self)
-        self._camera_only_calibration = False
-        self._camera_geometry_ready = True
+        self._camera_geometry_ready = live_verified
         self._calibration_result = result
         self._verified_calibration_result = result
         self._board_orientation_needs_detection = True
@@ -3532,6 +3515,8 @@ class CameraWindow(QMainWindow):
         self._suspend_selected_square()
         self._reset_occupancy(
             "Occupancy stabilizing with the verified calibration."
+            if live_verified
+            else "Occupancy waiting for live camera-grid verification."
         )
         self._projector_window.set_projector_grid(
             result.mapping.projector_grid
@@ -3552,6 +3537,9 @@ class CameraWindow(QMainWindow):
         self._alignment_monitor.configure(
             result,
             (geometry.width(), geometry.height()),
+            startup_verification=not live_verified,
+            camera_changed=camera_changed,
+            recovery_occupied_squares=recovery_occupied_squares,
         )
         self._set_calibration_indicator(
             self._camera_calibration_indicator,
@@ -3562,50 +3550,10 @@ class CameraWindow(QMainWindow):
             self._projector_calibration_indicator,
             "Projector calibration",
             "ok",
-        )
-
-    def _activate_camera_only_calibration(
-        self,
-        result: CalibrationResult,
-    ) -> None:
-        CameraWindow._cancel_pending_alignment_mapping(self)
-        self._camera_only_calibration = True
-        self._camera_geometry_ready = False
-        self._calibration_result = result
-        self._verified_calibration_result = None
-        self._board_orientation_needs_detection = True
-        self._piece_side_orientation_needs_detection = True
-        self._suspend_selected_square()
-        self._reset_occupancy(
-            "Occupancy stabilizing from saved camera board geometry."
-        )
-        self._projector_window.clear_projector_grid()
-        self._board_widget.setEnabled(True)
-        self._reset_pieces_button.setEnabled(True)
-        self._reconcile_button.setEnabled(
-            self._piece_synchronizer.initialized
-        )
-        self._show_grid_button.setEnabled(False)
-        self._show_squares_button.setEnabled(False)
-        self._quick_verify_button.setEnabled(False)
-        self._validate_calibration_button.setEnabled(False)
-        self._alignment_monitor.configure(result, None)
-        self._set_calibration_indicator(
-            self._camera_calibration_indicator,
-            "Camera calibration",
-            "ok",
-            "Loaded saved camera board geometry.",
-        )
-        self._set_calibration_indicator(
-            self._projector_calibration_indicator,
-            "Projector calibration",
-            "unknown",
-            "The calibrated projector display is unavailable.",
         )
 
     def _invalidate_calibration(self) -> None:
         CameraWindow._cancel_pending_alignment_mapping(self)
-        self._camera_only_calibration = False
         self._camera_geometry_ready = False
         self._calibration_result = None
         self._verified_calibration_result = None
@@ -3735,12 +3683,8 @@ class CameraWindow(QMainWindow):
             "Occupancy stabilizing after board movement."
         )
         self._reference_move_tracker.note_camera_grid_remap()
-        if not self._camera_only_calibration:
-            self._projector_window.set_projector_grid(mapping.projector_grid)
-        if (
-            not self._camera_only_calibration
-            and self._selected_board_square is not None
-        ):
+        self._projector_window.set_projector_grid(mapping.projector_grid)
+        if self._selected_board_square is not None:
             row, column = self._selected_board_square
             physical_row, physical_column = self._physical_board_square(
                 row,
@@ -3751,16 +3695,10 @@ class CameraWindow(QMainWindow):
                 physical_column,
                 light_square=(row + column) % 2 == 0,
             )
-        if self._camera_only_calibration:
-            self._projector_status.setText(
-                f"Board moved {displacement:.1f} camera pixels; camera "
-                "coordinates were updated."
-            )
-        else:
-            self._projector_status.setText(
-                f"Board moved {displacement:.1f} camera pixels; projected "
-                "coordinates were updated without full recalibration."
-            )
+        self._projector_status.setText(
+            f"Board moved {displacement:.1f} camera pixels; projected "
+            "coordinates were updated without full recalibration."
+        )
         self._refresh_pending_lichess_guidance()
 
     def _alignment_mapping_verified(self, _mapping: MappingResult) -> None:
@@ -3777,12 +3715,12 @@ class CameraWindow(QMainWindow):
         self._verified_calibration_result = self._calibration_result
 
     def _camera_grid_checked(self) -> None:
-        if (
-            not self._camera_only_calibration
-            or self._camera_geometry_ready
-        ):
+        if self._camera_geometry_ready:
             return
         self._camera_geometry_ready = True
+        self._projector_status.setText(
+            "Live camera grid verified against the saved calibration."
+        )
         self._reset_occupancy(
             "Occupancy stabilizing after camera-grid verification."
         )
@@ -3935,15 +3873,15 @@ class CameraWindow(QMainWindow):
             or self._calibrator.active
         ):
             return
-        if (
-            self._camera_only_calibration
-            and not self._camera_geometry_ready
-        ):
+        if not self._camera_geometry_ready:
             self._occupancy_status.setText(
-                "Occupancy waiting for camera-grid verification."
+                "Occupancy waiting for live camera-grid verification."
             )
             return
         self._update_board_edge_activity_indicator()
+        if self._startup_offline_reference_refresh_pending:
+            self._start_pending_offline_reference_refresh()
+            return
         if (
             self._activate_offline_after_reset
             and not self._reset_to_start_requested
@@ -3985,10 +3923,7 @@ class CameraWindow(QMainWindow):
                 "to settle."
             )
             return
-        if (
-            not self._camera_only_calibration
-            and self._alignment_monitor.output_mode != "black"
-        ):
+        if self._alignment_monitor.output_mode != "black":
             self._occupancy_status.setText(
                 "Occupancy paused until the projector is black."
             )
@@ -4014,6 +3949,7 @@ class CameraWindow(QMainWindow):
             update = self._occupancy_detector.observe(
                 self._latest_frame,
                 self._calibration_result.mapping.camera_grid,
+                self._board_quarter_turns,
             )
         except (ValueError, cv2.error) as error:
             self._occupancy_status.setText(
@@ -4145,6 +4081,7 @@ class CameraWindow(QMainWindow):
             update = self._automatic_start_occupancy_detector.observe(
                 self._latest_frame,
                 self._calibration_result.mapping.camera_grid,
+                self._board_quarter_turns,
             )
         except (ValueError, cv2.error) as error:
             self._occupancy_status.setText(
@@ -4154,9 +4091,21 @@ class CameraWindow(QMainWindow):
         if update.result is None:
             return False
         if (
-            update.state == "stable"
-            and self._piece_side_orientation_needs_detection
+            frozenset(
+                rotate_square(row, column, -self._board_quarter_turns)
+                for row, column in update.result.occupied_squares
+            )
+            != starting_occupied_squares()
         ):
+            return False
+        if update.state != "stable":
+            self._piece_status.setText(
+                "Starting position detected; confirming stability "
+                f"({update.observation_count}/"
+                f"{update.required_observations})."
+            )
+            return True
+        if self._piece_side_orientation_needs_detection:
             try:
                 self._board_quarter_turns = (
                     detect_starting_position_orientation(
@@ -4168,8 +4117,8 @@ class CameraWindow(QMainWindow):
                 )
             except ValueError as error:
                 self._piece_status.setText(
-                    "Starting position detected, but White-side orientation "
-                    f"is unresolved: {error}"
+                    "Standard starting occupancy detected, but the White "
+                    f"side is unresolved: {error}"
                 )
                 return True
             self._piece_side_orientation_needs_detection = False
@@ -4179,22 +4128,9 @@ class CameraWindow(QMainWindow):
             )
             self._settings.sync()
             self._refresh_pending_lichess_guidance()
-        occupied_ui = frozenset(
-            rotate_square(row, column, -self._board_quarter_turns)
-            for row, column in update.result.occupied_squares
-        )
-        if occupied_ui != starting_occupied_squares():
-            return False
-        if update.state != "stable":
-            self._piece_status.setText(
-                "Starting position detected; confirming stability "
-                f"({update.observation_count}/"
-                f"{update.required_observations})."
-            )
-            return True
         self._activate_offline_after_reset = True
         self._automatic_start_reset_recovery = False
-        self._complete_starting_position_reset(occupied_ui)
+        self._complete_starting_position_reset(starting_occupied_squares())
         self._piece_status.setText(
             "Starting position detected automatically; Offline game ready. "
             "White to move."
@@ -4896,7 +4832,7 @@ class CameraWindow(QMainWindow):
         selection = self._pending_promotion_selection
         if selection is None:
             return
-        if self._camera_only_calibration or not self._open_projector():
+        if not self._open_projector():
             self._fail_promotion_selection(
                 "Promotion selection requires a calibrated projector."
             )
@@ -5412,6 +5348,15 @@ class CameraWindow(QMainWindow):
                     "to begin an Offline legal game."
                 )
             return
+        self._startup_offline_reference_refresh_pending = False
+        self._offline_restore_requested = False
+        if self._reconciliation_requested:
+            self._reconciliation_requested = False
+            self._reconciliation_blackout_pending = False
+            self._reconciliation_reference_acceptance_pending = False
+            self._reconciliation_blackout_generation += 1
+            self._reconcile_button.setText("Reconcile physical board")
+        self._board_widget.set_reconciliation_squares(())
         self._piece_synchronizer.reset()
         self._legal_game.reset()
         offline_clock = getattr(self, "_offline_clock", None)
@@ -5469,11 +5414,6 @@ class CameraWindow(QMainWindow):
                 "White-side orientation."
             )
             return
-        if self._camera_only_calibration:
-            self._projector_status.setText(
-                "Move accepted; physical projection is unavailable."
-            )
-            return
         if self._calibration_result is None or not self._open_projector():
             self._projector_status.setText(
                 "Move accepted, but no calibrated projector is available."
@@ -5516,8 +5456,6 @@ class CameraWindow(QMainWindow):
                 "Accepted Offline move; physical marking is waiting for "
                 "White-side orientation."
             )
-            return
-        if self._camera_only_calibration:
             return
         if self._calibration_result is None or not self._open_projector():
             return
@@ -5640,12 +5578,6 @@ class CameraWindow(QMainWindow):
             self._projector_status.setText(
                 f"Lichess move {move_name} is pending until White-side "
                 "orientation is resolved."
-            )
-            return False
-        if self._camera_only_calibration:
-            self._projector_status.setText(
-                f"Lichess move {move_name} is pending; physical projection "
-                "is unavailable."
             )
             return False
         if self._calibration_result is None or not self._open_projector():
@@ -5913,12 +5845,6 @@ class CameraWindow(QMainWindow):
             self._illegal_correction_projection_active
             or self._illegal_correction_blackout_pending
         ):
-            return
-        if self._camera_only_calibration:
-            self._projector_status.setText(
-                "Illegal move marked in red on the UI; physical projection "
-                "is unavailable."
-            )
             return
         if self._calibration_result is None or not self._open_projector():
             self._projector_status.setText(
@@ -6305,12 +6231,6 @@ class CameraWindow(QMainWindow):
             if len(successor_matches) > 1
             else "Reconciliation found mismatching physical squares."
         )
-        if self._camera_only_calibration:
-            self._projector_status.setText(
-                "Reconciliation mismatches are listed in the UI; physical "
-                "projection is unavailable."
-            )
-            return
         if self._calibration_result is None or not self._open_projector():
             self._projector_status.setText(
                 "Reconciliation mismatches are listed in the UI, but no "
@@ -6635,9 +6555,9 @@ class CameraWindow(QMainWindow):
             return
         self._startup_offline_reference_refresh_pending = False
         self._begin_physical_reconciliation(
-            "Restored Offline game; preparing a clean move reference."
+            "Restored Offline game; checking physical occupancy against the "
+            "saved position."
         )
-        self._queue_clean_reconciliation_reference_capture()
 
     def _persist_game_state(self) -> None:
         self._settings.setValue(_GAME_MODE_SETTING, self._game_mode)
@@ -6823,6 +6743,7 @@ class CameraWindow(QMainWindow):
         self._pending_offline_restore_game = None
         self._offline_mode_recovery_error = None
         self._offline_restore_requested = False
+        self._startup_offline_reference_refresh_pending = False
         self._automatic_start_reset_recovery = False
         self._activate_offline_after_reset = False
         self._offline_turn_inference_pending = False
@@ -6923,10 +6844,12 @@ class CameraWindow(QMainWindow):
             or self._activate_offline_after_reset
             or self._automatic_start_reset_recovery
             or self._offline_restore_requested
+            or self._startup_offline_reference_refresh_pending
             or self._pending_offline_restore_game is not None
         ):
             return
         self._reset_to_start_requested = False
+        self._startup_offline_reference_refresh_pending = False
         self._activate_offline_after_reset = False
         self._automatic_start_reset_recovery = False
         self._offline_restore_requested = False
@@ -8379,7 +8302,6 @@ class CameraWindow(QMainWindow):
                 "verified_available": (
                     self._verified_calibration_result is not None
                 ),
-                "camera_only": self._camera_only_calibration,
                 "camera_geometry_ready": self._camera_geometry_ready,
                 "operation_active": self._calibrator.active,
                 "quick_verification": self._calibrator.quick_verification,
@@ -8796,6 +8718,10 @@ class CameraWindow(QMainWindow):
         selected_index = self._projector_selector.currentIndex()
         if not 0 <= selected_index < len(self._screens):
             self._invalidate_calibration()
+            self._projector_status.setText(
+                "No projector display is selected; startup checks wait for "
+                "a calibrated projector."
+            )
             self._record_runtime_diagnostic(
                 "saved-calibration-unavailable",
                 "No projector display is selected.",
@@ -8808,7 +8734,7 @@ class CameraWindow(QMainWindow):
         selected_screen = self._screens[selected_index]
         projector_geometry = selected_screen.geometry()
         try:
-            result = self._calibration_store.load_matching(
+            saved = self._calibration_store.load_for_projector(
                 camera_id=self._device_key(active_device),
                 camera_resolution=(
                     camera_resolution.width(),
@@ -8822,73 +8748,201 @@ class CameraWindow(QMainWindow):
             )
         except (OSError, ValueError) as error:
             self._invalidate_calibration()
+            self._projector_status.setText(
+                f"Saved calibration could not be loaded: {error} "
+                "Start a calibration to continue."
+            )
             self._record_runtime_diagnostic(
                 "saved-calibration-load-failed",
                 str(error),
-                details={"match": "camera-and-projector"},
-            )
-            QMessageBox.warning(
-                self,
-                "Saved calibration",
-                str(error),
             )
             return
-        if result is None:
-            try:
-                result = self._calibration_store.load_matching(
-                    camera_id=self._device_key(active_device),
-                    camera_resolution=(
-                        camera_resolution.width(),
-                        camera_resolution.height(),
-                    ),
-                    projector_name=None,
-                    projector_resolution=None,
-                )
-            except (OSError, ValueError) as error:
-                self._invalidate_calibration()
-                self._record_runtime_diagnostic(
-                    "saved-calibration-load-failed",
-                    str(error),
-                    details={"match": "camera-only"},
-                )
-                QMessageBox.warning(
-                    self,
-                    "Saved calibration",
-                    str(error),
-                )
-                return
-            if result is None:
-                self._invalidate_calibration()
-                self._record_runtime_diagnostic(
-                    "saved-calibration-unavailable",
-                    "No saved calibration matches the active camera.",
-                    details={"reason": "camera-mismatch"},
-                )
-                return
-            self._activate_camera_only_calibration(result)
+        if saved is None:
+            self._invalidate_calibration()
             self._projector_status.setText(
-                "Loaded saved camera board geometry. Physical projection "
-                "is unavailable until the calibrated display returns."
+                "No saved calibration matches the selected projector. "
+                "Start a calibration to continue."
             )
             self._record_runtime_diagnostic(
-                "saved-calibration-loaded",
+                "saved-calibration-unavailable",
                 self._projector_status.text(),
-                details={"match": "camera-only"},
+                details={"reason": "hardware-mismatch"},
             )
             return
 
-        self._activate_calibration_result(result)
+        occupied_squares = CameraWindow._recovery_occupied_squares(self)
+        self._activate_calibration_result(
+            saved.result,
+            live_verified=False,
+            camera_changed=not saved.camera_matches,
+            recovery_occupied_squares=occupied_squares,
+        )
         self._projector_status.setText(
-            "Loaded the matching saved projector calibration. "
-            "Recalibrate if the board plane or hardware moved."
+            "Loaded the saved calibration; verifying the live camera grid "
+            "before startup checks."
+            if saved.camera_matches
+            else "Loaded the saved projector calibration for a different "
+            "camera; recovering the camera grid before startup checks."
         )
         self._record_runtime_diagnostic(
             "saved-calibration-loaded",
             self._projector_status.text(),
-            details={"match": "camera-and-projector"},
+            details={
+                "match": (
+                    "camera-and-projector"
+                    if saved.camera_matches
+                    else "projector-only"
+                ),
+                "recovery_occupied_squares": len(occupied_squares),
+            },
             include_images=True,
         )
         self._restore_remembered_square()
+
+    def _recovery_occupied_squares(self) -> frozenset[tuple[int, int]]:
+        return frozenset(
+            self._physical_board_square(row, column)
+            for row, column in self._piece_synchronizer.position
+        )
+
+    def _alignment_recovery_projection_requested(
+        self,
+        pattern: ImageArray,
+        message: str,
+        details: dict[str, object],
+    ) -> None:
+        if self._calibration_result is None:
+            return
+        self._suspend_selected_square()
+        if not self._projector_window.isVisible():
+            # Opening resets the monitor to black, so recovery is requested
+            # again with a black reference taken from the open projector.
+            self._open_projector()
+            return
+        self._projector_window.set_calibration_overlays_suppressed(True)
+        try:
+            self._projector_window.show_pattern(pattern)
+        except (RuntimeError, ValueError) as error:
+            self._record_runtime_diagnostic(
+                "alignment-recovery-projection-failed",
+                str(error),
+                details=details,
+                include_images=True,
+            )
+            return
+        self._alignment_monitor.recovery_projection_shown()
+        if details.get("pattern") != "pattern" or details.get("attempt") != 1:
+            return
+        self._projector_status.setText(message)
+        self._record_runtime_diagnostic(
+            "alignment-recovery-started",
+            message,
+            details=details,
+            include_images=True,
+        )
+
+    def _alignment_recovery_completed(
+        self,
+        result: CalibrationResult,
+        message: str,
+        details: dict[str, object],
+        images: dict[str, ImageArray],
+    ) -> None:
+        self._projector_window.show_black()
+        self._projector_window.set_calibration_overlays_suppressed(False)
+        self._activate_calibration_result(result)
+        save_error: str | None = None
+        saved_name: str | None = None
+        backup_name: str | None = None
+        selected_index = self._projector_selector.currentIndex()
+        if (
+            0 <= selected_index < len(self._screens)
+            and self._latest_frame is not None
+        ):
+            selected_screen = self._screens[selected_index]
+            active_device = self._devices[self._active_device_index]
+            camera_height, camera_width = self._latest_frame.shape[:2]
+            projector_geometry = selected_screen.geometry()
+            try:
+                backup_path = self._calibration_store.backup(
+                    "before-recovery"
+                )
+                backup_name = (
+                    None if backup_path is None else backup_path.name
+                )
+                saved_path = self._calibration_store.save(
+                    result,
+                    camera_name=active_device.description(),
+                    camera_id=self._device_key(active_device),
+                    camera_resolution=(camera_width, camera_height),
+                    projector_name=selected_screen.name(),
+                    projector_resolution=(
+                        projector_geometry.width(),
+                        projector_geometry.height(),
+                    ),
+                )
+            except OSError as error:
+                save_error = str(error)
+            else:
+                saved_name = saved_path.name
+        else:
+            save_error = "No camera frame or projector is available."
+        self._projector_status.setText(
+            f"{message} Saved to calibrations/{saved_name}."
+            if save_error is None
+            else f"{message} Saving the recovered calibration failed: "
+            f"{save_error}"
+        )
+        selected = details.get("selected")
+        hypothesis = (
+            selected.get("hypothesis") if isinstance(selected, dict) else None
+        )
+        self._set_calibration_indicator(
+            self._camera_calibration_indicator,
+            "Camera calibration (recovered: "
+            + ("board moved" if hypothesis == "board_moved" else "camera moved")
+            + ")",
+            "ok",
+            self._projector_status.text(),
+        )
+        self._record_runtime_diagnostic(
+            "alignment-recovery-completed",
+            self._projector_status.text(),
+            details={
+                **details,
+                "save_error": save_error,
+                "previous_calibration_backup": backup_name,
+            },
+            include_images=True,
+            additional_images=images,
+        )
+
+    def _alignment_recovery_failed(
+        self,
+        message: str,
+        details: dict[str, object],
+        images: dict[str, ImageArray],
+    ) -> None:
+        self._projector_window.show_black()
+        self._projector_window.set_calibration_overlays_suppressed(False)
+        self._invalidate_calibration()
+        self._set_calibration_indicator(
+            self._camera_calibration_indicator,
+            "Camera calibration",
+            "error",
+            message,
+        )
+        self._projector_status.setText(
+            f"Automatic alignment recovery failed: {message} The saved "
+            "calibration was kept; start a calibration to continue."
+        )
+        self._record_runtime_diagnostic(
+            "alignment-recovery-failed",
+            self._projector_status.text(),
+            details=details,
+            include_images=True,
+            additional_images=images,
+        )
 
     def _receive_video_frame(self, video_frame: QVideoFrame) -> None:
         if not video_frame.isValid():

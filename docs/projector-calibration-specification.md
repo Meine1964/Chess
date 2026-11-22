@@ -63,15 +63,14 @@ The initial calibration path is implemented with:
   patches for the standard starting position.
 - Up to two bounded local-mesh refinement iterations.
 - Calibrated 8x8 grid and 64 inset-square projection modes.
-- A successful calibration or validation displays its final calibrated grid
-  for five seconds, then automatically returns the projector to black. A grid
-  opened manually from the projector controls remains visible until the user
-  changes the projection. Restoration of any remembered square is deferred
-  until the automatic completion preview has finished.
+- A successful calibration or validation returns the projector to black
+  immediately, without a completion grid preview, resumes alignment
+  monitoring, and restores any remembered square. A grid opened manually from
+  the projector controls remains visible until the user changes the
+  projection.
 - Game clocks, results, and the board-edge occlusion/activity indicator shall
-  not be painted over any calibration capture, validation target, or the final
-  five-second grid preview. Normal overlays resume after the preview, failure,
-  or cancellation.
+  not be painted over any calibration capture or validation target. Normal
+  overlays resume on success, failure, or cancellation.
 - Automatic storage of the latest successful calibration in
   `calibrations/latest.json`.
 - Strict restoration of the saved calibration when camera identifier, camera

@@ -867,10 +867,10 @@ setups:
     frames, returns the projector to black, and performs rough-fit processing
     while black. Cropped Gray patterns normally average two synchronized
     frames and fall back to three-frame averaging after 250 ms.
-15. The successful calibration grid remains visible for five seconds before
-    returning to black and restoring any remembered square.
+15. A successful calibration returns the projector to black immediately, with
+    no completion grid preview, and restores any remembered square.
 16. Game clocks, results, and the board-edge occlusion/activity indicator are
-    suppressed throughout calibration and its completion preview.
+    suppressed throughout calibration.
 17. Grid and all-square test patterns are direct actions in the Projector menu
     after a separator.
 

@@ -1,4 +1,6 @@
 import json
+import shutil
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -7,6 +9,12 @@ import numpy as np
 from .board_detector import BoardDetection
 from .calibration_controller import CalibrationResult
 from .projector_calibration import MappingResult, ValidationResult
+
+
+@dataclass(frozen=True)
+class SavedCalibration:
+    result: CalibrationResult
+    camera_matches: bool
 
 
 class CalibrationStore:
@@ -89,14 +97,14 @@ class CalibrationStore:
             ) from error
         return destination
 
-    def load_matching(
+    def load_for_projector(
         self,
         *,
         camera_id: str,
         camera_resolution: tuple[int, int],
-        projector_name: str | None,
-        projector_resolution: tuple[int, int] | None,
-    ) -> CalibrationResult | None:
+        projector_name: str,
+        projector_resolution: tuple[int, int],
+    ) -> SavedCalibration | None:
         source = self._root / "latest.json"
         if not source.exists():
             return None
@@ -113,22 +121,15 @@ class CalibrationStore:
             camera = metadata["camera"]
             projector = metadata["projector"]
             if (
-                camera["id"] != camera_id
-                or (camera["width"], camera["height"]) != camera_resolution
-                or (
-                    projector_name is not None
-                    and projector["name"] != projector_name
-                )
-                or (
-                    projector_resolution is not None
-                    and (
-                        projector["width"],
-                        projector["height"],
-                    )
-                    != projector_resolution
-                )
+                projector["name"] != projector_name
+                or (projector["width"], projector["height"])
+                != projector_resolution
             ):
                 return None
+            camera_matches = (
+                camera["id"] == camera_id
+                and (camera["width"], camera["height"]) == camera_resolution
+            )
 
             board = metadata["board"]
             mapping = metadata["mapping"]
@@ -186,7 +187,7 @@ class CalibrationStore:
                 method=str(board["method"]),
                 grid_alignment=1.0,
             )
-            return CalibrationResult(
+            result = CalibrationResult(
                 board_detection=detection,
                 mapping=MappingResult(
                     camera_grid=camera_grid,
@@ -216,6 +217,21 @@ class CalibrationStore:
             raise ValueError(
                 f"Saved projector calibration in {source} is invalid: {error}"
             ) from error
+        return SavedCalibration(result=result, camera_matches=camera_matches)
+
+    def backup(self, prefix: str) -> Path | None:
+        source = self._root / "latest.json"
+        if not source.exists():
+            return None
+        timestamp = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%f%z")
+        destination = self._root / f"{prefix}-{timestamp}.json"
+        try:
+            shutil.copy2(source, destination)
+        except OSError as error:
+            raise OSError(
+                f"Could not back up projector calibration {source}: {error}"
+            ) from error
+        return destination
 
     def invalidate(self) -> Path | None:
         source = self._root / "latest.json"

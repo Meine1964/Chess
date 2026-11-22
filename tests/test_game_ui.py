@@ -910,12 +910,25 @@ def test_completed_starting_reset_replaces_occupancy_overlay() -> None:
         _board_quarter_turns=0,
         _persist_move_reference=MagicMock(),
         _occupancy_status=MagicMock(),
+        _startup_offline_reference_refresh_pending=True,
+        _offline_restore_requested=True,
+        _reconciliation_requested=True,
+        _reconciliation_blackout_pending=True,
+        _reconciliation_reference_acceptance_pending=False,
+        _reconciliation_blackout_generation=4,
+        _reconcile_button=MagicMock(),
     )
 
     CameraWindow._complete_starting_position_reset(window, occupied)
 
     board_widget.set_occupied_squares.assert_called_once_with(occupied)
     assert window._illegal_correction_last_projected_move is None
+    assert window._startup_offline_reference_refresh_pending is False
+    assert window._offline_restore_requested is False
+    assert window._reconciliation_requested is False
+    assert window._reconciliation_blackout_pending is False
+    assert window._reconciliation_blackout_generation == 5
+    board_widget.set_reconciliation_squares.assert_called_once_with(())
 
 
 def test_provisional_starting_occupancy_reports_fast_confirmation() -> None:
@@ -1035,7 +1048,7 @@ def test_pending_turn_inference_is_restored_with_matching_position() -> None:
     assert window._startup_offline_reference_refresh_pending is True
 
 
-def test_restored_offline_game_starts_clean_reference_refresh() -> None:
+def test_restored_offline_game_compares_occupancy_before_reference() -> None:
     from types import SimpleNamespace
     from unittest.mock import MagicMock
 
@@ -1049,9 +1062,90 @@ def test_restored_offline_game_starts_clean_reference_refresh() -> None:
 
     assert window._startup_offline_reference_refresh_pending is False
     window._begin_physical_reconciliation.assert_called_once_with(
-        "Restored Offline game; preparing a clean move reference."
+        "Restored Offline game; checking physical occupancy against the "
+        "saved position."
     )
-    window._queue_clean_reconciliation_reference_capture.assert_called_once_with()
+    window._queue_clean_reconciliation_reference_capture.assert_not_called()
+
+
+def test_startup_checks_wait_for_live_camera_grid_verification() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    window = SimpleNamespace(
+        _latest_frame=object(),
+        _calibration_result=object(),
+        _calibrator=SimpleNamespace(active=False),
+        _camera_geometry_ready=False,
+        _occupancy_status=MagicMock(),
+        _startup_offline_reference_refresh_pending=True,
+        _start_pending_offline_reference_refresh=MagicMock(),
+    )
+
+    CameraWindow._update_occupancy(window)
+
+    window._start_pending_offline_reference_refresh.assert_not_called()
+    window._occupancy_status.setText.assert_called_once_with(
+        "Occupancy waiting for live camera-grid verification."
+    )
+
+
+def test_live_camera_grid_check_enables_saved_calibration() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    window = SimpleNamespace(
+        _camera_geometry_ready=False,
+        _projector_status=MagicMock(),
+        _reset_occupancy=MagicMock(),
+    )
+
+    CameraWindow._camera_grid_checked(window)
+
+    assert window._camera_geometry_ready is True
+    window._reset_occupancy.assert_called_once()
+
+
+def test_non_starting_occupancy_does_not_attempt_white_side_detection() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    from src.chess_camera.chess_position import starting_occupied_squares
+
+    occupied = set(starting_occupied_squares())
+    occupied.discard((6, 4))
+    occupied.add((4, 4))
+    detector = MagicMock()
+    detector.observe.return_value = SimpleNamespace(
+        state="stable",
+        result=SimpleNamespace(occupied_squares=frozenset(occupied)),
+    )
+    window = SimpleNamespace(
+        _automatic_start_reset=True,
+        _lichess_game_controller=None,
+        _latest_frame=object(),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(camera_grid=object())
+        ),
+        _game_mode="diagnostic",
+        _legal_game=LegalGame(),
+        _piece_synchronizer=SimpleNamespace(position={}),
+        _piece_side_orientation_needs_detection=True,
+        _automatic_start_occupancy_detector=detector,
+        _board_quarter_turns=1,
+        _piece_status=MagicMock(),
+        _complete_starting_position_reset=MagicMock(),
+    )
+
+    with patch(
+        "src.chess_camera.camera_app.detect_starting_position_orientation",
+    ) as detect_side:
+        detected = CameraWindow._detect_automatic_starting_position(window)
+
+    assert detected is False
+    detect_side.assert_not_called()
+    window._piece_status.setText.assert_not_called()
+    window._complete_starting_position_reset.assert_not_called()
 
 
 def test_lichess_authority_cancels_stale_offline_recovery() -> None:

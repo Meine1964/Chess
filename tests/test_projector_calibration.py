@@ -478,41 +478,18 @@ def test_new_calibration_requires_orientation_redetection() -> None:
 
     assert window._board_orientation_needs_detection is True
     assert window._piece_side_orientation_needs_detection is True
+    assert window._camera_geometry_ready is True
 
-
-def test_calibration_grid_preview_returns_to_black() -> None:
-    from types import SimpleNamespace
-    from unittest.mock import MagicMock
-
-    from src.chess_camera.camera_app import CameraWindow
-
-    projector = SimpleNamespace(
-        output_mode="grid",
-        show_black=MagicMock(),
-        set_calibration_overlays_suppressed=MagicMock(),
-    )
-    window = SimpleNamespace(
-        _calibration_grid_preview_generation=3,
-        _projector_window=projector,
-        _alignment_monitor=MagicMock(),
-        _projector_status=MagicMock(),
-        _restore_remembered_square=MagicMock(),
+    CameraWindow._activate_calibration_result(
+        window,
+        result,
+        live_verified=False,
     )
 
-    CameraWindow._finish_calibration_grid_preview(window, 3)
-
-    projector.show_black.assert_called_once_with()
-    projector.set_calibration_overlays_suppressed.assert_called_once_with(
-        False
-    )
-    window._alignment_monitor.set_black.assert_called_once_with()
-    window._projector_status.setText.assert_called_once_with(
-        "Calibration grid preview finished; projector returned to black."
-    )
-    window._restore_remembered_square.assert_called_once_with()
+    assert window._camera_geometry_ready is False
 
 
-def test_completed_calibration_schedules_five_second_grid_preview() -> None:
+def test_completed_calibration_returns_to_black_without_grid_preview() -> None:
     from types import SimpleNamespace
     from unittest.mock import MagicMock, patch
 
@@ -520,12 +497,11 @@ def test_completed_calibration_schedules_five_second_grid_preview() -> None:
 
     window = SimpleNamespace(
         _activate_calibration_result=MagicMock(),
-        _calibration_grid_preview_generation=0,
         _alignment_monitor=MagicMock(),
         _calibration_progress=MagicMock(),
         _latest_frame=None,
-        _finish_calibration_grid_preview=MagicMock(),
         _projector_window=MagicMock(),
+        _restore_remembered_square=MagicMock(),
     )
 
     with patch(
@@ -533,66 +509,13 @@ def test_completed_calibration_schedules_five_second_grid_preview() -> None:
     ) as single_shot:
         CameraWindow._projector_calibration_completed(window, object())
 
-    single_shot.assert_called_once()
-    delay, callback = single_shot.call_args.args
-    assert delay == 5000
-    callback()
-    window._finish_calibration_grid_preview.assert_called_once_with(1)
-
-
-def test_stale_calibration_grid_timer_keeps_manual_grid() -> None:
-    from types import SimpleNamespace
-    from unittest.mock import MagicMock
-
-    from src.chess_camera.camera_app import CameraWindow
-
-    projector = SimpleNamespace(
-        output_mode="grid",
-        show_black=MagicMock(),
-        set_calibration_overlays_suppressed=MagicMock(),
+    single_shot.assert_not_called()
+    window._projector_window.show_black.assert_called_once_with()
+    window._projector_window.set_calibration_overlays_suppressed.assert_called_once_with(
+        False
     )
-    window = SimpleNamespace(
-        _calibration_grid_preview_generation=4,
-        _projector_window=projector,
-        _alignment_monitor=MagicMock(),
-        _projector_status=MagicMock(),
-    )
-
-    CameraWindow._finish_calibration_grid_preview(window, 3)
-
-    projector.show_black.assert_not_called()
-    window._alignment_monitor.set_black.assert_not_called()
-
-
-def test_loaded_camera_geometry_requires_orientation_redetection() -> None:
-    from types import SimpleNamespace
-    from unittest.mock import MagicMock
-
-    from src.chess_camera.camera_app import CameraWindow
-
-    result = SimpleNamespace()
-    window = SimpleNamespace(
-        _piece_synchronizer=SimpleNamespace(initialized=True),
-        _suspend_selected_square=MagicMock(),
-        _reset_occupancy=MagicMock(),
-        _projector_window=MagicMock(),
-        _board_widget=MagicMock(),
-        _reset_pieces_button=MagicMock(),
-        _reconcile_button=MagicMock(),
-        _show_grid_button=MagicMock(),
-        _show_squares_button=MagicMock(),
-        _quick_verify_button=MagicMock(),
-        _validate_calibration_button=MagicMock(),
-        _alignment_monitor=MagicMock(),
-        _set_calibration_indicator=MagicMock(),
-        _camera_calibration_indicator=object(),
-        _projector_calibration_indicator=object(),
-    )
-
-    CameraWindow._activate_camera_only_calibration(window, result)
-
-    assert window._board_orientation_needs_detection is True
-    assert window._piece_side_orientation_needs_detection is True
+    window._alignment_monitor.set_black.assert_called_once_with()
+    window._restore_remembered_square.assert_called_once_with()
 
 
 def test_parity_detection_does_not_persist_incomplete_orientation() -> None:
@@ -704,7 +627,6 @@ def test_square_projection_waits_for_white_side_orientation() -> None:
 
     window = SimpleNamespace(
         _calibration_result=object(),
-        _camera_only_calibration=False,
         _piece_side_orientation_needs_detection=True,
         _projector_status=MagicMock(),
         _record_runtime_diagnostic=MagicMock(),
@@ -1334,7 +1256,6 @@ def test_reconciliation_projects_and_draws_every_mismatch(
         _board_widget=board_widget,
         _piece_status=MagicMock(),
         _occupancy_status=MagicMock(),
-        _camera_only_calibration=False,
         _open_projector=MagicMock(return_value=True),
         _physical_board_square=lambda row, column: (row, column),
         _projector_window=projector,
@@ -2648,33 +2569,31 @@ def test_calibration_store_persists_mesh_and_validation(tmp_path) -> None:
         (1280, 720),
     )
 
-    loaded = CalibrationStore(tmp_path).load_matching(
+    loaded = CalibrationStore(tmp_path).load_for_projector(
         camera_id="camera-id",
         camera_resolution=(1920, 1080),
         projector_name="Projector",
         projector_resolution=(1280, 720),
     )
     assert loaded is not None
+    assert loaded.camera_matches
     np.testing.assert_allclose(
-        loaded.mapping.projector_grid,
+        loaded.result.mapping.projector_grid,
         detection.grid_points,
     )
-    camera_only = CalibrationStore(tmp_path).load_matching(
-        camera_id="camera-id",
-        camera_resolution=(1920, 1080),
-        projector_name=None,
-        projector_resolution=None,
+    changed_camera = CalibrationStore(tmp_path).load_for_projector(
+        camera_id="different-camera",
+        camera_resolution=(1280, 720),
+        projector_name="Projector",
+        projector_resolution=(1280, 720),
     )
-    assert camera_only is not None
-    np.testing.assert_allclose(
-        camera_only.mapping.camera_grid,
-        detection.grid_points,
-    )
+    assert changed_camera is not None
+    assert not changed_camera.camera_matches
     assert (
-        CalibrationStore(tmp_path).load_matching(
-            camera_id="different-camera",
+        CalibrationStore(tmp_path).load_for_projector(
+            camera_id="camera-id",
             camera_resolution=(1920, 1080),
-            projector_name="Projector",
+            projector_name="Other projector",
             projector_resolution=(1280, 720),
         )
         is None
@@ -2693,3 +2612,74 @@ def test_calibration_store_archives_invalidated_mapping(tmp_path) -> None:
     assert archived.read_text(encoding="utf-8") == '{"schema_version": 1}'
     assert not source.exists()
     assert store.saved_projector_display() is None
+
+
+def test_calibration_store_backs_up_mapping_before_replacement(
+    tmp_path,
+) -> None:
+    store = CalibrationStore(tmp_path)
+    assert store.backup("before-recovery") is None
+    source = tmp_path / "latest.json"
+    source.write_text('{"schema_version": 1}', encoding="utf-8")
+
+    backup = store.backup("before-recovery")
+
+    assert backup is not None
+    assert backup.name.startswith("before-recovery-")
+    assert backup.read_text(encoding="utf-8") == '{"schema_version": 1}'
+    assert source.exists()
+
+
+def test_recovery_excludes_occupied_physical_squares() -> None:
+    from types import SimpleNamespace
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    piece = object()
+    window = SimpleNamespace(
+        _piece_synchronizer=SimpleNamespace(
+            position={(4, 2): piece, (5, 3): piece}
+        ),
+        _physical_board_square=lambda row, column: (7 - row, 7 - column),
+    )
+
+    assert CameraWindow._recovery_occupied_squares(window) == frozenset(
+        {(3, 5), (2, 4)}
+    )
+
+
+def test_failed_alignment_recovery_is_reported_without_dialog() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    window = SimpleNamespace(
+        _projector_window=MagicMock(),
+        _invalidate_calibration=MagicMock(),
+        _set_calibration_indicator=MagicMock(),
+        _camera_calibration_indicator=object(),
+        _projector_status=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
+    )
+    window._projector_status.text.return_value = "status"
+    images = {"recovery-black": np.zeros((4, 4), dtype=np.uint8)}
+
+    with patch("src.chess_camera.camera_app.QMessageBox") as message_box:
+        CameraWindow._alignment_recovery_failed(
+            window,
+            "No match.",
+            {"attempts": 5},
+            images,
+        )
+
+    assert not message_box.mock_calls
+    window._projector_window.show_black.assert_called_once_with()
+    window._invalidate_calibration.assert_called_once_with()
+    window._record_runtime_diagnostic.assert_called_once_with(
+        "alignment-recovery-failed",
+        "status",
+        details={"attempts": 5},
+        include_images=True,
+        additional_images=images,
+    )
