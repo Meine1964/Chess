@@ -51,6 +51,9 @@ advances the authoritative Offline `LegalGame`.
 
 - The control window shall show both Offline clock values and whether the
   clock is running or paused.
+- Below one hour, clock values shall use `minutes:seconds`. At one hour or
+  above, they shall use `hours.minutes:seconds`, with two-digit minutes and
+  seconds within the hour.
 - While enabled in Offline mode, project both clocks using the existing
   calibrated edge-clock geometry, orientation, perspective, parallax, and
   stroke compensation.
@@ -111,4 +114,4 @@ Validation:
 
 - Offline clock, game UI, and projector behavior is covered by focused model,
   move-acceptance, timeout, persistence, and projection tests.
-- Current full repository quality gate: 426 passed.
+- Current full repository quality gate: 451 passed.

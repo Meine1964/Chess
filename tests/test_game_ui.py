@@ -665,7 +665,7 @@ def test_starting_board_automatically_resets_saved_offline_game() -> None:
     assert window._game_mode == "diagnostic"
 
 
-def test_disabled_automatic_start_reset_preserves_recovery_prompt() -> None:
+def test_disabled_automatic_start_reset_preserves_pending_recovery() -> None:
     from types import SimpleNamespace
     from unittest.mock import MagicMock
 
@@ -697,6 +697,87 @@ def test_disabled_automatic_start_reset_preserves_recovery_prompt() -> None:
     assert window._pending_offline_restore_game is not None
     assert window._automatic_start_reset_recovery is False
     assert window._activate_offline_after_reset is False
+
+
+def test_pending_startup_offline_recovery_is_non_modal() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    window = SimpleNamespace(
+        _automatic_start_reset_recovery=False,
+        _pending_offline_restore_game=LegalGame(),
+        _offline_mode_recovery_error=None,
+        _piece_status=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
+    )
+
+    CameraWindow._report_pending_startup_offline_recovery(window)
+
+    message = (
+        "A saved Offline game requires recovery. Select Offline mode to "
+        "choose a recovery action."
+    )
+    window._piece_status.setText.assert_called_once_with(message)
+    window._record_runtime_diagnostic.assert_called_once_with(
+        "offline-recovery-pending",
+        message,
+    )
+
+
+def test_failed_automatic_startup_reset_does_not_open_dialog() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    window = SimpleNamespace(
+        _reset_to_start_requested=True,
+        _automatic_start_reset_recovery=True,
+        _activate_offline_after_reset=True,
+        _offline_mode_recovery_error=None,
+        _piece_status=MagicMock(),
+        _occupancy_status=MagicMock(),
+    )
+
+    with patch(
+        "src.chess_camera.camera_app.QTimer.singleShot"
+    ) as single_shot:
+        CameraWindow._complete_starting_position_reset(
+            window,
+            frozenset(),
+        )
+
+    single_shot.assert_not_called()
+    assert window._automatic_start_reset_recovery is False
+    assert window._activate_offline_after_reset is False
+    assert window._offline_mode_recovery_error is not None
+    assert "Select Offline mode" in window._offline_mode_recovery_error
+
+
+def test_explicit_offline_selection_opens_pending_recovery_dialog() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    selector = MagicMock()
+    selector.itemData.return_value = "offline-game"
+    synchronizer = MagicMock()
+    synchronizer.position = {}
+    window = SimpleNamespace(
+        _game_mode_selector=selector,
+        _piece_synchronizer=synchronizer,
+        _legal_game=LegalGame(),
+        _game_mode="diagnostic",
+        _sync_game_mode_actions=MagicMock(),
+        _update_turn_indicator=MagicMock(),
+        _pending_offline_restore_game=LegalGame(),
+        _offline_mode_recovery_error="Saved Offline recovery is pending.",
+        _automatic_start_reset=True,
+        _show_offline_mode_recovery_dialog=MagicMock(),
+        _begin_automatic_offline_start_reset=MagicMock(),
+    )
+
+    CameraWindow._game_mode_changed(window, 1)
+
+    window._show_offline_mode_recovery_dialog.assert_called_once_with()
+    window._begin_automatic_offline_start_reset.assert_not_called()
 
 
 def test_stable_starting_occupancy_triggers_automatic_reset() -> None:
@@ -1237,6 +1318,15 @@ def test_lichess_game_state_message_reports_clocks_and_result() -> None:
 def test_projected_lichess_clocks_use_fixed_minute_width() -> None:
     assert _format_projected_lichess_clock(9 * 60_000 + 42_000) == "09:42"
     assert _format_projected_lichess_clock(10 * 60_000 + 5_000) == "10:05"
+
+
+def test_lichess_clocks_show_hours_above_one_hour() -> None:
+    assert _format_lichess_clock(59 * 60_000 + 59_000) == "59:59"
+    assert _format_lichess_clock(60 * 60_000) == "1.00:00"
+    assert _format_lichess_clock(89 * 60_000 + 20_000) == "1.29:20"
+    assert _format_projected_lichess_clock(89 * 60_000 + 20_000) == (
+        "1.29:20"
+    )
 
 
 def test_displayed_lichess_clock_counts_down_only_active_player() -> None:

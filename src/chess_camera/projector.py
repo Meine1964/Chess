@@ -227,9 +227,20 @@ class ProjectorWindow(QWidget):
         for clock in (white_clock, black_clock):
             if clock is not None and (
                 clock.count(":") != 1
-                or any(character not in "0123456789:" for character in clock)
+                or clock.count(".") > 1
+                or (
+                    "." in clock
+                    and clock.index(".") > clock.index(":")
+                )
+                or any(
+                    character not in "0123456789:."
+                    for character in clock
+                )
             ):
-                raise ValueError("Projected clocks must use digits and a colon.")
+                raise ValueError(
+                    "Projected clocks must use digits, one colon, and an "
+                    "optional hour full stop."
+                )
         if result not in (None, "1-0", "0-1", "1/2-1/2"):
             raise ValueError(
                 "The projected result must be 1-0, 0-1, or 1/2-1/2."
@@ -851,6 +862,17 @@ class ProjectorWindow(QWidget):
                         radius * stroke_scale[0],
                         radius * stroke_scale[1],
                     )
+                continue
+            if character == ".":
+                radius = min(cell_width, canonical_height) * 0.1
+                painter.drawEllipse(
+                    QPointF(
+                        left + cell_width / 2,
+                        canonical_height * 0.82,
+                    ),
+                    radius * stroke_scale[0],
+                    radius * stroke_scale[1],
+                )
                 continue
             ProjectorWindow._draw_seven_segment_digit(
                 painter,

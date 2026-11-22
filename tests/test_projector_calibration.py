@@ -1054,6 +1054,109 @@ def test_reconciliation_adopts_current_lichess_position_and_history() -> None:
     assert window._reconciliation_requested is False
 
 
+def test_reconciliation_attaches_and_submits_unique_local_reply() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+    from src.chess_camera.chess_position import PiecePositionSynchronizer
+    from src.chess_camera.legal_game import LegalGame
+    from src.chess_camera.lichess_client import (
+        LichessGameFull,
+        LichessGameState,
+        LichessPlayer,
+    )
+    from src.chess_camera.reconciliation import matching_legal_successors
+
+    initial_fen = "4k3/3b3p/8/8/8/8/P3B3/4K3 b - - 0 1"
+    server_game = LegalGame(initial_fen)
+    opponent = server_game.apply_move((1, 3), (3, 1))
+    reply_game = LegalGame(opponent.fen)
+    reply = reply_game.apply_move((6, 4), (3, 1))
+    game = LichessGameFull(
+        "game1234",
+        initial_fen,
+        LichessPlayer("white", "Local", 1500),
+        LichessPlayer("black", "Remote", 1500),
+        LichessGameState(
+            ("d7b5",),
+            opponent.fen,
+            "white",
+            0,
+            0,
+            0,
+            0,
+            "started",
+            None,
+            "*",
+        ),
+    )
+    match = matching_legal_successors(
+        opponent.fen,
+        frozenset(reply.position),
+        {(3, 1): "white", (6, 4): "empty"},
+        allow_promotion=True,
+    )[0]
+    synchronizer = PiecePositionSynchronizer()
+    synchronizer.restore(LegalGame(initial_fen).position)
+    tracker = MagicMock()
+    tracker.reference = None
+    begin_submission = MagicMock(return_value=True)
+    board_widget = MagicMock()
+    window = SimpleNamespace(
+        _physical_reconciliation_target=MagicMock(
+            return_value=(opponent.position, game)
+        ),
+        _latest_frame=np.zeros((20, 20, 3), dtype=np.uint8),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(camera_grid=np.zeros((9, 9, 2)))
+        ),
+        _lichess_player_color="white",
+        _lichess_opponent_name="Remote",
+        _lichess_client=object(),
+        _lichess_submission_thread=None,
+        _pending_lichess_local_move=None,
+        _pending_promotion_selection=None,
+        _promotion_mode="auto-queen",
+        _reference_move_tracker=tracker,
+        _board_quarter_turns=0,
+        _piece_synchronizer=synchronizer,
+        _legal_game=LegalGame(),
+        _lichess_game_controller=None,
+        _cancel_offline_recovery_for_lichess=MagicMock(),
+        _board_widget=board_widget,
+        _piece_status=MagicMock(),
+        _persist_piece_position=MagicMock(),
+        _lichess_sync_status=MagicMock(),
+        _reconciliation_requested=True,
+        _reconciliation_blackout_pending=False,
+        _reconciliation_reference_acceptance_pending=False,
+        _reconciliation_blackout_generation=2,
+        _reconcile_button=MagicMock(),
+        _black_projector=MagicMock(),
+        _occupancy_detector=MagicMock(),
+        _occupancy_status=MagicMock(),
+        _begin_lichess_local_move_submission=begin_submission,
+    )
+
+    CameraWindow._update_physical_reconciliation(
+        window,
+        frozenset(reply.position),
+    )
+
+    assert window._lichess_game_controller.server_moves == ("d7b5",)
+    assert window._lichess_game_controller.physical_fen == opponent.fen
+    assert synchronizer.position == opponent.position
+    tracker.stage_accepted_reference.assert_called_once()
+    begin_submission.assert_called_once_with(
+        ((6, 4), (3, 1)),
+        "e2b5",
+        match.result,
+    )
+    board_widget.set_reconciliation_squares.assert_called_with(())
+    assert window._reconciliation_requested is False
+
+
 def test_stop_reconciliation_waits_for_clean_reference_frame(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

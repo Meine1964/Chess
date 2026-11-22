@@ -98,6 +98,21 @@ def _accepted_update(
     return update
 
 
+def test_staged_reference_remains_provisional_until_commit() -> None:
+    tracker = ReferenceMoveTracker()
+    reference = _empty_board()
+    moved = reference.copy()
+    _draw_piece(moved, (3, 1), (255, 255, 255))
+    move = ((6, 4), (3, 1))
+    tracker.set_reference(reference, _camera_grid(), 0)
+
+    tracker.stage_accepted_reference(moved, _camera_grid(), 0, move)
+
+    np.testing.assert_array_equal(tracker.reference, reference)
+    tracker.commit_accepted(move)
+    np.testing.assert_allclose(tracker.reference, moved, atol=3)
+
+
 def test_required_signature_accepts_exact_geometric_relocation() -> None:
     game = LegalGame(
         "rnb1k2r/ppB1nppp/1bp1p3/3p4/3P4/2P2NP1/"

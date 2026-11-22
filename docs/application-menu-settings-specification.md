@@ -165,13 +165,15 @@ shall report that stability confirmation is underway. The optimized passive
 check shall normally complete within one second after the board becomes clear,
 without weakening the normal occupancy and move-verification detectors. When
 complete, the UI shall explicitly report that the automatic reset succeeded
-and White may move. When disabled, the application shall show the existing recovery
-dialog without attempting an automatic reset. While automatic reset is
-enabled, the Camera menu shall hide **Reset pieces to starting position**
-because the command is redundant. The command shall reappear when automatic
-reset is disabled. The recovery dialog's **Reset to starting position** choice
-shall remain available as a fallback after an automatic check does not find the
-standard setup.
+and White may move. When disabled, an incompatible saved Offline game shall
+remain pending without an automatic reset or startup dialog. Startup shall
+report pending recovery non-modally in the application status. While automatic
+reset is enabled, the Camera menu shall hide **Reset pieces to starting
+position** because the command is redundant. The command shall reappear when
+automatic reset is disabled. If an automatic startup check does not find the
+standard setup, it shall also report pending recovery non-modally. The recovery
+dialog, including its **Reset to starting position** choice, may open only
+after the user explicitly selects Offline mode to resolve the mismatch.
 
 The physical turn-indicator setting shall persist and default to enabled. When
 enabled during an active Offline or Lichess game, the projector shall show one
@@ -315,16 +317,17 @@ interaction rows.
 12. A compatible saved Offline legal game reopens in Offline legal mode.
 13. An incompatible saved Offline legal game first performs automatic
     starting-position verification when that setting is enabled; a confirmed
-    start activates Offline legal mode, while any other setup produces the
-    explicit recovery dialog and is never silently converted to Board setup /
-    diagnostic.
+    start activates Offline legal mode, while any other setup remains pending
+    in Board setup / diagnostic with non-modal status. Startup never opens the
+    recovery dialog.
 14. Disabling automatic starting-position reset restores the Camera-menu reset
-    action and bypasses the automatic verification attempt.
+    action and bypasses the automatic verification attempt. The recovery
+    dialog opens only after explicit Offline-mode selection.
 
 ## 7. Validation Status
 
 The implemented menu bar exposes File, Camera, Game, Projector, and
-Calibration menus. The complete automated suite contains 426 passing tests,
+Calibration menus. The complete automated suite contains 451 passing tests,
 including the direct placement and ordering of both projector test-pattern
 actions, transactional selector-copy behavior, existing UI
 state transitions, reconciliation controls, and the readable interaction-font

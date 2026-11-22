@@ -128,7 +128,11 @@ from .projector_calibration import (
     detect_board_orientation,
     square_polygons,
 )
-from .reconciliation import compare_physical_occupancy
+from .reconciliation import (
+    LegalSuccessorMatch,
+    compare_physical_occupancy,
+    matching_legal_successors,
+)
 from .reference_move_tracker import (
     ReferenceMoveTracker,
     ReferenceTrackerUpdate,
@@ -150,7 +154,6 @@ _ALIGNMENT_REMAP_DELAY_MILLISECONDS = 750
 _ALIGNMENT_REMAP_RETRY_MILLISECONDS = 250
 _BOARD_EDGE_STUCK_DIAGNOSTIC_SECONDS = 3.0
 _BOARD_EDGE_STUCK_REPEAT_SECONDS = 5.0
-_LICHESS_GUIDANCE_FALLBACK_MILLISECONDS = 2000
 _ILLEGAL_CORRECTION_FALLBACK_MILLISECONDS = 2000
 _ALIGNMENT_REMAP_PROTECTED_TRACKER_STATES = frozenset(
     {
@@ -368,12 +371,17 @@ def _reference_tracking_status_message(
 
 def _format_lichess_clock(milliseconds: int) -> str:
     total_seconds = max(0, milliseconds) // 1000
-    minutes, seconds = divmod(total_seconds, 60)
+    hours, remainder = divmod(total_seconds, 60 * 60)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}.{minutes:02d}:{seconds:02d}"
     return f"{minutes}:{seconds:02d}"
 
 
 def _format_projected_lichess_clock(milliseconds: int) -> str:
     clock = _format_lichess_clock(milliseconds)
+    if "." in clock:
+        return clock
     minutes, separator, seconds = clock.partition(":")
     return f"{minutes.zfill(2)}{separator}{seconds}"
 
@@ -1993,11 +2001,7 @@ class CameraWindow(QMainWindow):
             "application-started",
             "Chessboard camera application started.",
         )
-        if (
-            self._pending_offline_restore_game is not None
-            or self._offline_mode_recovery_error is not None
-        ) and not self._automatic_start_reset_recovery:
-            QTimer.singleShot(0, self._show_offline_mode_recovery_dialog)
+        self._report_pending_startup_offline_recovery()
 
     def _create_application_menus(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
@@ -5392,9 +5396,14 @@ class CameraWindow(QMainWindow):
             if self._automatic_start_reset_recovery:
                 self._automatic_start_reset_recovery = False
                 self._activate_offline_after_reset = False
-                QTimer.singleShot(
-                    0,
-                    self._show_offline_mode_recovery_dialog,
+                self._offline_mode_recovery_error = (
+                    "The saved Offline game is still pending because the "
+                    "physical board is not in the standard starting "
+                    "position. Select Offline mode to choose a recovery "
+                    "action."
+                )
+                self._piece_status.setText(
+                    self._offline_mode_recovery_error
                 )
             elif self._activate_offline_after_reset:
                 self._reset_to_start_requested = True
@@ -5678,8 +5687,7 @@ class CameraWindow(QMainWindow):
         self._lichess_guidance_squares = guidance_squares
         self._lichess_guidance_activity_logged = False
         status_message = (
-            f"Projecting pending Lichess move {move_name} until entry or "
-            "fallback blackout."
+            f"Projecting pending Lichess move {move_name} until board entry."
         )
         self._projector_status.setText(status_message)
         self._record_runtime_diagnostic(
@@ -5698,14 +5706,6 @@ class CameraWindow(QMainWindow):
                 "generation": self._lichess_guidance_generation,
             },
             include_images=True,
-        )
-        generation = self._lichess_guidance_generation
-        QTimer.singleShot(
-            _LICHESS_GUIDANCE_FALLBACK_MILLISECONDS,
-            lambda: self._begin_lichess_guidance_observation_if_current(
-                generation,
-                "fallback",
-            ),
         )
         return True
 
@@ -5731,15 +5731,6 @@ class CameraWindow(QMainWindow):
                 include_images=True,
             )
         self._begin_lichess_guidance_observation("boundary-entry")
-
-    def _begin_lichess_guidance_observation_if_current(
-        self,
-        generation: int,
-        reason: str,
-    ) -> None:
-        if generation != self._lichess_guidance_generation:
-            return
-        self._begin_lichess_guidance_observation(reason)
 
     def _begin_lichess_guidance_observation(
         self,
@@ -6289,8 +6280,30 @@ class CameraWindow(QMainWindow):
                 "Reconciliation complete; accepted reference replaced.",
             )
             return
+        successor_matches = (
+            CameraWindow._reconciliation_legal_successor_matches(
+                self,
+                lichess_game,
+                physically_occupied,
+                observed_colors,
+            )
+        )
+        if (
+            len(successor_matches) == 1
+            and lichess_game is not None
+            and CameraWindow._begin_reconciled_local_reply_submission(
+                self,
+                target_position,
+                lichess_game,
+                successor_matches[0],
+            )
+        ):
+            return
         self._occupancy_status.setText(
-            "Reconciliation found mismatching physical squares."
+            "Reconciliation found multiple matching legal replies; restore "
+            "the current Lichess position."
+            if len(successor_matches) > 1
+            else "Reconciliation found mismatching physical squares."
         )
         if self._camera_only_calibration:
             self._projector_status.setText(
@@ -6320,6 +6333,92 @@ class CameraWindow(QMainWindow):
             "Projecting all occupancy mismatches in red for 2 seconds."
         )
         QTimer.singleShot(2000, self._finish_reconciliation_projection)
+
+    def _reconciliation_legal_successor_matches(
+        self,
+        lichess_game: LichessGameFull | None,
+        physically_occupied: frozenset[tuple[int, int]],
+        observed_colors: dict[tuple[int, int], PieceColorLabel] | None,
+    ) -> tuple[LegalSuccessorMatch, ...]:
+        if (
+            lichess_game is None
+            or self._lichess_player_color is None
+            or self._lichess_client is None
+            or self._lichess_submission_thread is not None
+            or self._pending_lichess_local_move is not None
+            or self._pending_promotion_selection is not None
+            or lichess_game.state.status != "started"
+        ):
+            return ()
+        server_game = LegalGame(lichess_game.state.fen)
+        if (
+            server_game.status.is_game_over
+            or server_game.status.turn != self._lichess_player_color
+        ):
+            return ()
+        return matching_legal_successors(
+            lichess_game.state.fen,
+            physically_occupied,
+            observed_colors,
+            allow_promotion=self._promotion_mode == "auto-queen",
+        )
+
+    def _begin_reconciled_local_reply_submission(
+        self,
+        target_position: Position,
+        lichess_game: LichessGameFull,
+        match: LegalSuccessorMatch,
+    ) -> bool:
+        if (
+            self._latest_frame is None
+            or self._calibration_result is None
+            or self._lichess_player_color is None
+            or self._lichess_client is None
+            or self._lichess_submission_thread is not None
+            or self._pending_lichess_local_move is not None
+        ):
+            return False
+        controller = LichessGameController(
+            lichess_game.game_id,
+            lichess_game.initial_fen,
+            self._lichess_player_color,
+            self._lichess_opponent_name,
+            physical_fen=lichess_game.state.fen,
+        )
+        update = controller.accept_server_history(lichess_game.state.moves)
+        if update.state != "synchronized":
+            return False
+        move = (match.signature.source, match.signature.destination)
+        self._reference_move_tracker.stage_accepted_reference(
+            self._latest_frame,
+            self._calibration_result.mapping.camera_grid,
+            self._board_quarter_turns,
+            move,
+        )
+        self._piece_synchronizer.restore(target_position)
+        self._legal_game = LegalGame(lichess_game.state.fen)
+        self._lichess_game_controller = controller
+        self._cancel_offline_recovery_for_lichess()
+        self._board_widget.set_pieces(target_position)
+        self._board_widget.set_occupied_squares(target_position)
+        self._board_widget.set_reconciliation_squares(())
+        self._persist_piece_position(target_position)
+        self._lichess_sync_status.setText(update.message)
+        self._reconciliation_requested = False
+        self._reconciliation_blackout_pending = False
+        self._reconciliation_reference_acceptance_pending = False
+        self._reconciliation_blackout_generation += 1
+        self._reconcile_button.setText("Reconcile physical board")
+        self._black_projector()
+        self._occupancy_detector.reset()
+        self._occupancy_status.setText(
+            "Unique legal reply recognized during reconciliation."
+        )
+        return self._begin_lichess_local_move_submission(
+            move,
+            match.signature.uci,
+            match.result,
+        )
 
     def _complete_physical_reconciliation(
         self,
@@ -6614,8 +6713,9 @@ class CameraWindow(QMainWindow):
         self._pending_offline_restore_game = LegalGame(
             self._legal_game.fen
         )
-        self._offline_mode_recovery_error = None
-        if self._automatic_start_reset:
+        if self._offline_mode_recovery_error is not None:
+            self._show_offline_mode_recovery_dialog()
+        elif self._automatic_start_reset:
             self._begin_automatic_offline_start_reset()
         else:
             self._show_offline_mode_recovery_dialog()
@@ -6633,6 +6733,26 @@ class CameraWindow(QMainWindow):
                 "Waiting for a calibrated camera to check for the standard "
                 "starting position."
             )
+
+    def _report_pending_startup_offline_recovery(self) -> None:
+        if (
+            self._automatic_start_reset_recovery
+            or (
+                self._pending_offline_restore_game is None
+                and self._offline_mode_recovery_error is None
+            )
+        ):
+            return
+        message = (
+            self._offline_mode_recovery_error
+            or "A saved Offline game requires recovery. Select Offline mode "
+            "to choose a recovery action."
+        )
+        self._piece_status.setText(message)
+        self._record_runtime_diagnostic(
+            "offline-recovery-pending",
+            message,
+        )
 
     def _show_offline_mode_recovery_dialog(self) -> None:
         target = self._pending_offline_restore_game

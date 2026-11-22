@@ -155,6 +155,22 @@ class ReferenceMoveTracker:
             self._canonical_size,
         )
 
+    def stage_accepted_reference(
+        self,
+        frame: ImageArray,
+        camera_grid: FloatArray,
+        ui_quarter_turns: int,
+        move: tuple[Square, Square],
+    ) -> None:
+        pending_reference = self.canonical_frame(
+            frame,
+            camera_grid,
+            ui_quarter_turns,
+        )
+        self.reset_activity()
+        self._candidate_move = move
+        self._pending_reference = pending_reference
+
     def set_canonical_reference(self, reference: ImageArray) -> None:
         if (
             reference.ndim != 3

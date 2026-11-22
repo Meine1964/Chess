@@ -95,24 +95,23 @@ the visible edge indicator. It shall:
   to depart;
 - suspend and clear boundary-indicator observation before changing to black so
   frames containing the entering hand cannot become a new detector baseline;
-- use a generation-guarded two-second fallback to begin blackout when entry is
-  missed; and
+- keep guidance steadily projected while no board entry or manipulation is
+  detected; and
 - after blackout settling, use the ordinary reference tracker to wait for a
   clear, stable board and verify the required move.
 
 Hand departure, board-confined changes, the completed opponent move, projector
 spill, piece silhouettes, and shadows shall therefore be handled by the same
 black-board reference-tracking path used by Offline play rather than by a
-second guidance-specific departure gate. If the black, settled image still
-matches the accepted reference, guidance shall be reprojected and the bounded
-cycle may repeat. Boundary-indicator observation shall resume with a fresh
-baseline only after guidance has been successfully reprojected or the pending
-move has been accepted and synchronization has completed. The unchanged
-accepted scene shall not reactivate the indicator. Runtime diagnostics shall
-record initial projection or reprojection, confirmed boundary entry when
-observed, blackout reason, and black-frame verification readiness once per
-lifecycle. The edge-indicator diagnostics remain the authoritative
-boundary-component measurements.
+second guidance-specific departure gate. A timer shall not black out and
+reproject an untouched pending move because that creates visible flashing. If
+the black, settled image after actual manipulation still matches the accepted
+reference, guidance shall be reprojected and boundary-indicator observation
+shall resume with a fresh baseline. The unchanged accepted scene shall not
+reactivate the indicator. Runtime diagnostics shall record initial projection
+or reprojection, confirmed boundary entry, blackout reason, and black-frame
+verification readiness once per lifecycle. The edge-indicator diagnostics
+remain the authoritative boundary-component measurements.
 
 When exactly one Lichess move is pending, its legal physical signature and
 resulting position are authoritative verification inputs, distinct from the
@@ -130,10 +129,10 @@ their ordinary candidate-ranking rules.
 Implementation status (2026-11-21): authoritative required-signature
 verification, shared boundary-detector guidance lifecycle, smooth local
 photometric-drift normalization, outer-halo entry qualification,
-entry-triggered blackout, generation-guarded fallback blackout, and decision
-diagnostics are implemented. Focused regressions cover exact `e8-f8` fallback,
+entry-triggered blackout, steady untouched guidance, and decision diagnostics
+are implemented. Focused regressions cover exact `e8-f8` verification,
 wrong-relocation rejection, halo-only activity, genuine boundary crossing,
-completed edge-piece changes, stale fallback suppression, and transition
+completed edge-piece changes, no-hand guidance stability, and transition
 diagnostics. Automatic camera measurement of projector-specific optical spill
 remains a possible later refinement rather than an acceptance dependency.
 
@@ -222,18 +221,24 @@ rotated 180 degrees. Their digit and colon content shall be scaled to 70% of
 its prior height around the clock region's unchanged center. Rotation and
 scaling shall be composed in canonical clock space before the perspective warp
 so they cannot rotate or translate the complete region around the projector
-origin. Clock digits shall use a geometric seven-segment design with a colon
-rather than depend on an operating-system font. Times below 100 minutes shall
-use a fixed two-digit minute field so both clocks allocate identical width to
-each digit regardless of whether the minute value has one or two digits. This
-visual normalization shall not change clock values, visibility, placement, or
-countdown behavior. Segment thickness, colon-dot radii, and result fraction-bar
-thickness shall compensate for the calibrated projector-pixel density at each
-clock or result quadrilateral. Compensation shall be direction-aware: vertical
-segments use the local horizontal density and horizontal segments use the
-local vertical density. The fixed White-clock, Black-clock, and center-result
-layout shall always define the density reference, regardless of whether a
-result is currently visible. The densest region in that fixed layout on each
+origin. Clock digits shall use a geometric seven-segment design rather than
+depend on an operating-system font. A time below one hour shall use
+`minutes:seconds`, for example `59:59`. At one hour or above, both on-screen
+and projected clocks shall use `hours.minutes:seconds`, for example `1.29:20`;
+minutes and seconds within the hour shall each use two digits. Projected times
+below one hour shall retain a fixed two-digit minute field so both clocks
+allocate identical width to each digit regardless of whether the minute value
+has one or two digits. The projector shall render the hour separator as one
+geometric full-stop dot and the minute/second separator as the existing colon.
+This visual normalization shall not change clock values, visibility, placement,
+or countdown behavior. Segment thickness, separator-dot radii, and result
+fraction-bar thickness shall compensate for the calibrated projector-pixel
+density at each clock or result quadrilateral. Compensation shall be
+direction-aware: vertical segments use the local horizontal density and
+horizontal segments use the local vertical density. The fixed White-clock,
+Black-clock, and center-result layout shall always define the density
+reference, regardless of whether a result is currently visible. The densest
+region in that fixed layout on each
 axis shall retain the established base thickness; regions with lower density
 shall widen inversely, subject to a conservative upper bound that prevents
 segments from merging. Showing or hiding a timeout or draw result shall not
@@ -337,6 +342,9 @@ The first implementation shall support:
 - Single-visit verification and submission of one pending opponent move
   followed by one uniquely identifiable legal local reply from the final clear
   frame only.
+- Current-position reconciliation that can adopt the authoritative opponent
+  move and submit one uniquely identifiable legal local reply already present
+  on the physical board.
 - Opponent-move projection and physical confirmation.
 - Durable UI guidance.
 - Incorrect physical-action correction.
@@ -477,7 +485,9 @@ and physical positions has not yet been established.
 The current remote position cannot be joined safely to the accepted physical
 position.
 
-No physical move shall be committed automatically in this state.
+No unexplained physical move shall be committed automatically in this state.
+The unique legal-successor adoption defined in section 7.3.1 is the only
+automatic local-move exception.
 
 ### 6.4 `synchronized`
 
@@ -595,6 +605,66 @@ piece map with the complete Lichess map, capture the settled live image as the
 accepted reference, initialize the synchronization cursor at the current
 server history, clear every red mark, and continue from the current position
 without replaying historical moves.
+
+#### 7.3.1 Reconciliation with an already executed local reply
+
+Current-position reconciliation shall also handle a physical visit in which
+the board was previously behind by one authoritative opponent move and the
+player has already executed both that opponent move and one legal local reply.
+The application shall not require the player to reconstruct the intermediate
+opponent-only position when the final physical position proves one unique
+reply safely.
+
+The current server position remains authoritative. The application shall first
+test the ordinary exact match described above. Only when that comparison has
+stable discrepancies may it test legal successors of the current server
+position, and only when all of the following are true:
+
+- The active Lichess game is non-terminal.
+- The server position says that it is the local player's turn.
+- No submission, promotion-selection, correction, or other reconciliation
+  acceptance is already pending.
+- The projector is black, the camera exposure has settled for the required
+  interval, the board is quiet, and no hand or obstruction is present.
+- The server history still has the same game identity, move tuple, and current
+  position used to generate the candidates.
+
+The application shall enumerate every supported legal local move from the
+current server position and compare each complete successor position with the
+stable live occupancy and piece-color evidence. It shall use the same
+discrepancy rules as ordinary current-position adoption. A candidate matches
+only when every occupied and empty square agrees and no square has a
+confidently detected opposite-color piece. The move identity, including any
+promotion suffix, must be unique; several legal moves that are optically
+indistinguishable remain ambiguous even when they produce the same occupancy
+and color map.
+
+When exactly one legal successor matches, the application shall:
+
+1. Adopt the current server history and position, thereby accepting the
+   server-confirmed opponent move without inferring or replaying it.
+2. Initialize the synchronization controller at that server position.
+3. Treat the uniquely matched successor as a provisional local reply and
+   enter `compound-submission`.
+4. Retain the clear final camera frame as a provisional reference and submit
+   the exact local move to Lichess exactly once.
+5. Commit the local legal position and accepted reference only after
+   authoritative submission confirmation, then clear reconciliation marks and
+   continue in `synchronized` or `game-complete`.
+
+The existing uncertain-submission rules apply if the request fails after its
+outcome may have reached Lichess. A definite rejection, changed server
+history, invalid candidate, missing required promotion choice, or loss of the
+clear settled frame shall commit neither the local reply nor its reference and
+shall continue or restart reconciliation against the newest authoritative
+server position.
+
+When zero or more than one legal successor matches, the application shall
+submit nothing, preserve the previous accepted physical state and reference,
+and remain in `reconciliation-required`. Existing red discrepancy guidance
+shall continue against the authoritative server position. Reconciliation
+shall never invent a missing opponent move, choose a reply by score ordering,
+or infer an unobservable promotion choice.
 
 While reconciliation is active, the reconciliation control shall read
 **Stop reconciliation**. Pressing it is an explicit user confirmation that the
@@ -736,9 +806,10 @@ when only fingertips enter the 64-square board area.
 The shared boundary detector may initiate blackout from the first confirmed
 entry across the calibrated board edge. Its frames and scores shall never
 update occupancy, infer a chess move, or replace the accepted reference.
-Guidance blackout shall not wait for hand departure; after entry or the
-generation-guarded fallback, black-board tracking shall handle obstruction,
-departure, settling, and final position verification.
+Guidance blackout shall not wait for hand departure; after confirmed entry,
+black-board tracking shall handle obstruction, departure, settling, and final
+position verification. Without confirmed entry or manipulation, guidance
+shall remain continuously visible.
 
 ### 10.2 Camera observation
 
@@ -1542,6 +1613,27 @@ The first ordinary-move slice is accepted when all of the following pass.
 - Explicit local rejection requests restoration to the opponent-only result;
   uncertain submission enters reconciliation.
 
+### 19.7 Reconciliation with a local reply
+
+- An exact physical match with the server position uses ordinary
+  current-position adoption before any legal successor is considered.
+- When the accepted physical state is one opponent ply behind, a clear final
+  board containing that server-confirmed move plus one uniquely matching legal
+  local reply attaches at the server position and submits only the local reply.
+- Immediate recapture is accepted when its complete final position uniquely
+  matches a legal successor, even though the intermediate opponent-only
+  position was never observed.
+- Zero matching successors retain reconciliation and submit nothing.
+- Two optically indistinguishable legal successors retain reconciliation and
+  submit nothing.
+- Promotion candidates remain ambiguous unless the exact suffix is uniquely
+  established by the configured promotion workflow.
+- A hand, obstruction, unsettled frame, projected light, or server-history
+  change prevents successor adoption.
+- A confirmed submission commits the final legal state and captured reference;
+  a definite rejection preserves the previous accepted state and reference,
+  while an uncertain outcome follows the existing submission-recovery rules.
+
 ## 20. Live Acceptance Sequence
 
 The initial live test shall use a new casual game against Stockfish:
@@ -1614,7 +1706,7 @@ promotion slices are implemented:
   until both move footprints are released, submits only a unique reply, and
   atomically commits both plies after authoritative Lichess confirmation.
 
-The current validated automated suite contains 448 passing tests. Live
+The current validated automated suite contains 455 passing tests. Live
 ordinary-move, polling, reconciliation, and guidance acceptance has been
 exercised on the target camera/projector setup. Lichess capture, castling, en
 passant, and auto-queen behavior is automated-test validated and awaits live
@@ -1637,3 +1729,6 @@ Incorrect compound attempts now distinguish a proven opponent ply from an
 incorrect or unproven one, preserve the appropriate authoritative reference,
 and project the specified two- or four-square red correction; this correction
 workflow is automated-test validated and awaits live acceptance.
+Reconciliation of a server-confirmed opponent move plus an already executed
+unique legal local reply is implemented and automated-test validated according
+to section 7.3.1; live acceptance remains pending.

@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from .chess_position import PieceCode, Position, Square, square_name
+from .legal_game import LegalGame, LegalMoveResult, LegalMoveSignature
 from .piece_color_classifier import PieceColorLabel
 
 _PIECE_NAMES = {
@@ -40,6 +41,12 @@ class ReconciliationResult:
     @property
     def mismatch_squares(self) -> tuple[Square, ...]:
         return tuple(discrepancy.square for discrepancy in self.discrepancies)
+
+
+@dataclass(frozen=True)
+class LegalSuccessorMatch:
+    signature: LegalMoveSignature
+    result: LegalMoveResult
 
 
 def compare_physical_occupancy(
@@ -108,3 +115,33 @@ def compare_physical_occupancy(
         discrepancies,
         "Reconciliation required: " + "; ".join(instructions) + ".",
     )
+
+
+def matching_legal_successors(
+    fen: str,
+    physically_occupied: frozenset[Square],
+    observed_colors: Mapping[Square, PieceColorLabel] | None = None,
+    *,
+    allow_promotion: bool,
+) -> tuple[LegalSuccessorMatch, ...]:
+    game = LegalGame(fen)
+    matches: list[LegalSuccessorMatch] = []
+    for signature in game.legal_move_signatures:
+        if (
+            not allow_promotion
+            and signature.kind in ("promotion", "capture-promotion")
+        ):
+            continue
+        preview = LegalGame(fen)
+        result = preview.apply_move(
+            signature.source,
+            signature.destination,
+            signature.promotion,
+        )
+        if compare_physical_occupancy(
+            result.position,
+            physically_occupied,
+            observed_colors,
+        ).matches:
+            matches.append(LegalSuccessorMatch(signature, result))
+    return tuple(matches)

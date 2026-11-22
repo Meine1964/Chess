@@ -172,7 +172,7 @@ def test_blackout_settling_uses_one_second_timeout() -> None:
 
 
 
-def test_pending_lichess_guidance_schedules_bounded_fallback() -> None:
+def test_pending_lichess_guidance_stays_on_without_board_entry() -> None:
     window = SimpleNamespace(
         _board_orientation_needs_detection=False,
         _piece_side_orientation_needs_detection=False,
@@ -190,7 +190,6 @@ def test_pending_lichess_guidance_schedules_bounded_fallback() -> None:
         _lichess_guidance_reprojection_pending=False,
         _resume_board_edge_activity_indicator=MagicMock(),
         _record_runtime_diagnostic=MagicMock(),
-        _begin_lichess_guidance_observation_if_current=MagicMock(),
     )
 
     with patch(
@@ -201,8 +200,7 @@ def test_pending_lichess_guidance_schedules_bounded_fallback() -> None:
             ((1, 4), (3, 4)),
         )
 
-    single_shot.assert_called_once()
-    assert single_shot.call_args.args[0] == 2000
+    single_shot.assert_not_called()
     assert window._lichess_guidance_projection_active is True
     assert window._lichess_guidance_squares == ((1, 4), (3, 4))
     window._board_widget.set_illegal_source.assert_called_once_with(None)
@@ -211,20 +209,12 @@ def test_pending_lichess_guidance_schedules_bounded_fallback() -> None:
         ((1, 4), (3, 4))
     )
     window._projector_status.setText.assert_called_once_with(
-        "Projecting pending Lichess move e7-e5 until entry or fallback "
-        "blackout."
+        "Projecting pending Lichess move e7-e5 until board entry."
     )
     assert (
         window._record_runtime_diagnostic.call_args.args[0]
         == "lichess-guidance-projected"
     )
-    single_shot.call_args.args[1]()
-    window._begin_lichess_guidance_observation_if_current.assert_called_once_with(
-        1,
-        "fallback",
-    )
-
-
 def test_pending_lichess_guidance_waits_for_complete_orientation() -> None:
     window = SimpleNamespace(
         _board_orientation_needs_detection=False,
@@ -461,29 +451,6 @@ def test_boundary_entry_starts_lichess_guidance_blackout() -> None:
         "verification."
     )
     window._record_runtime_diagnostic.assert_called_once()
-
-
-def test_stale_lichess_guidance_fallback_cannot_black_new_projection() -> None:
-    window = SimpleNamespace(
-        _lichess_guidance_generation=4,
-        _begin_lichess_guidance_observation=MagicMock(),
-    )
-
-    CameraWindow._begin_lichess_guidance_observation_if_current(
-        window,
-        3,
-        "fallback",
-    )
-    window._begin_lichess_guidance_observation.assert_not_called()
-
-    CameraWindow._begin_lichess_guidance_observation_if_current(
-        window,
-        4,
-        "fallback",
-    )
-    window._begin_lichess_guidance_observation.assert_called_once_with(
-        "fallback"
-    )
 
 
 def test_offline_move_marking_uses_fixed_one_second_intervals() -> None:
