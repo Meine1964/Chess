@@ -81,6 +81,11 @@ def prefilter_complete_signatures(
                 and float(scores[signature.destination]) >= capture_threshold
                 and _capture_colors_match(signature, piece_colors)
             )
+            or (
+                piece_colors is not None
+                and signature.kind == "ordinary"
+                and _changed_square_colors_match(signature, piece_colors)
+            )
         )
     )
 
@@ -135,12 +140,15 @@ def match_legal_move_signature(
             minimum_square_change * COLOR_CONFIRMED_CAPTURE_CHANGE_RATIO
             if capture_colors_confirmed
             else (
-                minimum_square_change * LEGAL_SOURCE_CHANGE_RATIO
-                if (
+                0.0
+                if ordinary_colors_confirmed
+                else (
+                    minimum_square_change * LEGAL_SOURCE_CHANGE_RATIO
+                    if (
                     signature.kind in ("castling", "en-passant", "promotion")
-                    or ordinary_colors_confirmed
+                    )
+                    else minimum_square_change
                 )
-                else minimum_square_change
             )
         )
         if (

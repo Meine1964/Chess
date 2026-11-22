@@ -53,6 +53,17 @@ PROJECTED_ON_LIGHT_SQUARE = QColor("#007fff")
 PROJECTED_ON_DARK_SQUARE = QColor("#00ffff")
 PROJECTED_LEGAL_MOVE = QColor("#ffffff")
 PROJECTED_ILLEGAL_MOVE = QColor("#ff0000")
+_TURN_INDICATOR_DISPLAY_MODES: frozenset[DisplayMode] = frozenset(
+    {
+        "black",
+        "move",
+        "illegal",
+        "correction",
+        "reconciliation",
+        "promotion_choices",
+        "promotion_confirmation",
+    }
+)
 _MAX_EDGE_STROKE_COMPENSATION = 1.5
 DEFAULT_BOARD_ILLUMINATION_PERCENT = 20
 PROMOTION_GLYPHS: dict[PromotionPiece, str] = {
@@ -133,7 +144,6 @@ class ProjectorWindow(QWidget):
         ] | None = None
         self._reconciliation_squares: tuple[tuple[int, int], ...] = ()
         self._move_squares: tuple[tuple[int, int, bool], ...] = ()
-        self._show_turn_indicator_with_move = False
         self._promotion_edge: PromotionEdge | None = None
         self._promotion_viewer_edge: PromotionEdge | None = None
         self._promotion_piece: PromotionPiece | None = None
@@ -290,21 +300,17 @@ class ProjectorWindow(QWidget):
         *,
         source_is_light: bool,
         destination_is_light: bool,
-        include_turn_indicator: bool = False,
     ) -> None:
         self.show_move_squares(
             (
                 (*source, source_is_light),
                 (*destination, destination_is_light),
             ),
-            include_turn_indicator=include_turn_indicator,
         )
 
     def show_move_squares(
         self,
         squares: tuple[tuple[int, int, bool], ...],
-        *,
-        include_turn_indicator: bool = False,
     ) -> None:
         if self._projector_grid is None:
             raise RuntimeError("No calibrated projector grid is available.")
@@ -316,7 +322,6 @@ class ProjectorWindow(QWidget):
                     "Projected move squares must be inside the 8x8 board."
                 )
         self._move_squares = tuple(dict.fromkeys(squares))
-        self._show_turn_indicator_with_move = include_turn_indicator
         self._show_mode("move")
 
     def show_illegal_square(
@@ -668,13 +673,8 @@ class ProjectorWindow(QWidget):
                         ),
                     )
         if (
-            (
-                self._display_mode == "black"
-                or (
-                    self._display_mode == "move"
-                    and self._show_turn_indicator_with_move
-                )
-            )
+            not self._calibration_overlays_suppressed
+            and self._display_mode in _TURN_INDICATOR_DISPLAY_MODES
             and self._projector_grid is not None
             and self._turn_indicator_corner is not None
             and self._result_text is None

@@ -95,7 +95,10 @@ from .lichess_client import (
     OngoingGame,
     PlayerColor,
 )
-from .lichess_game_controller import LichessGameController
+from .lichess_game_controller import (
+    CompoundMoveCandidate,
+    LichessGameController,
+)
 from .lichess_worker import (
     LichessAiGameCreationWorker,
     LichessConnectionWorker,
@@ -555,13 +558,14 @@ def _projected_turn_corner(
     offline_game: LegalGame,
     lichess_state: LichessGameState | None,
     board_quarter_turns: int,
+    lichess_physical_turn: PlayerColor | None = None,
 ) -> TurnIndicatorCorner | None:
     if not enabled:
         return None
     if lichess_state is not None:
         if lichess_state.result != "*":
             return None
-        turn = lichess_state.turn
+        turn = lichess_physical_turn or lichess_state.turn
     else:
         if game_mode != "offline-game" or offline_game.status.result != "*":
             return None
@@ -592,12 +596,14 @@ def _lichess_game_state_message(state: LichessGameState) -> str:
 
 def _lichess_turn_indicator_state(
     state: LichessGameState,
+    physical_turn: PlayerColor | None = None,
 ) -> tuple[str, str]:
     if state.result != "*":
         return "#808080", f"Lichess game over: {state.result}"
-    if state.turn == "white":
-        return "#ffffff", "White to move (Lichess)"
-    return "#000000", "Black to move (Lichess)"
+    turn = physical_turn or state.turn
+    if turn == "white":
+        return "#ffffff", "White to move physically"
+    return "#000000", "Black to move physically"
 
 
 def _lichess_polling_snapshot_message(
@@ -1339,6 +1345,9 @@ class CameraWindow(QMainWindow):
         ) = None
         self._pending_lichess_local_uci: str | None = None
         self._pending_lichess_local_result: LegalMoveResult | None = None
+        self._pending_lichess_compound_candidate: (
+            CompoundMoveCandidate | None
+        ) = None
         self._lichess_disconnect_requested = False
         self._close_pending = False
         self._lichess_game_id: str | None = None
@@ -4211,6 +4220,19 @@ class CameraWindow(QMainWindow):
             else lichess_controller.physical_position
         )
         offline_signatures = self._legal_game.physical_move_signatures
+        compound_candidates = (
+            ()
+            if lichess_controller is None or lichess_signature is None
+            else tuple(
+                candidate
+                for candidate in lichess_controller.compound_move_candidates
+                if (
+                    self._promotion_mode == "auto-queen"
+                    or candidate.reply_signature.kind
+                    not in ("promotion", "capture-promotion")
+                )
+            )
+        )
         if (
             lichess_controller is None
             and self._game_mode == "offline-game"
@@ -4241,6 +4263,10 @@ class CameraWindow(QMainWindow):
                     else ()
                 ),
                 required_signature=lichess_signature,
+                compound_signatures=tuple(
+                    candidate.verification_signature
+                    for candidate in compound_candidates
+                ),
             )
         except (ValueError, cv2.error) as error:
             self._occupancy_status.setText(
@@ -4254,6 +4280,7 @@ class CameraWindow(QMainWindow):
             self._last_runtime_tracker_state = update.state
             if update.state in {
                 "accepted",
+                "compound-accepted",
                 "ambiguous",
                 "illegal-removal",
                 "illegal-relocation",
@@ -4355,6 +4382,36 @@ class CameraWindow(QMainWindow):
                 _illegal_correction_message(update.move, correction_game)
             )
             self._project_illegal_move_correction(update.move)
+            return
+        if (
+            update.state == "compound-accepted"
+            and update.move is not None
+            and update.compound_uci is not None
+            and lichess_controller is not None
+        ):
+            candidate = next(
+                (
+                    item
+                    for item in compound_candidates
+                    if item.reply_signature.uci == update.compound_uci
+                ),
+                None,
+            )
+            if candidate is None:
+                self._reference_move_tracker.reset_activity()
+                synchronization = lichess_controller.require_reconciliation(
+                    "The verified compound Lichess reply is no longer "
+                    "available."
+                )
+                self._piece_status.setText(synchronization.message)
+                self._lichess_sync_status.setText(synchronization.message)
+                return
+            self._begin_lichess_local_move_submission(
+                update.move,
+                candidate.reply_signature.uci,
+                candidate.final_result,
+                compound_candidate=candidate,
+            )
             return
         if update.state != "accepted" or update.move is None:
             return
@@ -4933,7 +4990,9 @@ class CameraWindow(QMainWindow):
         move: tuple[tuple[int, int], tuple[int, int]],
         uci: str,
         legal_move: LegalMoveResult,
-    ) -> None:
+        *,
+        compound_candidate: CompoundMoveCandidate | None = None,
+    ) -> bool:
         controller = self._lichess_game_controller
         client = self._lichess_client
         if (
@@ -4946,7 +5005,7 @@ class CameraWindow(QMainWindow):
                 "Cannot submit the physical move because the Lichess "
                 "connection is not ready."
             )
-            return
+            return False
         thread = QThread(self)
         worker = LichessMoveSubmissionWorker(
             client,
@@ -4967,6 +5026,7 @@ class CameraWindow(QMainWindow):
         self._pending_lichess_local_move = move
         self._pending_lichess_local_uci = uci
         self._pending_lichess_local_result = legal_move
+        self._pending_lichess_compound_candidate = compound_candidate
         self._lichess_submission_thread = thread
         self._lichess_submission_worker = worker
         message = (
@@ -4982,6 +5042,7 @@ class CameraWindow(QMainWindow):
             include_images=True,
         )
         thread.start()
+        return True
 
     def _lichess_local_move_accepted(
         self,
@@ -4991,6 +5052,11 @@ class CameraWindow(QMainWindow):
         controller = self._lichess_game_controller
         move = self._pending_lichess_local_move
         legal_move = self._pending_lichess_local_result
+        compound_candidate = getattr(
+            self,
+            "_pending_lichess_compound_candidate",
+            None,
+        )
         if (
             controller is None
             or move is None
@@ -5013,7 +5079,11 @@ class CameraWindow(QMainWindow):
                 if len(uci) == 5
                 else None
             )
-            committed = controller.commit_local_move(move, promotion)
+            committed = (
+                controller.commit_local_move(move, promotion)
+                if compound_candidate is None
+                else controller.commit_compound_reply(move, promotion)
+            )
             self._reference_move_tracker.commit_accepted(move)
         except ValueError as error:
             self._piece_synchronizer.restore(previous_position)
@@ -5076,13 +5146,28 @@ class CameraWindow(QMainWindow):
         message = (
             f"Lichess accepted {square_name(move[0])}-"
             f"{square_name(move[1])}; {committed.status.turn} to move."
+            if compound_candidate is None
+            else (
+                "Lichess accepted "
+                f"{compound_candidate.opponent_signature.uci} then "
+                f"{square_name(move[0])}-{square_name(move[1])}; "
+                f"{committed.status.turn} to move."
+            )
         )
         self._piece_status.setText(message)
         self._lichess_sync_status.setText(message)
         self._record_runtime_diagnostic(
             "lichess-local-move-accepted",
             message,
-            details={"uci": uci, "game_id": game_id},
+            details={
+                "uci": uci,
+                "game_id": game_id,
+                "compound_opponent_uci": (
+                    None
+                    if compound_candidate is None
+                    else compound_candidate.opponent_signature.uci
+                ),
+            },
             include_images=True,
         )
         self._clear_pending_lichess_local_move()
@@ -5157,6 +5242,7 @@ class CameraWindow(QMainWindow):
         self._pending_lichess_local_move = None
         self._pending_lichess_local_uci = None
         self._pending_lichess_local_result = None
+        self._pending_lichess_compound_candidate = None
 
     def _reset_pieces_to_start(self) -> None:
         if self._latest_frame is None or self._calibration_result is None:
@@ -5320,7 +5406,6 @@ class CameraWindow(QMainWindow):
                 self._physical_board_square(*destination),
                 source_is_light=(sum(source) % 2 == 0),
                 destination_is_light=(sum(destination) % 2 == 0),
-                include_turn_indicator=True,
             )
         except (RuntimeError, ValueError) as error:
             self._projector_status.setText(
@@ -8171,8 +8256,21 @@ class CameraWindow(QMainWindow):
             QTimer.singleShot(0, self.close)
 
     def _update_turn_indicator(self) -> None:
+        lichess_controller = getattr(
+            self,
+            "_lichess_game_controller",
+            None,
+        )
+        lichess_physical_turn = (
+            None
+            if lichess_controller is None
+            else lichess_controller.physical_turn
+        )
         state = (
-            _lichess_turn_indicator_state(self._latest_lichess_state)
+            _lichess_turn_indicator_state(
+                self._latest_lichess_state,
+                lichess_physical_turn,
+            )
             if self._latest_lichess_state is not None
             else None
             if getattr(self, "_offline_turn_inference_pending", False)
@@ -8196,6 +8294,11 @@ class CameraWindow(QMainWindow):
         self._update_projected_turn_indicator()
 
     def _update_projected_turn_indicator(self) -> None:
+        lichess_controller = getattr(
+            self,
+            "_lichess_game_controller",
+            None,
+        )
         corner = (
             None
             if (
@@ -8208,6 +8311,11 @@ class CameraWindow(QMainWindow):
                 self._legal_game,
                 self._latest_lichess_state,
                 self._board_quarter_turns,
+                (
+                    None
+                    if lichess_controller is None
+                    else lichess_controller.physical_turn
+                ),
             )
         )
         self._projector_window.set_turn_indicator(corner)

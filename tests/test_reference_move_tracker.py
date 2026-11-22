@@ -10,6 +10,7 @@ from src.chess_camera.chess_position import (
     starting_occupied_squares,
 )
 from src.chess_camera.legal_game import LegalGame, LegalMoveSignature
+from src.chess_camera.lichess_game_controller import LichessGameController
 from src.chess_camera.reference_move_tracker import (
     ReferenceMoveTracker,
     ReferenceTrackerUpdate,
@@ -72,6 +73,7 @@ def _accepted_update(
     legal_signatures: tuple = (),
     *,
     required_signature: LegalMoveSignature | None = None,
+    compound_signatures: tuple[LegalMoveSignature, ...] = (),
 ) -> object:
     update = None
     for _index in range(5):
@@ -82,8 +84,13 @@ def _accepted_update(
             position,
             legal_signatures,
             required_signature=required_signature,
+            compound_signatures=compound_signatures,
         )
-        if update.state in ("accepted", "illegal-relocation"):
+        if update.state in (
+            "accepted",
+            "compound-accepted",
+            "illegal-relocation",
+        ):
             return update
     assert update is not None
     return update
@@ -100,7 +107,7 @@ def test_required_signature_accepts_exact_geometric_relocation() -> None:
         _draw_piece(
             reference,
             square,
-            (225, 225, 225) if piece.isupper() else (20, 20, 20),
+            (255, 255, 255) if piece.isupper() else (20, 20, 20),
         )
     moved = reference.copy()
     empty = _empty_board()
@@ -132,6 +139,112 @@ def test_required_signature_accepts_exact_geometric_relocation() -> None:
 
     assert update.state == "accepted"
     assert update.move == (signature.source, signature.destination)
+
+
+def test_compound_signature_accepts_only_clear_final_two_ply_position() -> None:
+    controller = LichessGameController(
+        "game1234",
+        "startpos",
+        "black",
+        "Opponent",
+    )
+    controller.accept_server_history(())
+    controller.accept_server_history(("e2e4",))
+    expected = controller.expected_signature
+    assert expected is not None
+    candidate = next(
+        item
+        for item in controller.compound_move_candidates
+        if item.reply_signature.uci == "e7e5"
+    )
+    reference = _empty_board()
+    for square, piece in controller.physical_position.items():
+        _draw_piece(
+            reference,
+            square,
+            (255, 255, 255) if piece.isupper() else (20, 20, 20),
+        )
+    final = _empty_board()
+    for square, piece in candidate.final_result.position.items():
+        _draw_piece(
+            final,
+            square,
+            (255, 255, 255) if piece.isupper() else (20, 20, 20),
+        )
+    tracker = ReferenceMoveTracker()
+    tracker.set_reference(reference, _camera_grid(), 0)
+
+    update = _accepted_update(
+        tracker,
+        final,
+        controller.physical_position,
+        (expected,),
+        required_signature=expected,
+        compound_signatures=(candidate.verification_signature,),
+    )
+
+    assert update.state == "compound-accepted"
+    assert update.move == ((1, 4), (3, 4))
+    assert update.compound_uci == "e7e5"
+    np.testing.assert_array_equal(tracker.reference, reference)
+
+    subset_tracker = ReferenceMoveTracker()
+    subset_tracker.set_reference(reference, _camera_grid(), 0)
+    with patch(
+        "src.chess_camera.reference_move_tracker."
+        "match_legal_move_signature",
+        return_value=SimpleNamespace(
+            signature=expected,
+            candidates=(
+                SimpleNamespace(signature=expected),
+                SimpleNamespace(signature=candidate.verification_signature),
+            ),
+        ),
+    ):
+        subset_update = _accepted_update(
+            subset_tracker,
+            final,
+            controller.physical_position,
+            (expected,),
+            required_signature=expected,
+            compound_signatures=(candidate.verification_signature,),
+        )
+
+    assert subset_update.state == "compound-accepted"
+    assert subset_update.compound_uci == "e7e5"
+
+    obstructed_tracker = ReferenceMoveTracker()
+    obstructed_tracker.set_reference(reference, _camera_grid(), 0)
+    opponent_move = (
+        candidate.opponent_signature.source,
+        candidate.opponent_signature.destination,
+    )
+    with patch(
+        "src.chess_camera.reference_move_tracker."
+        "_has_released_piece_footprint",
+        side_effect=lambda _reference, _candidate, move: (
+            move != opponent_move
+        ),
+    ):
+        obstructed_updates = [
+            obstructed_tracker.observe(
+                final,
+                _camera_grid(),
+                0,
+                controller.physical_position,
+                (expected,),
+                required_signature=expected,
+                compound_signatures=(candidate.verification_signature,),
+            )
+            for _index in range(5)
+        ]
+
+    assert any(
+        item.state == "waiting-for-clear" for item in obstructed_updates
+    )
+    assert all(
+        item.state != "compound-accepted" for item in obstructed_updates
+    )
 
 
 def test_required_signature_rejects_different_geometric_relocation() -> None:
@@ -683,7 +796,7 @@ def test_capture_explains_residuals_that_preserve_authoritative_state() -> None:
     )
 
 
-def test_legal_capture_is_not_reset_by_whole_board_motion_gate() -> None:
+def test_legal_capture_waits_for_motion_to_settle() -> None:
     game = LegalGame("4k3/8/8/8/1n6/P7/8/4K3 w - - 0 1")
     source = (5, 0)
     destination = (4, 1)
@@ -715,10 +828,10 @@ def test_legal_capture_is_not_reset_by_whole_board_motion_gate() -> None:
             game.position,
             game.physical_move_signatures,
         )
-        for _index in range(3)
+        for _index in range(5)
     ]
 
-    assert all(update.state != "activity" for update in updates)
+    assert updates[0].state == "activity"
     assert updates[-1].state == "accepted"
     assert updates[-1].move == (source, destination)
 
@@ -1225,6 +1338,43 @@ def test_stationary_large_obstruction_is_not_evaluated_as_move() -> None:
     assert activity.state in ("activity", "waiting-for-clear")
     assert waiting.state == "waiting-for-clear"
     assert waiting.move is None
+
+
+def test_interframe_motion_blocks_legal_signature_evaluation() -> None:
+    game = LegalGame()
+    signature = game.legal_move_signature("e2e4")
+    reference = _empty_board()
+    for square, piece in game.position.items():
+        _draw_piece(
+            reference,
+            square,
+            (255, 255, 255) if piece.isupper() else (20, 20, 20),
+        )
+    moving = reference.copy()
+    source_region = moving[600:700, 400:500]
+    source_region[:] = _empty_board()[600:700, 400:500]
+    _draw_piece(moving, signature.destination, (255, 255, 255))
+    cv2.rectangle(moving, (100, 250), (350, 500), (80, 120, 190), -1)
+    tracker = ReferenceMoveTracker()
+    tracker.set_reference(reference, _camera_grid(), 0)
+    tracker.observe(
+        reference,
+        _camera_grid(),
+        0,
+        game.position,
+        (signature,),
+    )
+
+    update = tracker.observe(
+        moving,
+        _camera_grid(),
+        0,
+        game.position,
+        (signature,),
+    )
+
+    assert update.state == "activity"
+    assert update.move is None
 
 
 def test_multi_edge_remap_residual_is_not_a_hand_after_grid_update() -> None:

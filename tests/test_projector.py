@@ -740,20 +740,7 @@ def test_projector_renders_patterns_and_calibrated_squares(
     assert move_image.pixelColor(115, 64) == PROJECTED_LEGAL_MOVE
     assert move_image.pixelColor(205, 99) == PROJECTED_LEGAL_MOVE
     assert move_image.pixelColor(145, 64).red() == 51
-    assert move_image.pixelColor(295, 169).red() == 0
-
-    window.show_move(
-        (2, 2),
-        (4, 5),
-        source_is_light=True,
-        destination_is_light=False,
-        include_turn_indicator=True,
-    )
-    application.processEvents()
-    offline_move_image = window.grab().toImage()
-    assert offline_move_image.pixelColor(115, 64) == PROJECTED_LEGAL_MOVE
-    assert offline_move_image.pixelColor(205, 99) == PROJECTED_LEGAL_MOVE
-    assert offline_move_image.pixelColor(295, 169).red() > 150
+    assert move_image.pixelColor(295, 169).red() > 150
 
     window.show_black()
     application.processEvents()
@@ -781,6 +768,7 @@ def test_projector_renders_patterns_and_calibrated_squares(
     illegal_image = window.grab().toImage()
     assert illegal_image.pixelColor(145, 64) == PROJECTED_ILLEGAL_MOVE
     assert illegal_image.pixelColor(175, 64).red() == 51
+    assert illegal_image.pixelColor(295, 169).red() > 150
 
     window.show_correction((2, 3), (4, 5))
     application.processEvents()
@@ -788,6 +776,7 @@ def test_projector_renders_patterns_and_calibrated_squares(
     assert correction_image.pixelColor(145, 64) == PROJECTED_ILLEGAL_MOVE
     assert correction_image.pixelColor(205, 99) == PROJECTED_ILLEGAL_MOVE
     assert correction_image.pixelColor(175, 64).red() == 51
+    assert correction_image.pixelColor(295, 169).red() > 150
 
     window.show_reconciliation(((2, 3), (4, 5)))
     application.processEvents()
@@ -795,10 +784,13 @@ def test_projector_renders_patterns_and_calibrated_squares(
     assert reconciliation_image.pixelColor(145, 64) == PROJECTED_ILLEGAL_MOVE
     assert reconciliation_image.pixelColor(205, 99) == PROJECTED_ILLEGAL_MOVE
     assert reconciliation_image.pixelColor(175, 64).red() == 51
+    assert reconciliation_image.pixelColor(295, 169).red() > 150
 
     window.show_promotion_choices("top", "bottom")
     application.processEvents()
     assert window.output_mode == "promotion_choices"
+    promotion_choices_image = window.grab().toImage()
+    assert promotion_choices_image.pixelColor(295, 169).red() > 150
 
     with patch.object(
         ProjectorWindow,
@@ -808,6 +800,7 @@ def test_projector_renders_patterns_and_calibrated_squares(
         application.processEvents()
         promotion_image = window.grab().toImage()
     assert window.output_mode == "promotion_confirmation"
+    assert promotion_image.pixelColor(295, 169).red() > 150
     assert promotion_image.pixelColor(115, 11) == PROJECTED_LEGAL_MOVE
     rendered_pieces = [
         call.args[2] for call in draw_promotion_glyph.call_args_list

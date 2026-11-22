@@ -37,6 +37,7 @@ ReferenceTrackerState = Literal[
     "illegal-removal",
     "illegal-relocation",
     "accepted",
+    "compound-accepted",
     "ambiguous",
 ]
 
@@ -48,6 +49,7 @@ class ReferenceTrackerUpdate:
     message: str
     change_scores: FloatArray | None = None
     decision_details: dict[str, object] | None = None
+    compound_uci: str | None = None
 
 
 class ReferenceMoveTracker:
@@ -161,6 +163,7 @@ class ReferenceMoveTracker:
         physical_signatures: tuple[LegalMoveSignature, ...] = (),
         *,
         required_signature: LegalMoveSignature | None = None,
+        compound_signatures: tuple[LegalMoveSignature, ...] = (),
     ) -> ReferenceTrackerUpdate:
         if self._reference is None:
             return ReferenceTrackerUpdate(
@@ -193,7 +196,6 @@ class ReferenceMoveTracker:
             if (
                 float(np.mean(difference)) > 2.5
                 and float(np.mean(difference > 12)) > 0.015
-                and not physical_signatures
             ):
                 self._previous_motion_image = motion_image
                 self._clear_pending()
@@ -255,15 +257,21 @@ class ReferenceMoveTracker:
         pending_en_passant_sources: tuple[Square, ...] = ()
         illegal_removed_piece: Square | None = None
         illegal_relocation = False
+        matched_signature: LegalMoveSignature | None = None
+        compound_ambiguous = False
         decision_details: dict[str, object] | None = None
-        if physical_signatures:
+        complete_candidate_signatures = (
+            *physical_signatures,
+            *compound_signatures,
+        )
+        if complete_candidate_signatures:
             piece_colors = self._classify_piece_colors(
                 normalized,
                 position,
             )
             complete_signatures = prefilter_complete_signatures(
                 scores,
-                physical_signatures,
+                complete_candidate_signatures,
                 piece_colors=piece_colors,
                 minimum_square_change=self._minimum_square_change,
             )
@@ -303,10 +311,33 @@ class ReferenceMoveTracker:
                 minimum_square_change=self._minimum_square_change,
                 minimum_dominance=self._minimum_dominance,
             )
-            if legal_match.signature is not None:
+            match_candidates = getattr(legal_match, "candidates", ())
+            compound_match_candidates = tuple(
+                evidence
+                for evidence in match_candidates
+                if evidence.signature in compound_signatures
+            )
+            if len(compound_match_candidates) == 1:
+                matched_signature = compound_match_candidates[0].signature
                 move = (
-                    legal_match.signature.source,
-                    legal_match.signature.destination,
+                    matched_signature.source,
+                    matched_signature.destination,
+                )
+            elif len(compound_match_candidates) > 1:
+                compound_ambiguous = True
+            elif len(match_candidates) == 1:
+                matched_signature = match_candidates[0].signature
+                move = (
+                    matched_signature.source,
+                    matched_signature.destination,
+                )
+            elif len(match_candidates) > 1:
+                compound_ambiguous = False
+            elif legal_match.signature is not None:
+                matched_signature = legal_match.signature
+                move = (
+                    matched_signature.source,
+                    matched_signature.destination,
                 )
             elif piece_colors is not None:
                 castling_match = match_pending_castling(
@@ -491,7 +522,16 @@ class ReferenceMoveTracker:
                 "restore the piece to the marked square.",
                 scores,
             )
-        if move is None and not physical_signatures:
+        if move is None and compound_ambiguous:
+            self._candidate_move = None
+            self._candidate_count = 0
+            return ReferenceTrackerUpdate(
+                "ambiguous",
+                None,
+                "Multiple compound Lichess replies match the settled board.",
+                scores,
+            )
+        if move is None and not complete_candidate_signatures:
             move = self._select_move(
                 scores,
                 position,
@@ -518,7 +558,13 @@ class ReferenceMoveTracker:
         if _has_large_obstruction(
             self._reference,
             normalized,
-            ignored_squares=move,
+            ignored_squares=(
+                move
+                if matched_signature is None
+                else tuple(
+                    change.square for change in matched_signature.changes
+                )
+            ),
             allow_boundary_remap_residuals=self._camera_grid_remapped,
         ):
             self._clear_pending()
@@ -528,12 +574,21 @@ class ReferenceMoveTracker:
                 "A hand or object still obscures multiple board squares.",
                 scores,
             )
+        release_moves = (move,)
+        if matched_signature in compound_signatures:
+            release_moves = tuple(
+                _uci_move(component)
+                for component in matched_signature.uci.split("+")
+            )
         if (
             not illegal_relocation
-            and not _has_released_piece_footprint(
-                self._reference,
-                normalized,
-                move,
+            and any(
+                not _has_released_piece_footprint(
+                    self._reference,
+                    normalized,
+                    release_move,
+                )
+                for release_move in release_moves
             )
         ):
             self._clear_pending()
@@ -566,12 +621,22 @@ class ReferenceMoveTracker:
                 scores,
             )
         self._pending_reference = normalized.copy()
+        compound_uci = (
+            None
+            if matched_signature not in compound_signatures
+            else matched_signature.uci.split("+", maxsplit=1)[1]
+        )
         return ReferenceTrackerUpdate(
-            "accepted",
+            "accepted" if compound_uci is None else "compound-accepted",
             move,
-            f"Accepted {square_name(move[0])}-{square_name(move[1])}.",
+            (
+                f"Accepted {square_name(move[0])}-{square_name(move[1])}."
+                if compound_uci is None
+                else f"Compound Lichess reply {compound_uci} accepted."
+            ),
             scores,
             decision_details,
+            compound_uci,
         )
 
     def commit_accepted(
@@ -828,6 +893,19 @@ class ReferenceMoveTracker:
         self._settled_count = 0
         self._candidate_move = None
         self._candidate_count = 0
+
+
+def _uci_move(uci: str) -> tuple[Square, Square]:
+    if len(uci) not in (4, 5):
+        raise ValueError("Compound verification requires a UCI move.")
+
+    def square(value: str) -> Square:
+        file_name, rank_name = value
+        if file_name not in "abcdefgh" or rank_name not in "12345678":
+            raise ValueError("Compound verification contains invalid UCI.")
+        return 8 - int(rank_name), ord(file_name) - ord("a")
+
+    return square(uci[:2]), square(uci[2:4])
 
 
 def _canonical_ui_board(

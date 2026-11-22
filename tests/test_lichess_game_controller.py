@@ -21,6 +21,7 @@ def test_controller_queues_and_confirms_remote_ordinary_move() -> None:
     assert attached.state == "synchronized"
     assert pending.state == "guidance"
     assert pending.pending_moves == ("e2e4",)
+    assert controller.physical_turn == "white"
     assert controller.server_position[(4, 4)] == "P"
     assert controller.physical_position[(6, 4)] == "P"
     assert controller.expected_signature is not None
@@ -30,6 +31,7 @@ def test_controller_queues_and_confirms_remote_ordinary_move() -> None:
 
     assert confirmed.state == "synchronized"
     assert confirmed.pending_moves == ()
+    assert controller.physical_turn == "black"
     assert controller.physical_position == controller.server_position
 
 
@@ -66,6 +68,39 @@ def test_controller_prepares_and_commits_local_ordinary_move() -> None:
     assert controller.server_moves == ("e2e4",)
     assert controller.server_fen == preview.fen
     assert controller.physical_fen == preview.fen
+    assert controller.state == "synchronized"
+
+
+def test_controller_builds_and_atomically_commits_compound_reply() -> None:
+    controller = LichessGameController(
+        "game1234",
+        "startpos",
+        "black",
+        "Opponent",
+    )
+    controller.accept_server_history(())
+    controller.accept_server_history(("e2e4",))
+
+    candidate = next(
+        item
+        for item in controller.compound_move_candidates
+        if item.reply_signature.uci == "e7e5"
+    )
+
+    assert candidate.opponent_signature.uci == "e2e4"
+    assert {
+        change.square
+        for change in candidate.verification_signature.changes
+    } == {(6, 4), (4, 4), (1, 4), (3, 4)}
+    assert controller.physical_fen != candidate.final_result.fen
+
+    committed = controller.commit_compound_reply(((1, 4), (3, 4)))
+
+    assert committed.fen == candidate.final_result.fen
+    assert controller.pending_moves == ()
+    assert controller.server_moves == ("e2e4", "e7e5")
+    assert controller.physical_fen == candidate.final_result.fen
+    assert controller.server_fen == candidate.final_result.fen
     assert controller.state == "synchronized"
 
 

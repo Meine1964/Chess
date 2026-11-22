@@ -334,6 +334,9 @@ The first implementation shall support:
   promotion, and auto-queen capture-promotion for both colors.
 - Direct submission of those supported local-player move kinds and exact local
   underpromotion suffixes selected through the projected virtual rank.
+- Single-visit verification and submission of one pending opponent move
+  followed by one uniquely identifiable legal local reply from the final clear
+  frame only.
 - Opponent-move projection and physical confirmation.
 - Durable UI guidance.
 - Incorrect physical-action correction.
@@ -503,6 +506,13 @@ position.
 
 Lichess reports a terminal status and all reported moves have been confirmed
 physically. The final result remains visible.
+
+### 6.9 `compound-submission`
+
+A clear, settled frame uniquely matches the pending opponent move followed by
+one legal local reply, and that reply is being submitted to Lichess. The final
+camera frame and compound result are provisional until Lichess confirms the
+local move. Camera move inference remains paused.
 
 ## 7. Attaching to a Game
 
@@ -918,6 +928,171 @@ For an incoming Lichess promotion, the server-specified promotion piece is
 already authoritative. The application shall guide replacement with that
 specific piece and shall not present four selectable choices.
 
+### 10.5 Single-visit opponent move and local reply
+
+When exactly one opponent move is pending physically, the player may perform
+both that authoritative opponent move and one legal local reply during one
+continuous hand visit. The feature exists to avoid requiring the player to
+remove the hand after the opponent move and then re-enter the board for the
+reply.
+
+#### 10.5.1 No interpretation under obstruction
+
+The application shall not interpret, classify, infer, accept, reject, commit,
+or submit any move while a hand, arm, or other material obstruction remains
+over the board. In particular, it shall not:
+
+- attempt to identify the opponent move as an intermediate position;
+- infer the local reply from partial square changes;
+- update the physical or UI position from an obstructed frame;
+- use a momentary gap between actions as an intermediate observation; or
+- submit a local move before a clear, settled final frame exists.
+
+Confirmed boundary entry shall use the existing guidance-blackout lifecycle.
+All frames acquired from entry until confirmed departure and settling are
+motion and obstruction evidence only. They shall never be chess-position
+evidence.
+
+The camera is required to observe only:
+
+1. the accepted reference before hand entry; and
+2. one unobstructed, stable final position after hand departure.
+
+No intermediate camera image is required or authoritative.
+
+The projected side-to-move dot shall remain steadily visible throughout
+guidance, blackout, settling, compound verification, submission, correction,
+and reconciliation. These temporary gameplay states shall not blink or
+suppress it. The application may delay changing sides until the newly
+authoritative turn is ready for presentation. Calibration output, unresolved
+turn authority, a disabled turn-indicator setting, and game completion may
+suppress the dot.
+
+While one or more authoritative server moves remain pending physically, the
+turn indicator shall show the side to move at the physical cursor rather than
+the newer server cursor. For a single-visit compound action, it therefore
+continues to show the opponent's pending side while the player performs the
+opponent move and local reply. After the final physical result is committed,
+the indicator shall change directly to the side to move in that final result.
+It shall not briefly display the intermediate server side.
+
+#### 10.5.2 Candidate construction
+
+Compound verification is eligible only when:
+
+- exactly one supported opponent move is active in the pending queue;
+- applying that move legally makes it the configured local player's turn;
+- the opponent move does not end the game;
+- no local submission, correction, promotion selection, reconciliation, or
+  calibration operation is active; and
+- the accepted physical reference still represents the position immediately
+  before the opponent move.
+
+The application shall apply the authoritative opponent move to a temporary
+legal game and enumerate every currently supported legal local reply from that
+intermediate position. Each compound candidate shall contain:
+
+- the required opponent signature and result;
+- the local reply signature, UCI, and result;
+- the complete final logical position after both plies;
+- the net expected physical changes relative to the accepted reference; and
+- the complete set of squares on which residual visual change is permitted.
+
+The ordinary opponent-only result shall remain a separate candidate so the
+existing one-move workflow continues to work when the player removes the hand
+after performing only the opponent move.
+
+#### 10.5.3 Final-frame verification
+
+After the board is clear and settled, the application shall evaluate the final
+frame against the required opponent-only result and all eligible compound
+results. Verification shall use complete result-state evidence rather than
+assuming that both component relocations remain individually visible.
+
+This is necessary when the local reply:
+
+- moves or captures the opponent's just-moved piece;
+- immediately recaptures on the opponent move's destination;
+- uses a square changed by both plies;
+- completes castling or en passant; or
+- otherwise causes the two plies' change masks to overlap.
+
+A compound result may be accepted only when exactly one legal local reply
+explains the complete final board and no unexplained change exists outside its
+net expected-change mask. The known opponent move shall remain mandatory; a
+final position reachable only by omitting or replacing that move shall not be
+accepted.
+
+When exactly one compound result matches the complete final board, an
+opponent-only match covering a strict subset of the same changed squares shall
+not make the result ambiguous and shall not be committed instead. The unique
+compound result takes precedence because it explains the additional local-reply
+evidence. If more than one compound result matches, the result remains
+ambiguous.
+
+Occupancy-equivalent or color-equivalent candidates that the camera cannot
+distinguish shall remain ambiguous even if one seems more likely. The
+application shall never choose among compound replies by score ordering,
+timing, move popularity, or engine preference.
+
+#### 10.5.4 Outcomes
+
+The settled final frame shall produce exactly one of these outcomes:
+
+1. **Opponent-only match:** confirm the opponent move through the existing
+   workflow, commit its reference, and then permit ordinary local-move
+   detection.
+2. **Unique compound match:** retain the final frame and two-ply result
+   provisionally, confirm the physical opponent move in the synchronization
+   controller, enter `compound-submission`, and submit the uniquely identified
+   local reply once.
+3. **Ambiguous compound match:** preserve the prior accepted reference and
+   physical state, submit nothing, and require the player to restore the
+   previous physical position or enter explicit reconciliation.
+4. **No valid match:** preserve the prior accepted reference and physical
+   state and use existing correction or reconciliation behavior.
+
+The opponent and local move shall be displayed as two ordered plies. They
+shall not be collapsed into one synthetic chess move.
+
+#### 10.5.5 Submission and commit
+
+Compound local submission shall retain the existing network two-phase commit:
+
+- The settled final image, local UCI, and complete two-ply result remain
+  provisional while the POST and authoritative refresh are pending.
+- Camera inference remains paused throughout submission.
+- Lichess confirmation of the expected post-reply FEN atomically commits the
+  two-ply physical position, final UI position, preserved final camera
+  reference, polling cursor, and durable state.
+- The final reference shall be captured from the already settled unobstructed
+  frame. The application shall not ask the player to recreate the intermediate
+  opponent-only position after successful submission.
+- An explicit rejection shall not pretend that the observed final board is
+  synchronized. The opponent move remains authoritative; the player shall be
+  instructed to undo the local reply to reach the opponent-only position.
+- Because no intermediate camera reference exists, rejection recovery shall
+  verify the opponent-only result geometrically against the original reference
+  before capturing it as the new accepted reference.
+- An uncertain response, changed authoritative history, or inability to prove
+  opponent-only restoration shall enter reconciliation.
+
+The application shall never retry the local reply automatically.
+
+#### 10.5.6 Supported and excluded compound moves
+
+Compound candidates may use the move kinds already supported for both pending
+opponent verification and local submission: ordinary moves, captures,
+castling, en passant, auto-queen promotion, and auto-queen
+capture-promotion.
+
+Select-promoted-piece mode shall continue to allow compound local replies that
+do not promote. Only a compound local promotion or capture-promotion is
+excluded in that mode because its projected virtual-rank interaction requires
+a separate settled selection and replacement workflow. A pending queue
+containing more than one unconfirmed server move is also excluded. Excluded
+replies and queues shall fall back to the existing sequential workflow.
+
 ## 11. Camera Confirmation
 
 ### 11.1 Exact expected match
@@ -941,11 +1116,19 @@ matching signature. If no signature matches, it shall report ambiguous or
 correction evidence rather than falling back to an unrestricted source and
 destination inferred from visual change scores.
 
-Whole-board inter-frame motion is advisory for legal-signature tracking and
-shall not prevent evaluation of a clear final position. Hand safety for this
-path is enforced by settled observations, large-obstruction rejection,
-released-piece-footprint checks, and exact signature evidence. Diagnostic
-tracking without legal signatures remains gated by inter-frame motion.
+Inter-frame motion shall gate diagnostic, legal-signature, and compound
+tracking alike. A moving hand frame may update motion and obstruction state but
+shall not be classified, matched, accepted, rejected, or used as a reference.
+After motion ends, settled observations, large-obstruction rejection,
+released-piece-footprint checks, and exact signature evidence shall verify the
+clear final position.
+
+When all changed-square occupancy and piece colors confidently match one legal
+final result, a weak photometric score at a destination shall not discard that
+result. Source departure shall retain a minimum change requirement, while the
+destination's exact final-state classification supplies the missing evidence.
+This applies to compound results such as `e7-e5` followed by `f2-f3`, where the
+destination pawn may be visually similar to its new square.
 
 ### 11.2 Commit
 
@@ -1025,6 +1208,9 @@ Local submission is available only when the physical and server positions are
 synchronized, it is the configured player's turn, and the camera identifies a
 unique ordinary move, non-promotion capture, completed castling signature, or
 completed en passant signature, queen promotion, or queen capture-promotion.
+Section 10.5 is the sole exception to the initial synchronization precondition:
+it may identify the local reply from a unique final two-ply result after first
+confirming the one authoritative pending opponent move.
 
 The application shall use a two-phase commit:
 
@@ -1114,7 +1300,9 @@ The UI shall distinguish:
 
 - Lichess/server position.
 - Physical/reference position.
-- The active side to move using both a color indicator and visible text.
+- The active physical side to move using both a color indicator and visible
+  text, while the Lichess panel separately retains the authoritative server
+  side to move.
 - Number of pending physical moves.
 - Active expected move.
 - Player color and opponent.
@@ -1276,6 +1464,30 @@ The first ordinary-move slice is accepted when all of the following pass.
 - Polling-discovered moves follow the same queue behavior.
 - Confirmed moves are not replayed.
 
+### 19.6 Single-visit opponent move and local reply
+
+- Frames containing a hand or obstruction never produce a chess move,
+  intermediate position, local submission, or reference update.
+- A clear final frame matching only the opponent move uses the existing
+  opponent-only workflow.
+- A clear final frame uniquely matching the required opponent move plus one
+  legal local reply submits that reply exactly once.
+- A unique compound result is selected when the opponent-only signature also
+  passes as a strict subset; score fluctuation shall not later downgrade that
+  final board to the opponent-only result.
+- Immediate recapture and overlapping-square sequences are matched from their
+  complete final result rather than requiring the intermediate board.
+- Two legal replies with indistinguishable final camera evidence submit
+  nothing and report ambiguity.
+- An extra unexplained changed square rejects the compound candidate.
+- Checkmate or another terminal opponent result offers no compound reply.
+- Multiple pending opponent moves use the sequential workflow.
+- In select-promoted-piece mode, ordinary, capture, castling, and en-passant
+  compound replies remain eligible; a local promotion or capture-promotion
+  uses the sequential promotion workflow.
+- Explicit local rejection requests restoration to the opponent-only result;
+  uncertain submission enters reconciliation.
+
 ## 20. Live Acceptance Sequence
 
 The initial live test shall use a new casual game against Stockfish:
@@ -1343,11 +1555,16 @@ promotion slices are implemented:
   virtual-rank projection, settled black-frame choice, physical replacement,
   perspective-correct player-facing bright icons, and exact UCI suffix
   requirements in section 10.4.
+- Single-visit opponent-plus-local handling generates complete two-ply legal
+  candidates, interprets only the clear settled final frame, blocks acceptance
+  until both move footprints are released, submits only a unique reply, and
+  atomically commits both plies after authoritative Lichess confirmation.
 
-The current validated automated suite contains 426 passing tests. Live ordinary-move,
-polling, reconciliation, and guidance acceptance has been exercised on the
-target camera/projector setup. Lichess capture, castling, en passant, and
-auto-queen behavior is automated-test validated and awaits live acceptance.
+The current validated automated suite contains 438 passing tests. Live
+ordinary-move, polling, reconciliation, and guidance acceptance has been
+exercised on the target camera/projector setup. Lichess capture, castling, en
+passant, and auto-queen behavior is automated-test validated and awaits live
+acceptance.
 The dedicated player, clock, status, and result display is automated-test
 validated and awaits live acceptance. Draw-offer, draw-response, and
 resignation and abort controls are automated-test validated and await live
@@ -1358,4 +1575,7 @@ offline/Lichess commit paths are automated-test validated and await live
 acceptance. Incoming
 server-directed underpromotion uses the exact authoritative suffix and ordinary
 source/destination physical guidance; dedicated projected replacement-piece
-guidance remains staged.
+guidance remains staged. Single-visit opponent-plus-local movement is
+automated-test validated and awaits live acceptance. Select-promoted-piece mode
+retains single-visit ordinary, capture, castling, and en-passant replies while
+reserving local promotion replies for the sequential selection workflow.

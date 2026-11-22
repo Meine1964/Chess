@@ -222,8 +222,9 @@ illumination, return to the configured idle board illumination, and allow one
 fixed second for camera exposure to settle before verification resumes. The
 automatic starting-position detector shall discard every observation gathered
 before the accepted move; stale starting-position evidence must not reset the
-newly accepted logical position. Red illegal-move correction projection and
-every other actionable projector mode shall continue to suppress the turn dot.
+newly accepted logical position. The current side-to-move dot shall remain
+steady during red illegal-move correction and every other temporary gameplay
+projection mode.
 
 If that next manipulation produces a clear relocation which does not match
 any legal physical move signature, including a move by the wrong side, the
@@ -557,9 +558,13 @@ Black. Calibrated board orientation shall rotate the logical corners to the
 physical board. The dot shall be defined as a circle in calibrated board-plane
 coordinates and pre-warped into projector pixels so projector perspective does
 not turn it into a physical ellipse. It shall remain outside the 8x8
-camera-evidence area, yield to every actionable projector mode, and return only
-with idle board-black output. In that idle state the dot shall be steady and
-remain visible through camera observation while the playing grid stays dark.
+camera-evidence area and remain steadily visible through accepted-move
+illumination, move guidance, illegal correction, reconciliation, promotion,
+blackout, settling, and other temporary gameplay projection states. These
+states shall not blink or temporarily suppress the dot. The application may
+delay changing the dot from one side to the other until the newly authoritative
+turn is ready for presentation, but once changed the new dot shall remain
+steady. Calibration patterns and calibration blackout may suppress the dot.
 Board setup / diagnostic mode, completed games, and an Offline game waiting
 for first-move turn inference shall project no turn dot.
 

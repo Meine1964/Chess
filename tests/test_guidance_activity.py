@@ -529,7 +529,6 @@ def test_offline_move_marking_uses_fixed_one_second_intervals() -> None:
         (4, 4),
         source_is_light=True,
         destination_is_light=True,
-        include_turn_indicator=True,
     )
     window._projector_window.show_black.assert_called_once_with()
     assert window._offline_move_marking_active is False

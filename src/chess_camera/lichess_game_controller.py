@@ -8,6 +8,7 @@ from .legal_game import (
     LegalGame,
     LegalMoveResult,
     LegalMoveSignature,
+    PhysicalSquareChange,
     PromotionPiece,
 )
 from .lichess_client import PlayerColor
@@ -28,6 +29,15 @@ class LichessSynchronizationUpdate:
     appended_moves: tuple[str, ...]
     pending_moves: tuple[str, ...]
     message: str
+
+
+@dataclass(frozen=True)
+class CompoundMoveCandidate:
+    opponent_signature: LegalMoveSignature
+    opponent_result: LegalMoveResult
+    reply_signature: LegalMoveSignature
+    final_result: LegalMoveResult
+    verification_signature: LegalMoveSignature
 
 
 class LichessGameController:
@@ -95,6 +105,10 @@ class LichessGameController:
         return self._physical_game.fen
 
     @property
+    def physical_turn(self) -> PlayerColor:
+        return self._physical_game.status.turn
+
+    @property
     def expected_signature(self) -> LegalMoveSignature | None:
         if not self._pending_moves:
             return None
@@ -127,6 +141,66 @@ class LichessGameController:
             signature.destination,
             signature.promotion,
         )
+
+    @property
+    def compound_move_candidates(self) -> tuple[CompoundMoveCandidate, ...]:
+        if len(self._pending_moves) != 1:
+            return ()
+        opponent_signature = self.expected_signature
+        opponent_result = self.pending_result
+        if (
+            opponent_signature is None
+            or opponent_result is None
+            or opponent_result.status.is_game_over
+            or opponent_result.status.turn != self._player_color
+        ):
+            return ()
+        intermediate = LegalGame(opponent_result.fen)
+        original_position = self._physical_game.position
+        candidates: list[CompoundMoveCandidate] = []
+        for reply_signature in intermediate.legal_move_signatures:
+            if not _compound_supported_signature(reply_signature):
+                continue
+            preview = LegalGame(opponent_result.fen)
+            final_result = preview.apply_move(
+                reply_signature.source,
+                reply_signature.destination,
+                reply_signature.promotion,
+            )
+            touched_squares = {
+                change.square
+                for signature in (opponent_signature, reply_signature)
+                for change in signature.changes
+            }
+            verification_signature = LegalMoveSignature(
+                (
+                    f"{opponent_signature.uci}+"
+                    f"{reply_signature.uci}"
+                ),
+                f"{opponent_signature.san} / {reply_signature.san}",
+                reply_signature.kind,
+                reply_signature.source,
+                reply_signature.destination,
+                reply_signature.promotion,
+                tuple(
+                    PhysicalSquareChange(
+                        square,
+                        original_position.get(square),
+                        final_result.position.get(square),
+                    )
+                    for square in sorted(touched_squares)
+                ),
+            )
+            candidates.append(
+                CompoundMoveCandidate(
+                    opponent_signature,
+                    opponent_result,
+                    reply_signature,
+                    final_result,
+                    verification_signature,
+                )
+            )
+        return tuple(candidates)
 
     @property
     def local_move_signatures(self) -> tuple[LegalMoveSignature, ...]:
@@ -191,6 +265,66 @@ class LichessGameController:
         self._state = (
             "game-complete"
             if self._server_game.status.is_game_over
+            else "synchronized"
+        )
+        return physical_result
+
+    def commit_compound_reply(
+        self,
+        move: tuple[Square, Square],
+        promotion: PromotionPiece | None = None,
+    ) -> LegalMoveResult:
+        candidate = next(
+            (
+                item
+                for item in self.compound_move_candidates
+                if (
+                    item.reply_signature.source,
+                    item.reply_signature.destination,
+                    item.reply_signature.promotion,
+                )
+                == (move[0], move[1], promotion)
+            ),
+            None,
+        )
+        if candidate is None:
+            raise ValueError(
+                "The physical result is not a supported compound Lichess move."
+            )
+        server_preview = LegalGame(self._server_game.fen)
+        server_result = server_preview.apply_move(
+            candidate.reply_signature.source,
+            candidate.reply_signature.destination,
+            candidate.reply_signature.promotion,
+        )
+        physical_preview = LegalGame(self._physical_game.fen)
+        physical_preview.apply_move(
+            candidate.opponent_signature.source,
+            candidate.opponent_signature.destination,
+            candidate.opponent_signature.promotion,
+        )
+        physical_result = physical_preview.apply_move(
+            candidate.reply_signature.source,
+            candidate.reply_signature.destination,
+            candidate.reply_signature.promotion,
+        )
+        if (
+            server_result.fen != candidate.final_result.fen
+            or physical_result.fen != candidate.final_result.fen
+        ):
+            raise ValueError(
+                "Compound server and physical move commits diverged."
+            )
+        self._server_game = server_preview
+        self._physical_game = physical_preview
+        self._pending_moves.pop(0)
+        self._server_moves = (
+            *self._server_moves,
+            candidate.reply_signature.uci,
+        )
+        self._state = (
+            "game-complete"
+            if physical_result.status.is_game_over
             else "synchronized"
         )
         return physical_result
@@ -362,6 +496,21 @@ class LichessGameController:
             tuple(self._pending_moves),
             message,
         )
+
+
+def _compound_supported_signature(
+    signature: LegalMoveSignature,
+) -> bool:
+    if signature.kind not in (
+        "ordinary",
+        "capture",
+        "castling",
+        "en-passant",
+        "promotion",
+        "capture-promotion",
+    ):
+        return False
+    return signature.promotion in (None, "q")
 
 
 def _apply_uci(game: LegalGame, uci: str) -> LegalMoveResult:

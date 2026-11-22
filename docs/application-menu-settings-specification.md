@@ -179,13 +179,14 @@ white dot on the continuation of the h1-a8 diagonal: half a square beyond h1
 for White's turn and half a square beyond a8 for Black's turn. Board
 orientation shall transform those logical corners to their calibrated physical
 corners. The dot shall remain outside the calibrated 8x8 evidence area, shall
-not block camera move processing, and shall be suppressed by move guidance, correction,
-reconciliation, promotion, calibration patterns, and other higher-priority
-projection modes. It shall return with the current side when projector output
-returns to its idle board-black state. During that idle state it shall remain
-steadily illuminated and shall not blink for camera observations while the
-8x8 playing area remains dark. No dot shall be shown in Board setup /
-diagnostic mode or after game completion.
+not block camera move processing, and shall remain steadily visible through
+move guidance, correction, reconciliation, promotion, blackout, settling, and
+other temporary gameplay projection modes. Those transitions shall never blink
+or temporarily suppress the dot. Calibration patterns and calibration blackout
+may suppress it. A turn transition may be delayed until the newly authoritative
+side is ready for presentation, but the displayed side shall not alternate.
+No dot shall be shown in Board setup / diagnostic mode, while the Offline side
+to move remains unresolved, or after game completion.
 
 The dialog shall be populated from the current live selectors each time it is
 opened so camera and screen hot-plug changes remain authoritative.

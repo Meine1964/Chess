@@ -1,6 +1,10 @@
 import numpy as np
 
-from src.chess_camera.legal_game import LegalGame
+from src.chess_camera.legal_game import (
+    LegalGame,
+    LegalMoveSignature,
+    PhysicalSquareChange,
+)
 from src.chess_camera.legal_signature_matcher import (
     find_illegal_removed_piece,
     match_legal_move_signature,
@@ -45,6 +49,49 @@ def test_complete_signature_prefilter_keeps_only_plausible_moves() -> None:
     )
 
     assert tuple(signature.uci for signature in candidates) == ("e2e4",)
+
+
+def test_color_confirmed_compound_keeps_weak_reply_destination() -> None:
+    signature = LegalMoveSignature(
+        "e7e5+f2f3",
+        "e5 / f3",
+        "ordinary",
+        (6, 5),
+        (5, 5),
+        None,
+        (
+            PhysicalSquareChange((1, 4), "p", None),
+            PhysicalSquareChange((3, 4), None, "p"),
+            PhysicalSquareChange((5, 5), None, "P"),
+            PhysicalSquareChange((6, 5), "P", None),
+        ),
+    )
+    scores = _scores(
+        ((1, 4), 0.111),
+        ((3, 4), 0.103),
+        ((5, 5), 0.01),
+        ((6, 5), 0.184),
+    )
+    colors = {
+        (1, 4): PieceColorClassification("empty", 0.01, 0.2),
+        (3, 4): PieceColorClassification("black", 0.01, 0.2),
+        (5, 5): PieceColorClassification("white", 0.01, 0.2),
+        (6, 5): PieceColorClassification("empty", 0.01, 0.2),
+    }
+
+    candidates = prefilter_complete_signatures(
+        scores,
+        (signature,),
+        piece_colors=colors,
+    )
+    match = match_legal_move_signature(
+        scores,
+        candidates,
+        piece_colors=colors,
+    )
+
+    assert candidates == (signature,)
+    assert match.signature == signature
 
 
 def test_complete_signature_prefilter_preserves_partial_action_set() -> None:

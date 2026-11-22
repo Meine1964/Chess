@@ -35,6 +35,7 @@ from src.chess_camera.lichess_client import (
     OngoingGame,
     PlayerColor,
 )
+from src.chess_camera.lichess_game_controller import LichessGameController
 from src.chess_camera.offline_clock import OfflineClock
 from src.chess_camera.reference_move_tracker import (
     ReferenceTrackerState,
@@ -104,6 +105,17 @@ def test_projected_turn_dot_tracks_a_file_and_board_orientation() -> None:
             1,
         )
         == "top-right"
+    )
+    assert (
+        _projected_turn_corner(
+            True,
+            "diagnostic",
+            game,
+            lichess_state,
+            1,
+            "white",
+        )
+        == "top-left"
     )
     lichess_state.result = "1-0"
     assert (
@@ -1214,7 +1226,11 @@ def test_lichess_game_state_message_reports_clocks_and_result() -> None:
 
     assert _lichess_turn_indicator_state(state) == (
         "#000000",
-        "Black to move (Lichess)",
+        "Black to move physically",
+    )
+    assert _lichess_turn_indicator_state(state, "white") == (
+        "#ffffff",
+        "White to move physically",
     )
 
 
@@ -2410,6 +2426,255 @@ def test_first_accepted_black_move_determines_offline_turn() -> None:
     automatic_start_detector.reset_observations.assert_called_once_with()
     window._persist_game_state.assert_called_once_with()
     window._project_offline_accepted_move.assert_called_once_with(move)
+
+
+@pytest.mark.parametrize(
+    "promotion_mode",
+    ["auto-queen", "select-promoted-piece"],
+)
+def test_pending_opponent_move_offers_compound_replies_to_tracker(
+    promotion_mode: str,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    controller = LichessGameController(
+        "game1234",
+        "startpos",
+        "black",
+        "Opponent",
+    )
+    controller.accept_server_history(())
+    controller.accept_server_history(("e2e4",))
+    candidate = next(
+        item
+        for item in controller.compound_move_candidates
+        if item.reply_signature.uci == "e7e5"
+    )
+    tracker = MagicMock()
+    tracker.observe.return_value = ReferenceTrackerUpdate(
+        "compound-accepted",
+        (
+            candidate.reply_signature.source,
+            candidate.reply_signature.destination,
+        ),
+        "Compound reply accepted.",
+        compound_uci="e7e5",
+    )
+    begin_submission = MagicMock()
+    window = SimpleNamespace(
+        _latest_frame=object(),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(camera_grid=object())
+        ),
+        _pending_lichess_local_move=None,
+        _lichess_game_controller=controller,
+        _piece_synchronizer=SimpleNamespace(
+            position=controller.physical_position
+        ),
+        _legal_game=LegalGame(),
+        _game_mode="diagnostic",
+        _promotion_mode=promotion_mode,
+        _reference_move_tracker=tracker,
+        _board_quarter_turns=0,
+        _occupancy_status=MagicMock(),
+        _last_runtime_tracker_state="watching",
+        _record_runtime_diagnostic=MagicMock(),
+        _restore_pending_lichess_guidance_after_no_change=MagicMock(),
+        _last_rejected_move=None,
+        _illegal_correction_last_projected_move=None,
+        _board_widget=MagicMock(),
+        _piece_status=MagicMock(),
+        _lichess_sync_status=MagicMock(),
+        _begin_lichess_local_move_submission=begin_submission,
+    )
+
+    CameraWindow._update_reference_move_tracking(window)
+
+    assert (
+        candidate.verification_signature
+        in tracker.observe.call_args.kwargs["compound_signatures"]
+    )
+    begin_submission.assert_called_once_with(
+        (
+            candidate.reply_signature.source,
+            candidate.reply_signature.destination,
+        ),
+        "e7e5",
+        candidate.final_result,
+        compound_candidate=candidate,
+    )
+
+
+def test_select_promotion_mode_excludes_only_compound_promotions() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    controller = LichessGameController(
+        "game1234",
+        "7k/P7/8/8/8/8/8/7K b - - 0 1",
+        "white",
+        "Opponent",
+    )
+    controller.accept_server_history(())
+    controller.accept_server_history(("h8g8",))
+    tracker = MagicMock()
+    tracker.observe.return_value = ReferenceTrackerUpdate(
+        "watching",
+        None,
+        "Watching.",
+    )
+    window = SimpleNamespace(
+        _latest_frame=object(),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(camera_grid=object())
+        ),
+        _pending_lichess_local_move=None,
+        _lichess_game_controller=controller,
+        _piece_synchronizer=SimpleNamespace(
+            position=controller.physical_position
+        ),
+        _legal_game=LegalGame(),
+        _game_mode="diagnostic",
+        _promotion_mode="select-promoted-piece",
+        _reference_move_tracker=tracker,
+        _board_quarter_turns=0,
+        _occupancy_status=MagicMock(),
+        _last_runtime_tracker_state="watching",
+        _record_runtime_diagnostic=MagicMock(),
+        _restore_pending_lichess_guidance_after_no_change=MagicMock(),
+        _last_rejected_move=None,
+        _illegal_correction_last_projected_move=None,
+        _board_widget=MagicMock(),
+        _piece_status=MagicMock(),
+        _lichess_sync_status=MagicMock(),
+    )
+
+    CameraWindow._update_reference_move_tracking(window)
+
+    compound_signatures = tracker.observe.call_args.kwargs[
+        "compound_signatures"
+    ]
+    compound_uci = {signature.uci for signature in compound_signatures}
+    assert "h8g8+a7a8q" not in compound_uci
+    assert any(uci.startswith("h8g8+h1") for uci in compound_uci)
+
+
+def test_compound_submission_confirmation_commits_both_plies() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.chess_position import PiecePositionSynchronizer
+
+    controller = LichessGameController(
+        "game1234",
+        "startpos",
+        "black",
+        "Opponent",
+    )
+    controller.accept_server_history(())
+    controller.accept_server_history(("e2e4",))
+    candidate = next(
+        item
+        for item in controller.compound_move_candidates
+        if item.reply_signature.uci == "e7e5"
+    )
+    synchronizer = PiecePositionSynchronizer()
+    synchronizer.restore(controller.physical_position)
+    move = (
+        candidate.reply_signature.source,
+        candidate.reply_signature.destination,
+    )
+    window = SimpleNamespace(
+        _lichess_game_controller=controller,
+        _pending_lichess_local_move=move,
+        _pending_lichess_local_uci="e7e5",
+        _pending_lichess_local_result=candidate.final_result,
+        _pending_lichess_compound_candidate=candidate,
+        _piece_synchronizer=synchronizer,
+        _reference_move_tracker=MagicMock(),
+        _lichess_worker=None,
+        _board_widget=MagicMock(),
+        _last_rejected_move=None,
+        _persist_piece_position=MagicMock(),
+        _persist_move_reference=MagicMock(),
+        _latest_lichess_state=None,
+        _piece_status=MagicMock(),
+        _lichess_sync_status=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
+        _project_accepted_move=MagicMock(),
+    )
+    window._clear_pending_lichess_local_move = (
+        lambda: CameraWindow._clear_pending_lichess_local_move(window)
+    )
+
+    CameraWindow._lichess_local_move_accepted(
+        window,
+        "game1234",
+        "e7e5",
+    )
+
+    assert controller.pending_moves == ()
+    assert controller.server_moves == ("e2e4", "e7e5")
+    assert synchronizer.position == candidate.final_result.position
+    window._reference_move_tracker.commit_accepted.assert_called_once_with(
+        move
+    )
+    window._project_accepted_move.assert_called_once_with(move)
+    assert window._pending_lichess_compound_candidate is None
+
+
+def test_rejected_compound_reply_leaves_opponent_move_pending() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    controller = LichessGameController(
+        "game1234",
+        "startpos",
+        "black",
+        "Opponent",
+    )
+    controller.accept_server_history(())
+    controller.accept_server_history(("e2e4",))
+    candidate = next(
+        item
+        for item in controller.compound_move_candidates
+        if item.reply_signature.uci == "e7e5"
+    )
+    move = (
+        candidate.reply_signature.source,
+        candidate.reply_signature.destination,
+    )
+    window = SimpleNamespace(
+        _lichess_game_controller=controller,
+        _pending_lichess_local_move=move,
+        _pending_lichess_local_uci="e7e5",
+        _pending_lichess_local_result=candidate.final_result,
+        _pending_lichess_compound_candidate=candidate,
+        _reference_move_tracker=MagicMock(),
+        _last_rejected_move=None,
+        _board_widget=MagicMock(),
+        _piece_status=MagicMock(),
+        _lichess_sync_status=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
+        _project_illegal_move_correction=MagicMock(),
+    )
+    window._clear_pending_lichess_local_move = (
+        lambda: CameraWindow._clear_pending_lichess_local_move(window)
+    )
+
+    CameraWindow._lichess_local_move_rejected(
+        window,
+        "game1234",
+        "e7e5",
+        "server rejected the move.",
+    )
+
+    assert controller.pending_moves == ("e2e4",)
+    assert controller.physical_position == LegalGame().position
+    window._reference_move_tracker.reset_activity.assert_called_once_with()
+    window._project_illegal_move_correction.assert_called_once_with(move)
+    assert window._pending_lichess_compound_candidate is None
 
 
 def test_routine_tracker_transition_does_not_write_diagnostics() -> None:

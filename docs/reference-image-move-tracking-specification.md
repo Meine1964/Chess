@@ -439,7 +439,9 @@ This brief lifecycle shall use generation-guarded timers so stale callbacks
 cannot clear a newer marking. It shall not use hand detection, adaptive
 settling, automatic reprojection, or a configurable duration. Diagnostic
 movement may retain temporary accepted-square projection, and illegal
-correction may retain its red projection; neither shall expose the turn dot.
+correction may retain its red projection. Every gameplay projection state shall
+preserve the current side-to-move dot without blinking; calibration output may
+suppress it.
 
 Illegal-relocation correction shall project both the authoritative source and
 observed destination in red until a board-and-halo activity detector confirms
