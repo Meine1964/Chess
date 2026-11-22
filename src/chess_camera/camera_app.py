@@ -84,6 +84,8 @@ from .guidance_activity import (
     BlackoutSettlingDetector,
     BoardEdgeActivityDetector,
     BoardEdgeHandGate,
+    board_edge_band_polygon,
+    board_edge_camera_framing,
 )
 from .legal_game import (
     GameMode,
@@ -757,7 +759,55 @@ def _draw_board_guide(frame: ImageArray, grid: FloatArray) -> ImageArray:
         3,
         cv2.LINE_AA,
     )
+    height, width = guided.shape[:2]
+    framing = board_edge_camera_framing((height, width), grid)
+    band_color = (0, 255, 0) if framing.fits else (0, 0, 255)
+    cv2.polylines(
+        guided,
+        [
+            np.round(board_edge_band_polygon(grid))
+            .astype(np.int32)
+            .reshape(-1, 1, 2)
+        ],
+        True,
+        band_color,
+        2,
+        cv2.LINE_AA,
+    )
+    bar = 12
+    bars = {
+        "left": ((0, 0), (bar, height - 1)),
+        "right": ((width - 1 - bar, 0), (width - 1, height - 1)),
+        "top": ((0, 0), (width - 1, bar)),
+        "bottom": ((0, height - 1 - bar), (width - 1, height - 1)),
+    }
+    for edge in framing.short_edges:
+        cv2.rectangle(guided, *bars[edge], (0, 0, 255), -1)
     return guided
+
+
+def _camera_framing_report(
+    frame_shape: tuple[int, int],
+    camera_grid: FloatArray,
+) -> tuple[str | None, dict[str, float]]:
+    framing = board_edge_camera_framing(frame_shape, camera_grid)
+    visible = {
+        edge: round(squares, 2)
+        for edge, squares in framing.visible_squares.items()
+    }
+    if framing.fits:
+        return None, visible
+    required = f"{framing.required_squares:g}"
+    edges = ", ".join(
+        f"{edge} {squares:.1f} of {required} squares"
+        for edge, squares in framing.short_edges.items()
+    )
+    return (
+        "The camera picture cuts off part of the hand-detection band around "
+        f"the board ({edges}). Pieces next to that picture edge may delay "
+        "moves. Move the camera back or zoom out, then recalibrate.",
+        visible,
+    )
 
 
 def _diagnostic_position(position: Position) -> dict[str, PieceCode]:
@@ -1281,6 +1331,7 @@ class CameraWindow(QMainWindow):
         self._focus_dialog: QMessageBox | None = None
         self._projector_lost = False
         self._focus_guide_grid: FloatArray | None = None
+        self._camera_framing_dialog: QMessageBox | None = None
         self._reference_store = ReferenceImageStore(
             _PROJECT_ROOT / "calibrations" / "move_reference.npz"
         )
@@ -1931,6 +1982,7 @@ class CameraWindow(QMainWindow):
 
         self._camera_calibration_indicator = QLabel()
         self._projector_calibration_indicator = QLabel()
+        self._camera_framing_indicator = QLabel()
         self._set_calibration_indicator(
             self._camera_calibration_indicator,
             "Camera calibration",
@@ -1941,12 +1993,20 @@ class CameraWindow(QMainWindow):
             "Projector calibration",
             "unknown",
         )
+        self._set_calibration_indicator(
+            self._camera_framing_indicator,
+            "Camera framing",
+            "unknown",
+        )
         calibration_indicator_layout = QHBoxLayout()
         calibration_indicator_layout.addWidget(
             self._camera_calibration_indicator
         )
         calibration_indicator_layout.addWidget(
             self._projector_calibration_indicator
+        )
+        calibration_indicator_layout.addWidget(
+            self._camera_framing_indicator
         )
         calibration_indicator_layout.addStretch()
 
@@ -2631,6 +2691,14 @@ class CameraWindow(QMainWindow):
 
     def _end_focus_pattern_preview(self) -> None:
         self._focus_pattern_preview_active = False
+
+    def _camera_guide_grid(self) -> FloatArray | None:
+        if self._focus_guide_grid is not None:
+            return self._focus_guide_grid
+        result = self._calibration_result
+        if self._focus_pattern_preview_active and result is not None:
+            return result.mapping.camera_grid
+        return None
 
     def _show_live_preview_off(self) -> None:
         self._current_pixmap = None
@@ -3401,6 +3469,11 @@ class CameraWindow(QMainWindow):
                 f"{self._projector_status.text()} "
                 f"Saved to calibrations/{saved_path.name}."
             )
+        CameraWindow._warn_camera_framing(
+            self,
+            (camera_height, camera_width),
+            result.mapping.camera_grid,
+        )
         self._record_runtime_diagnostic(
             "calibration-completed",
             self._projector_status.text(),
@@ -3847,6 +3920,11 @@ class CameraWindow(QMainWindow):
             "Projector calibration",
             "unknown",
         )
+        CameraWindow._set_calibration_indicator(
+            self._camera_framing_indicator,
+            "Camera framing",
+            "unknown",
+        )
 
     @staticmethod
     def _set_calibration_indicator(
@@ -3858,6 +3936,7 @@ class CameraWindow(QMainWindow):
         appearances = {
             "ok": ("OK", "#2e7d32"),
             "error": ("ERROR", "#c62828"),
+            "tight": ("TOO TIGHT", "#c62828"),
             "unknown": ("NOT CALIBRATED", "#616161"),
         }
         text, background = appearances[state]
@@ -9238,6 +9317,19 @@ class CameraWindow(QMainWindow):
             else "Loaded the saved projector calibration for a different "
             "camera; recovering the camera grid before startup checks."
         )
+        if saved.camera_matches:
+            CameraWindow._warn_camera_framing(
+                self,
+                (camera_resolution.height(), camera_resolution.width()),
+                saved.result.mapping.camera_grid,
+            )
+        else:
+            CameraWindow._set_calibration_indicator(
+                self._camera_framing_indicator,
+                "Camera framing",
+                "unknown",
+                "Checked after the new camera's board grid is recovered.",
+            )
         self._record_runtime_diagnostic(
             "saved-calibration-loaded",
             self._projector_status.text(),
@@ -9258,6 +9350,50 @@ class CameraWindow(QMainWindow):
             self._physical_board_square(row, column)
             for row, column in self._piece_synchronizer.position
         )
+
+    def _warn_camera_framing(
+        self,
+        frame_shape: tuple[int, int],
+        camera_grid: FloatArray,
+    ) -> None:
+        message, visible_squares = _camera_framing_report(
+            frame_shape,
+            camera_grid,
+        )
+        if message is None:
+            CameraWindow._set_calibration_indicator(
+                self._camera_framing_indicator,
+                "Camera framing",
+                "ok",
+                "Square widths visible beyond the board: "
+                + ", ".join(
+                    f"{edge} {squares:.1f}"
+                    for edge, squares in visible_squares.items()
+                ),
+            )
+            return
+        CameraWindow._set_calibration_indicator(
+            self._camera_framing_indicator,
+            "Camera framing",
+            "tight",
+            message,
+        )
+        self._projector_status.setText(
+            f"{self._projector_status.text()} {message}"
+        )
+        self._record_runtime_diagnostic(
+            "camera-framing-short",
+            message,
+            details={"visible_band_squares": visible_squares},
+        )
+        previous = self._camera_framing_dialog
+        if previous is not None:
+            previous.close()
+        dialog = _silent_message_box(self, "Camera framing", message)
+        dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
+        dialog.setModal(False)
+        self._camera_framing_dialog = dialog
+        dialog.show()
 
     def _close_focus_dialog(self) -> None:
         dialog = self._focus_dialog
@@ -9302,8 +9438,10 @@ class CameraWindow(QMainWindow):
             "Focus and point the camera, then click OK."
         )
         guide = (
-            " Aim the camera until the board fills the green outline in the "
-            "camera view."
+            " Aim the camera until the board fills the inner green outline in "
+            "the camera view. The outer outline marks the area around the "
+            "board that the camera must also see; when it is red, move the "
+            "camera back or zoom out, then recalibrate."
             if self._focus_guide_grid is not None
             else ""
         )
@@ -9500,6 +9638,12 @@ class CameraWindow(QMainWindow):
             else f"{message} Saving the recovered calibration failed: "
             f"{save_error}"
         )
+        if self._latest_frame is not None:
+            CameraWindow._warn_camera_framing(
+                self,
+                self._latest_frame.shape[:2],
+                result.mapping.camera_grid,
+            )
         selected = details.get("selected")
         hypothesis = (
             selected.get("hypothesis") if isinstance(selected, dict) else None
@@ -9596,7 +9740,7 @@ class CameraWindow(QMainWindow):
             if self._current_pixmap is not None:
                 CameraWindow._show_live_preview_off(self)
             return
-        guide_grid = self._focus_guide_grid
+        guide_grid = CameraWindow._camera_guide_grid(self)
         self._display_frame(
             camera_frame
             if guide_grid is None

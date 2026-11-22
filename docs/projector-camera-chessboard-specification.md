@@ -527,6 +527,36 @@ blocks move registration on the black board while an arm crosses the edge.
   `board-edge-gate-released` transitions with the camera image and component
   measurements, including the largest inner-square coverage fraction, and
   expose the gate state in runtime state.
+- Camera framing: the gate's two-square band must lie inside the camera
+  picture; where the picture cuts it off, the picture edge acts as the band's
+  outer rim, so a piece outline reaching that picture edge can block like an
+  arm. Whenever a calibration result with a known camera grid is activated
+  (completed calibration, saved calibration for the same camera, alignment
+  recovery), measure for each camera picture edge (left, right, top, bottom)
+  how many square widths of the band fit before that edge, keeping 4 pixels
+  clear, by extrapolating the band corners outward exactly as the gate does.
+  The fault is attributed to the camera picture, not to a board side, because
+  the remedy is to aim or zoom the camera. When any edge has less than two
+  square widths, accept the calibration, but show a warning naming the
+  picture edges and their visible widths, for example "left 1.3 of 2
+  squares", append it to the projector status, and record
+  `camera-framing-short` with the per-edge widths. When the camera grid is
+  not yet known (saved calibration for a different camera), skip the check.
+  The alignment monitor's small remaps are not checked; the clipping fallback
+  covers them.
+- Show the framing result as a third status label beside the camera and
+  projector calibration labels: "Camera framing: OK" in green, with the
+  visible square widths per picture edge as tooltip; "Camera framing: TOO
+  TIGHT" in red, with the warning as tooltip; grey "NOT CALIBRATED" while no
+  calibration is active or the camera grid is not yet known.
+- In the focus and pointing step, when the saved camera grid is shown as a
+  guide, and in the "Show focus pattern" preview, using the active
+  calibration's camera grid, draw the board outline and also the required
+  two-square band outline: green when it fits
+  the picture, red when it does not, with a red bar along each picture edge
+  that cuts it off. The guide is the saved target position, so a red band
+  means that the camera, aimed at that target, must be zoomed out or moved
+  back and then recalibrated.
 
 The previous design drove the indicator from the crossing detector at all
 times. A persistent scene change on the board frame could then keep the

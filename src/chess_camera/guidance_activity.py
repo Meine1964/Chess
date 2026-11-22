@@ -12,6 +12,56 @@ from .occupancy import rectify_board
 
 _EDGE_CROP_MARGIN = 24
 _EDGE_CROP_REQUIRED_MARGIN = 4
+BOARD_EDGE_GATE_HALO_SQUARES = 2.0
+
+
+@dataclass(frozen=True)
+class CameraFraming:
+    """Square widths of the gate band visible before each camera picture edge."""
+
+    required_squares: float
+    visible_squares: dict[str, float]
+
+    @property
+    def short_edges(self) -> dict[str, float]:
+        return {
+            edge: squares
+            for edge, squares in self.visible_squares.items()
+            if squares < self.required_squares
+        }
+
+    @property
+    def fits(self) -> bool:
+        return not self.short_edges
+
+
+def board_edge_camera_framing(
+    frame_shape: tuple[int, int],
+    camera_grid: FloatArray,
+    required_squares: float = BOARD_EDGE_GATE_HALO_SQUARES,
+) -> CameraFraming:
+    height, width = frame_shape
+    board = _band_corners(camera_grid, 0.0)
+    step = _band_corners(camera_grid, 1.0) - board
+    low = _EDGE_CROP_REQUIRED_MARGIN
+    limits = {
+        "left": (0, -1.0, float(low)),
+        "right": (0, 1.0, float(width - 1 - low)),
+        "top": (1, -1.0, float(low)),
+        "bottom": (1, 1.0, float(height - 1 - low)),
+    }
+    visible: dict[str, float] = {}
+    for edge, (axis, direction, limit) in limits.items():
+        fit = required_squares
+        for position, motion in zip(board[:, axis], step[:, axis]):
+            room = direction * (limit - float(position))
+            speed = direction * float(motion)
+            if room < 0:
+                fit = 0.0
+            elif speed > 0:
+                fit = min(fit, room / speed)
+        visible[edge] = fit
+    return CameraFraming(required_squares, visible)
 
 
 BlackoutSettlingState = Literal["waiting", "stable", "timeout"]
@@ -480,7 +530,7 @@ class BoardEdgeHandGate(BoardEdgeActivityDetector):
         still_release_seconds: float = 5.0,
         still_pixel_fraction: float = 0.01,
         minimum_square_coverage: float = 0.1,
-        halo_squares: float = 2.0,
+        halo_squares: float = BOARD_EDGE_GATE_HALO_SQUARES,
         clock: Callable[[], float] = monotonic,
     ) -> None:
         super().__init__(halo_squares=halo_squares)
@@ -781,34 +831,46 @@ def _inner_square_polygons(
     return polygons
 
 
+def board_edge_band_polygon(
+    camera_grid: FloatArray,
+    halo_squares: float = BOARD_EDGE_GATE_HALO_SQUARES,
+) -> np.ndarray:
+    """Unclipped corners of the gate's observation band in the camera image."""
+    return _band_corners(camera_grid, halo_squares)
+
+
+def _band_corners(
+    camera_grid: FloatArray,
+    halo_squares: float,
+) -> np.ndarray:
+    corners = []
+    for row, column, inner_row, inner_column in (
+        (0, 0, 1, 1),
+        (0, 8, 1, 7),
+        (8, 8, 7, 7),
+        (8, 0, 7, 1),
+    ):
+        corner = camera_grid[row, column]
+        corners.append(
+            corner
+            + halo_squares
+            * (
+                (corner - camera_grid[inner_row, column])
+                + (corner - camera_grid[row, inner_column])
+            )
+        )
+    return np.asarray(corners, dtype=np.float32)
+
+
 def _guidance_region_polygon(
     frame_shape: tuple[int, int],
     camera_grid: FloatArray,
     halo_squares: float = 1.0,
 ) -> np.ndarray:
     height, width = frame_shape
-    top_left = camera_grid[0, 0] + halo_squares * (
-        (camera_grid[0, 0] - camera_grid[1, 0])
-        + (camera_grid[0, 0] - camera_grid[0, 1])
+    polygon = np.rint(_band_corners(camera_grid, halo_squares)).astype(
+        np.int32
     )
-    top_right = camera_grid[0, 8] + halo_squares * (
-        (camera_grid[0, 8] - camera_grid[1, 8])
-        + (camera_grid[0, 8] - camera_grid[0, 7])
-    )
-    bottom_right = camera_grid[8, 8] + halo_squares * (
-        (camera_grid[8, 8] - camera_grid[7, 8])
-        + (camera_grid[8, 8] - camera_grid[8, 7])
-    )
-    bottom_left = camera_grid[8, 0] + halo_squares * (
-        (camera_grid[8, 0] - camera_grid[7, 0])
-        + (camera_grid[8, 0] - camera_grid[8, 1])
-    )
-    polygon = np.rint(
-        np.asarray(
-            [top_left, top_right, bottom_right, bottom_left],
-            dtype=np.float32,
-        )
-    ).astype(np.int32)
     polygon[:, 0] = np.clip(polygon[:, 0], 0, width - 1)
     polygon[:, 1] = np.clip(polygon[:, 1], 0, height - 1)
     return polygon

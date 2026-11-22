@@ -1002,6 +1002,8 @@ def _saved_calibration_window(saved: object) -> object:
         _camera=camera,
         _focus_dialog=None,
         _focus_guide_grid=None,
+        _camera_framing_dialog=None,
+        _camera_framing_indicator=MagicMock(),
         _screens=[screen],
         _projector_selector=SimpleNamespace(currentIndex=lambda: 0),
         _devices=[object()],
@@ -1025,7 +1027,14 @@ def test_startup_activates_saved_calibration_without_calibrating() -> None:
 
     from src.chess_camera.camera_app import CameraWindow
 
-    saved = SimpleNamespace(result=object(), camera_matches=True)
+    saved = SimpleNamespace(
+        result=SimpleNamespace(
+            mapping=SimpleNamespace(
+                camera_grid=_detection(600, 300, 1100, 800).grid_points
+            )
+        ),
+        camera_matches=True,
+    )
     window = _saved_calibration_window(saved)
 
     CameraWindow._restore_saved_calibration(window)
@@ -1038,6 +1047,55 @@ def test_startup_activates_saved_calibration_without_calibrating() -> None:
     )
     window._invalidate_calibration.assert_not_called()
     window._restore_remembered_square.assert_called_once_with()
+    assert window._camera_framing_dialog is None
+    window._camera_framing_indicator.setText.assert_called_once_with(
+        "Camera framing: OK"
+    )
+
+
+def test_startup_warns_when_camera_cuts_off_edge_band() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from src.chess_camera.camera_app import CameraWindow, QMessageBox
+
+    saved = SimpleNamespace(
+        result=SimpleNamespace(
+            mapping=SimpleNamespace(
+                camera_grid=_detection(100, 300, 600, 800).grid_points
+            )
+        ),
+        camera_matches=True,
+    )
+    window = _saved_calibration_window(saved)
+    window._projector_status.text.return_value = "Loaded."
+
+    with patch("src.chess_camera.camera_app.QMessageBox") as message_box:
+        message_box.StandardButton = QMessageBox.StandardButton
+        CameraWindow._restore_saved_calibration(window)
+
+    window._activate_calibration_result.assert_called_once()
+    window._invalidate_calibration.assert_not_called()
+    message = message_box.return_value.setText.call_args.args[0]
+    assert "left 1.5 of 2 squares" in message
+    assert "top" not in message
+    message_box.return_value.show.assert_called_once_with()
+    window._camera_framing_indicator.setText.assert_called_once_with(
+        "Camera framing: TOO TIGHT"
+    )
+    assert (
+        window._camera_framing_indicator.setToolTip.call_args.args[0]
+        == message
+    )
+    framing_events = [
+        call
+        for call in window._record_runtime_diagnostic.call_args_list
+        if call.args[0] == "camera-framing-short"
+    ]
+    assert len(framing_events) == 1
+    visible = framing_events[0].kwargs["details"]["visible_band_squares"]
+    assert visible["left"] == 1.54
+    assert visible["right"] == 2.0
 
 
 def test_startup_without_saved_calibration_stays_uncalibrated() -> None:
@@ -1130,6 +1188,21 @@ def test_focus_and_point_crops_pattern_to_saved_board(
     assert window._focus_dialog is dialog
 
 
+def test_focus_guide_marks_picture_edge_that_cuts_off_edge_band() -> None:
+    from src.chess_camera.camera_app import _draw_board_guide
+
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    red = np.array([0, 0, 255], dtype=np.uint8)
+
+    tight = _draw_board_guide(frame, _detection(100, 300, 600, 800).grid_points)
+    roomy = _draw_board_guide(frame, _detection(600, 300, 1100, 800).grid_points)
+
+    assert np.all(tight[:, :12] == red)
+    assert not np.any(np.all(tight[:, 1900:] == red, axis=2))
+    assert not np.any(np.all(roomy == red, axis=2))
+    assert np.any(np.all(roomy[170:180, 600:1100] == (0, 255, 0), axis=2))
+
+
 def test_focus_and_point_without_saved_calibration_shows_full_pattern() -> None:
     from unittest.mock import patch
 
@@ -1190,6 +1263,25 @@ def test_live_preview_is_forced_only_while_focusing() -> None:
     assert CameraWindow._live_preview_wanted(window)
     CameraWindow._end_focus_pattern_preview(window)
     assert not CameraWindow._live_preview_wanted(window)
+
+
+def test_focus_pattern_preview_guides_with_active_calibration() -> None:
+    from src.chess_camera.camera_app import CameraWindow
+
+    camera_grid = _detection(600, 300, 1100, 800).grid_points
+    window = SimpleNamespace(
+        _focus_guide_grid=None,
+        _focus_pattern_preview_active=False,
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(camera_grid=camera_grid)
+        ),
+    )
+
+    assert CameraWindow._camera_guide_grid(window) is None
+    window._focus_pattern_preview_active = True
+    assert CameraWindow._camera_guide_grid(window) is camera_grid
+    window._calibration_result = None
+    assert CameraWindow._camera_guide_grid(window) is None
 
 
 def test_resume_live_camera_shows_notice_when_preview_is_off() -> None:
