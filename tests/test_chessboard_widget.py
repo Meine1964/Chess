@@ -577,10 +577,8 @@ def test_main_commands_are_available_from_menus(
                 "_close_projector_button",
                 "_show_grid_button",
                 "_show_squares_button",
-                "_start_calibration_button",
-                "_coded_calibration_button",
+                "_focus_and_point_button",
                 "_adaptive_calibration_button",
-                "_quick_verify_button",
                 "_validate_calibration_button",
                 "_cancel_calibration_button",
             )
@@ -634,6 +632,18 @@ def test_main_commands_are_available_from_menus(
         "<separator>",
         "_show_grid_button",
         "_show_squares_button",
+    ]
+    calibration_menu = window.menuBar().actions()[4].menu()
+    assert calibration_menu is not None
+    assert [
+        "<separator>" if action.isSeparator() else action.text()
+        for action in calibration_menu.actions()
+    ] == [
+        "_focus_and_point_button",
+        "_adaptive_calibration_button",
+        "_validate_calibration_button",
+        "<separator>",
+        "_cancel_calibration_button",
     ]
     game_menu = window.menuBar().actions()[2].menu()
     assert game_menu is not None

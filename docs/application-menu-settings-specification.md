@@ -114,15 +114,21 @@ poll; a changed ongoing-game set may prompt again.
 
 ### 2.5 Calibration
 
-- **Full calibration - empty board**
-- **Populated calibration - experimental**
-- **Board-cropped calibration - experimental**
-- **Quick realign / assess**
+- **Focus and point camera...**
+- **Full calibration** (works with or without pieces on the board)
 - **Validate calibration**
 - **Cancel calibration**
 
-Existing availability rules shall continue to enable and disable the matching
-menu actions. Moving a command shall not change its operational behavior.
+The empty-board, populated, and quick-realignment calibrations have no menu
+action. Existing availability rules shall continue to enable and disable the
+matching menu actions. Moving a command shall not change its operational
+behavior.
+
+### 2.6 Silent pop-ups
+
+No pop-up shall play a sound, because the application runs next to a chess
+game. Message, warning, error, and confirmation pop-ups shall therefore show
+no message icon; Windows plays its alert sound according to that icon.
 
 ## 3. Settings Dialog
 

@@ -143,9 +143,9 @@ repeated automatically and which instruction the player sees.
   attempt failures.
 - Cancelling the calibration also cancels a pending retry.
 - When calibration finally fails, show the instruction first, then the
-  technical details. Both startup and manual calibration show it in a
-  warning dialog and in the projector status line.
-- Every instruction ends with "then start Board-cropped calibration
+  technical details, in a silent dialog (see the application menu
+  specification) and in the projector status line.
+- Every instruction ends with "then start Calibration > Full calibration
   again."
 - Cancellation, timeout, camera-resolution change, insufficient markers,
   invalid rough geometry, Gray-code decode failure, or validation failure
@@ -221,8 +221,9 @@ nothing can be projected. Instead:
   of squares outlined in red. These are grid rows 2–5, or grid columns 2–5
   when more verified corners lie there. Clearing them leaves at least 21
   fully surrounded corners spread over all quadrants.
-- The corrective action is "Clear the squares outlined in red in the camera
-  view, then start Board-cropped calibration again."
+- The corrective action is "Too many pieces hide the board. Clear the
+  squares outlined in red in the camera view, then start Calibration > Full
+  calibration again."
 - The next calibration start resumes the live preview.
 
 ### Phase 1: discovery markers
@@ -323,10 +324,11 @@ Every board-cropped failure shows an instruction that matches its category
 
 - With a map and red squares, or a clear-pieces failure with a map: "Too
   many pieces block the calibration. Green squares were usable; remove the
-  pieces from the red squares, then start Board-cropped calibration again."
+  pieces from the red squares, then start Calibration > Full calibration
+  again."
 - When pieces hide the board lattice: "Too many pieces hide the board. Clear
-  the squares outlined in red in the camera view, then start Board-cropped
-  calibration again."
+  the squares outlined in red in the camera view, then start Calibration >
+  Full calibration again."
 - Otherwise the category instruction, prefixed by "Green squares were usable
   for calibration." when a map is shown, and by "Calibration failed after N
   attempts." when automatic retries were made.
@@ -345,47 +347,44 @@ Every board-cropped failure shows an instruction that matches its category
   - plane-rejected squares outlined in red;
   - occupancy-excluded squares outlined in blue.
 
-## Startup Calibration
+## Startup And The Calibration Menu
 
-- Whenever the camera starts or the projector selection changes, and a
-  projector display is selected, the application runs this calibration
-  automatically. The saved calibration is not trusted first.
-- **Focus and pointing step.** Before calibrating, the projector shows the
-  focus pattern so the player can focus the camera and the projector and
-  point the camera at the board:
+- Startup never calibrates automatically. Whenever the camera starts or the
+  projector selection changes, the application loads the saved calibration
+  for the selected projector and verifies it live with the alignment
+  monitor, as described in `chess-piece-ui-tracking-specification.md`.
+- Without a usable saved calibration, the application stays uncalibrated and
+  the projector status says: "Not calibrated. Use Calibration > Full
+  calibration." Board features stay disabled until a calibration succeeds.
+  No dialog is shown.
+- This calibration is the menu action **Calibration > Full calibration**.
+  It works with or without pieces on the board.
+- **Calibration > Focus and point camera...** shows the focus pattern so the
+  player can focus the camera and the projector and point the camera at the
+  board:
   - When a saved calibration exists for the selected projector display and
     resolution, the pattern is limited to the saved board area, enlarged by
-    one square on every side. Everything else stays black. The saved
-    calibration only places this pattern; it is never used as the mapping.
+    one square on every side. Everything else stays black.
   - Without such a saved calibration, the full-screen focus pattern is shown.
   - When the saved calibration also matches the camera and its resolution,
     the live camera preview outlines the saved board position in green, so
     the player can aim the camera until the board fills the outline.
-  - A non-modal pop-up, "Focus and point the camera", explains this and
-    offers **OK** and **Cancel**. The live preview keeps updating behind it.
-  - **OK** turns the projector black, removes the outline, and schedules the
-    calibration. **Cancel** does the same but skips the calibration, so the
-    application stays uncalibrated until a calibration is requested.
-  - Restarting the camera or changing the projector closes an open pop-up
-    and begins a new focus step.
-  - Manually requested calibrations skip this step.
-- The calibration starts after the camera has delivered frames for two
-  seconds after OK, so exposure can settle.
-- On success, the result is activated and saved like a requested
-  calibration.
-- On failure or cancellation, the application remains uncalibrated. A saved
-  calibration is never loaded, because the board, camera, or projector may
-  have moved since it was made.
-- The status bar reports the failure and the corrective action, and the
-  board map is projected as described in "Board map on failure". No modal dialog
-  interrupts startup, and the calibration is not repeated automatically.
-- Explicit calibration requests use the same piece-tolerant procedure.
+  - A non-modal silent pop-up, "Focus and point the camera", explains this
+    and offers **OK**. The live preview keeps updating behind it.
+  - **OK** turns the projector black and removes the outline. It does not
+    start a calibration.
+  - Restarting the camera or changing the projector closes an open pop-up.
+  - The action is unavailable while a calibration runs.
+- On success, a calibration is activated and saved. On failure, the
+  previous verified calibration stays active when there is one; otherwise
+  the application stays uncalibrated.
 
 ## Isolation
 
-- **Full calibration - empty board** remains unchanged.
-- **Populated calibration - experimental** remains unchanged.
-- The new action is **Board-cropped calibration - experimental**.
+- The Calibration menu offers only **Focus and point camera...**, **Full
+  calibration**, **Validate calibration**, and **Cancel calibration**.
+- The empty-board, populated, and quick-realignment calibration code stays in
+  place but has no menu action. Its removal is a separate decision.
 - Saved calibration data uses the existing `CalibrationResult` and
   `CalibrationStore` format.
 
@@ -408,9 +407,9 @@ Every board-cropped failure shows an instruction that matches its category
    a grid within one projector pixel of the true grid.
 9. Too few plane-consistent squares produce a calibration error that names
    the retained-square count.
-10. Startup runs the board-cropped calibration automatically. On failure it
-    stays uncalibrated without a modal dialog and never loads the saved
-    calibration.
+10. Startup loads and verifies the saved calibration and never starts a
+    calibration. Without a saved calibration it stays uncalibrated and
+    points the player to Calibration > Full calibration.
 11. A Gray-code pair whose predicted-pattern agreement or contrast is too low
     is recaptured at most twice, and then fails with a message naming the
     bit.
@@ -424,10 +423,10 @@ Every board-cropped failure shows an instruction that matches its category
     from individually visible corners to within one camera pixel. When too
     few corners are visible, the failure outlines the squares to clear in the
     camera view and names that action.
-15. At startup, the focus pattern is shown cropped to the saved board area
-    plus one square, or full-screen without a saved calibration. The camera
-    preview outlines the saved board when the camera matches. Calibration
-    starts only after OK; Cancel leaves the application uncalibrated.
+15. Calibration > Focus and point camera... shows the focus pattern cropped
+    to the saved board area plus one square, or full-screen without a saved
+    calibration. The camera preview outlines the saved board when the camera
+    matches. OK returns the projector to black without calibrating.
 16. Camera frames that still show the coded discovery pattern after the
     first Gray-code pattern appears are not accepted as Gray-code captures,
     and a recaptured pair is not compared with a stale reference.
@@ -437,21 +436,19 @@ Every board-cropped failure shows an instruction that matches its category
 
 ## Implementation Status
 
-Implemented as the independent **Board-cropped calibration - experimental**
-action. The existing empty-board and populated methods retain their original
-capture sequences. Hardware testing confirmed successful dense calibration
+Implemented as the **Calibration > Full calibration** action (formerly
+"Board-cropped calibration - experimental"). The existing empty-board and
+populated methods retain their original capture sequences and code but no
+longer have menu actions. Hardware testing confirmed successful dense calibration
 and the faster transition-synchronized cropped Gray-code cycle. The
 transition-synchronized, watchdog-bounded three-frame discovery policy and
 five-second completion-preview lifecycle are automated-test validated and
 await a final physical retest.
 
 Piece-tolerant plane-support selection, occupancy-prior marker filtering,
-the plane-support diagnostics, and automatic startup calibration are
-implemented and validated by automated tests. Startup never loads the saved
-calibration: on failure the app stays uncalibrated and, for insufficient
-plane support, lights the central squares to clear. The synthetic
-starting-position test confirms that the unfiltered fit is rejected while
-the plane-support fit stays within one projector pixel.
+and the plane-support diagnostics are implemented and validated by automated
+tests. The synthetic starting-position test confirms that the unfiltered fit
+is rejected while the plane-support fit stays within one projector pixel.
 
 The 600 ms forced-capture delay, Gray-code pair verification with at most
 two recaptures, and the per-capture and per-pair diagnostics are implemented
@@ -474,30 +471,47 @@ The piece-tolerant board lattice and the camera-view clearing instruction are
 implemented and validated by automated tests: the starting position and a
 scattered position with an unverified rough grid fit within one camera pixel,
 fully covering pieces raise the clearing error with red outlines on the middle
-band, and a startup failure freezes the camera view with the clearing action.
+band, and a calibration failure freezes the camera view with the clearing action.
 On the field image of the failed 35-piece startup, the fit verified 41 of the
 49 interior corners at 0.65 camera-pixel RMS. A hardware rerun of the
 complete calibration with that position confirmed it.
 
-The startup focus and pointing step is implemented and validated by
-automated tests: the pattern is cropped to the enlarged saved board area or
-shown full-screen without a saved calibration, the camera guide outline is
-set only when the saved calibration matches the camera, OK schedules the
-calibration, Cancel leaves the app uncalibrated, and a stale dialog is
-ignored. The dialog interaction and the preview outline await hardware
-confirmation.
+Automatic startup calibration has been removed. Startup loads and verifies
+the saved calibration, or reports the "Not calibrated" status without a
+dialog. Automated tests confirm that a saved calibration is activated without
+live verification and with the occupied squares for camera-grid recovery,
+and that its absence leaves the app uncalibrated with no pop-up.
+
+The **Calibration > Focus and point camera...** action is implemented and
+validated by automated tests: the pattern is cropped to the enlarged saved
+board area or shown full-screen without a saved calibration, the camera guide
+outline is set only when the saved calibration matches the camera, the dialog
+offers only OK, OK returns the projector to black without calibrating, and a
+stale dialog is ignored. The dialog interaction and the preview outline await
+hardware confirmation.
+
+All pop-ups use no icon so Windows plays no alert sound; an automated test
+confirms that the shared helpers set no icon and that confirmations return
+true only for Yes. The silence itself awaits hardware confirmation.
+
+Device loss is implemented and validated by automated tests: removing the
+active camera cancels calibration, blacks the projector and deactivates the
+calibration; removing the projector display closes the projector window and
+deactivates the calibration, and its return reopens the window black and
+reloads the saved calibration. The camera-error path blacks the projector
+without deactivating the calibration.
 
 Black resynchronization, failure categories, automatic retry, and the
 instruction dialog are implemented and validated by automated tests:
 lagging pattern frames are rejected until two frames match the black
 reference, an unreliable failure is retried twice and then reported with
 the earlier attempt failures, a board-not-visible failure is reported
-without retry, each category produces its instruction, and startup failures
-show the instruction dialog. The resynchronization fix for the field
+without retry, each category produces its instruction, and Full calibration
+failures show the instruction dialog. The resynchronization fix for the field
 failures (stale coded frames in the first Gray-code capture) awaits a
 hardware retest.
 
 Validation:
 
-- Projector calibration and projector tests: 128 passed.
-- Full repository quality gate: 503 passed.
+- Projector calibration and projector tests: 131 passed.
+- Full repository quality gate: 506 passed.

@@ -221,27 +221,28 @@ Restored settings are provisional until the startup checks below succeed.
    report the specific condition non-modally and do not enter startup Offline
    readiness.
 
-   **Startup calibration.** Whenever the camera starts or the selected
-   projector changes, and a projector display is selected, the application
-   automatically runs the piece-tolerant board-cropped calibration, as
-   described in `adaptive-board-cropped-calibration-specification.md`. It
-   does not first trust the saved calibration. It first shows the focus
-   pattern, cropped to the saved board area when one exists, with a pop-up
-   so the player can focus and point the camera; OK starts the calibration
-   and Cancel skips it. The calibration begins two seconds after OK, works
-   with pieces in any position, and on
-   success is activated and saved as live verified. When it fails or is
-   cancelled, the application stays uncalibrated and never loads the saved
-   calibration. The failure and its corrective action are reported
-   non-modally, and a board map shows usable squares in green and squares
-   to clear in red.
+   **Startup.** Whenever the camera starts or the selected projector
+   changes, and a projector display is selected, the application loads the
+   saved calibration and verifies it live as described below. It never
+   starts a calibration on its own. Calibration and the focus pattern are
+   available only from the Calibration menu, as described in
+   `adaptive-board-cropped-calibration-specification.md`. Without a usable
+   saved calibration, the application stays uncalibrated, reports "Not
+   calibrated. Use Calibration > Full calibration." in the projector status,
+   and keeps board features disabled.
 
-   The automatic alignment recovery described below is no longer invoked by
-   the application, because startup always recalibrates. Saved calibration
-   is loaded only to place the startup focus pattern. The retained code
-   stays until its removal is decided.
+   **Device loss.** When the active camera disappears or reports an error,
+   any running calibration is cancelled and the projector turns black. When
+   the camera disappears, the calibration is also deactivated, so no clocks,
+   markers, or indicators are projected; it is loaded again when the camera
+   returns. When the selected projector display disappears, the projector
+   window is closed instead of moving to another screen, any running
+   calibration is cancelled, and the calibration is deactivated. When that
+   display returns, the projector window reopens black and the saved
+   calibration is loaded again. The losses are reported in the status line
+   without a dialog.
 
-   Previously, the saved calibration was loaded when its projector display
+   The saved calibration is loaded when its projector display
    name and resolution match the selected projector. Camera-only operation is
    not supported. A loaded saved calibration keeps occupancy, startup checks,
    and move tracking paused until the alignment monitor reports a live

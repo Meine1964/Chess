@@ -692,7 +692,6 @@ def test_completed_calibration_returns_to_black_without_grid_preview() -> None:
         _latest_frame=None,
         _projector_window=MagicMock(),
         _restore_remembered_square=MagicMock(),
-        _startup_calibration_running=False,
     )
 
     with patch(
@@ -964,7 +963,6 @@ def test_failed_experimental_calibration_retains_previous_mapping(
             failure_kind="unreliable",
             adaptive_attempt=1,
         ),
-        _startup_calibration_running=False,
         _invalidate_saved_calibration=MagicMock(return_value=None),
         _invalidate_calibration=MagicMock(),
         _set_calibration_indicator=MagicMock(),
@@ -988,36 +986,81 @@ def test_failed_experimental_calibration_retains_previous_mapping(
     assert details["previous_calibration_invalidated"] is False
 
 
-def test_startup_calibration_starts_after_camera_settles() -> None:
+def _saved_calibration_window(saved: object) -> object:
     from types import SimpleNamespace
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import MagicMock
+
+    screen = MagicMock()
+    screen.geometry.return_value.width.return_value = 1280
+    screen.geometry.return_value.height.return_value = 720
+    screen.name.return_value = "Projector"
+    camera = MagicMock()
+    camera.cameraFormat.return_value.resolution.return_value.width.return_value = 1920
+    camera.cameraFormat.return_value.resolution.return_value.height.return_value = 1080
+    return SimpleNamespace(
+        _camera=camera,
+        _focus_dialog=None,
+        _focus_guide_grid=None,
+        _screens=[screen],
+        _projector_selector=SimpleNamespace(currentIndex=lambda: 0),
+        _devices=[object()],
+        _active_device_index=0,
+        _device_key=MagicMock(return_value="camera"),
+        _calibration_store=SimpleNamespace(
+            load_for_projector=MagicMock(return_value=saved)
+        ),
+        _piece_synchronizer=SimpleNamespace(position={(0, 0): "R"}),
+        _physical_board_square=lambda row, column: (7 - row, column),
+        _invalidate_calibration=MagicMock(),
+        _activate_calibration_result=MagicMock(),
+        _restore_remembered_square=MagicMock(),
+        _projector_status=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
+    )
+
+
+def test_startup_activates_saved_calibration_without_calibrating() -> None:
+    from types import SimpleNamespace
 
     from src.chess_camera.camera_app import CameraWindow
 
-    window = SimpleNamespace(
-        _startup_focus_pending=False,
-        _startup_calibration_pending=True,
-        _startup_calibration_ready_at=None,
-        _startup_calibration_running=False,
-        _calibrator=SimpleNamespace(active=False),
-        _start_adaptive_projector_calibration=MagicMock(return_value=True),
+    saved = SimpleNamespace(result=object(), camera_matches=True)
+    window = _saved_calibration_window(saved)
+
+    CameraWindow._restore_saved_calibration(window)
+
+    window._activate_calibration_result.assert_called_once_with(
+        saved.result,
+        live_verified=False,
+        camera_changed=False,
+        recovery_occupied_squares=frozenset({(7, 0)}),
+    )
+    window._invalidate_calibration.assert_not_called()
+    window._restore_remembered_square.assert_called_once_with()
+
+
+def test_startup_without_saved_calibration_stays_uncalibrated() -> None:
+    from unittest.mock import patch
+
+    from src.chess_camera.camera_app import (
+        _NOT_CALIBRATED_STATUS,
+        CameraWindow,
     )
 
-    with patch(
-        "src.chess_camera.camera_app.monotonic",
-        side_effect=[10.0, 11.0, 12.5],
-    ):
-        for _frame in range(3):
-            CameraWindow._advance_startup_calibration(window)
+    window = _saved_calibration_window(None)
 
-    window._start_adaptive_projector_calibration.assert_called_once_with(
-        startup=True
+    with patch("src.chess_camera.camera_app.QMessageBox") as message_box:
+        CameraWindow._restore_saved_calibration(window)
+
+    window._activate_calibration_result.assert_not_called()
+    window._invalidate_calibration.assert_called_once_with()
+    window._projector_status.setText.assert_called_once_with(
+        _NOT_CALIBRATED_STATUS
     )
-    assert window._startup_calibration_running is True
-    assert window._startup_calibration_pending is False
+    assert not message_box.mock_calls
 
 
-def _startup_focus_window(saved: object) -> object:
+def _focus_window(saved: object) -> object:
     from types import SimpleNamespace
     from unittest.mock import MagicMock
 
@@ -1036,11 +1079,11 @@ def _startup_focus_window(saved: object) -> object:
         _calibration_store=SimpleNamespace(
             load_for_projector=MagicMock(return_value=saved)
         ),
+        _calibration_result=None,
         _focus_guide_grid=None,
-        _startup_focus_dialog=None,
-        _startup_calibration_pending=False,
-        _startup_calibration_ready_at=None,
+        _focus_dialog=None,
         _suspend_selected_square=MagicMock(),
+        _restore_remembered_square=MagicMock(),
         _alignment_monitor=MagicMock(),
         _projector_window=MagicMock(),
         _projector_status=MagicMock(),
@@ -1049,13 +1092,13 @@ def _startup_focus_window(saved: object) -> object:
 
 
 @pytest.mark.parametrize("camera_matches", [True, False])
-def test_startup_focus_crops_pattern_to_saved_board(
+def test_focus_and_point_crops_pattern_to_saved_board(
     camera_matches: bool,
 ) -> None:
     from types import SimpleNamespace
     from unittest.mock import patch
 
-    from src.chess_camera.camera_app import CameraWindow
+    from src.chess_camera.camera_app import CameraWindow, QMessageBox
 
     projector_grid = _detection(400, 200, 720, 520).grid_points
     camera_grid = _detection(600, 300, 1100, 800).grid_points
@@ -1068,30 +1111,34 @@ def test_startup_focus_crops_pattern_to_saved_board(
         ),
         camera_matches=camera_matches,
     )
-    window = _startup_focus_window(saved)
+    window = _focus_window(saved)
 
     with patch("src.chess_camera.camera_app.QMessageBox") as message_box:
-        CameraWindow._begin_startup_focus(window)
+        message_box.StandardButton = QMessageBox.StandardButton
+        CameraWindow._begin_focus_and_point(window)
 
     pattern = window._projector_window.show_pattern.call_args.args[0]
     assert not np.any(pattern[:150, :])
     assert np.any(pattern[200:520, 400:720])
     assert (window._focus_guide_grid is camera_grid) is camera_matches
-    message_box.return_value.show.assert_called_once_with()
-    assert window._startup_focus_dialog is message_box.return_value
-    assert window._startup_calibration_pending is False
+    dialog = message_box.return_value
+    dialog.setStandardButtons.assert_called_once_with(
+        QMessageBox.StandardButton.Ok
+    )
+    dialog.show.assert_called_once_with()
+    assert window._focus_dialog is dialog
 
 
-def test_startup_focus_without_saved_calibration_shows_full_pattern() -> None:
+def test_focus_and_point_without_saved_calibration_shows_full_pattern() -> None:
     from unittest.mock import patch
 
     from src.chess_camera.camera_app import CameraWindow
     from src.chess_camera.projector import focus_pattern
 
-    window = _startup_focus_window(None)
+    window = _focus_window(None)
 
     with patch("src.chess_camera.camera_app.QMessageBox"):
-        CameraWindow._begin_startup_focus(window)
+        CameraWindow._begin_focus_and_point(window)
 
     np.testing.assert_array_equal(
         window._projector_window.show_pattern.call_args.args[0],
@@ -1100,33 +1147,53 @@ def test_startup_focus_without_saved_calibration_shows_full_pattern() -> None:
     assert window._focus_guide_grid is None
 
 
-@pytest.mark.parametrize("accepted", [True, False])
-def test_startup_focus_ok_schedules_calibration_and_cancel_skips_it(
-    accepted: bool,
-) -> None:
+def test_focus_and_point_ok_returns_to_black_without_calibrating() -> None:
     from unittest.mock import MagicMock
 
     from src.chess_camera.camera_app import CameraWindow
 
-    window = _startup_focus_window(None)
+    window = _focus_window(None)
+    window._start_adaptive_projector_calibration = MagicMock()
     dialog = MagicMock()
-    window._startup_focus_dialog = dialog
+    window._focus_dialog = dialog
     window._focus_guide_grid = np.zeros((9, 9, 2), dtype=np.float32)
 
-    CameraWindow._finish_startup_focus(window, MagicMock(), accepted)
+    CameraWindow._finish_focus_and_point(window, MagicMock())
 
-    assert window._startup_focus_dialog is dialog
+    assert window._focus_dialog is dialog
     window._projector_window.show_black.assert_not_called()
 
-    CameraWindow._finish_startup_focus(window, dialog, accepted)
+    CameraWindow._finish_focus_and_point(window, dialog)
 
     window._projector_window.show_black.assert_called_once_with()
-    assert window._startup_focus_dialog is None
+    assert window._focus_dialog is None
     assert window._focus_guide_grid is None
-    assert window._startup_calibration_pending is accepted
+    window._start_adaptive_projector_calibration.assert_not_called()
 
 
-def test_startup_calibration_failure_projects_support_map() -> None:
+def test_silent_dialog_helpers_use_no_icon() -> None:
+    from unittest.mock import patch
+
+    from src.chess_camera.camera_app import QMessageBox, _confirm, _show_message
+
+    with patch("src.chess_camera.camera_app.QMessageBox") as message_box:
+        message_box.Icon = QMessageBox.Icon
+        message_box.StandardButton = QMessageBox.StandardButton
+        dialog = message_box.return_value
+        _show_message(None, "Title", "Text")
+        dialog.clickedButton.return_value = dialog.button.return_value
+        confirmed = _confirm(None, "Title", "Question")
+        dialog.clickedButton.return_value = object()
+        declined = _confirm(None, "Title", "Question")
+
+    for icon_call in dialog.setIcon.call_args_list:
+        assert icon_call.args == (QMessageBox.Icon.NoIcon,)
+    assert dialog.setIcon.call_count == 3
+    assert confirmed is True
+    assert declined is False
+
+
+def test_full_calibration_failure_projects_support_map() -> None:
     from types import SimpleNamespace
     from unittest.mock import MagicMock, patch
 
@@ -1135,8 +1202,12 @@ def test_startup_calibration_failure_projects_support_map() -> None:
     support_map = np.zeros((720, 1280, 3), dtype=np.uint8)
     window = SimpleNamespace(
         _projector_window=MagicMock(),
-        _startup_calibration_running=True,
+        _calibration_result=None,
         _calibrator=SimpleNamespace(
+            quick_verification=False,
+            validation_only=False,
+            coded_pattern_mode=False,
+            adaptive_cropped_mode=True,
             diagnostic_details={"plane_support": {}},
             diagnostic_captures={},
             support_map=support_map,
@@ -1159,13 +1230,12 @@ def test_startup_calibration_failure_projects_support_map() -> None:
     window._invalidate_calibration.assert_called_once_with()
     window._projector_window.show_pattern.assert_called_once_with(support_map)
     status = window._projector_status.setText.call_args.args[0]
+    assert status.startswith("Full calibration failed")
     assert "remove the pieces from the red squares" in status
-    dialog_text = message_box.warning.call_args.args[2]
+    dialog_text = message_box.return_value.setText.call_args.args[0]
     assert dialog_text.startswith("Too many pieces block the calibration.")
     assert dialog_text.endswith("Details: too few squares")
-    assert window._startup_calibration_running is False
     failure = window._record_runtime_diagnostic.call_args_list[0]
-    assert failure.kwargs["details"]["startup"] is True
     assert "plane_support" in failure.kwargs["details"]
 
 
@@ -1202,7 +1272,7 @@ def test_calibration_failure_shows_instruction_for_kind(
     action = CameraWindow._calibration_failure_action(window, False)
 
     assert expected in action
-    assert action.endswith("then start Board-cropped calibration again.")
+    assert action.endswith("then start Calibration > Full calibration again.")
 
 
 def test_hidden_board_failure_outlines_squares_in_camera_view() -> None:
@@ -1214,7 +1284,14 @@ def test_hidden_board_failure_outlines_squares_in_camera_view() -> None:
     clearance_view = np.zeros((1080, 1920, 3), dtype=np.uint8)
     window = SimpleNamespace(
         _projector_window=MagicMock(),
+        _calibration_result=None,
         _calibrator=SimpleNamespace(
+            quick_verification=False,
+            validation_only=False,
+            coded_pattern_mode=False,
+            adaptive_cropped_mode=True,
+            diagnostic_details={},
+            diagnostic_captures={},
             support_map=None,
             camera_clearance_view=clearance_view,
             clearance_squares=(),
@@ -1235,7 +1312,7 @@ def test_hidden_board_failure_outlines_squares_in_camera_view() -> None:
     )
 
     with patch("src.chess_camera.camera_app.QMessageBox"):
-        CameraWindow._report_startup_calibration_failure(
+        CameraWindow._projector_calibration_failed(
             window,
             "Coded discovery failed: Too many pieces cover the board squares.",
         )
@@ -2067,7 +2144,7 @@ def test_missing_remembered_projector_does_not_select_replacement() -> None:
 
 def test_explicit_projector_selection_is_persisted() -> None:
     from types import SimpleNamespace
-    from unittest.mock import MagicMock, call
+    from unittest.mock import MagicMock, call, patch
 
     from src.chess_camera.camera_app import CameraWindow
 
@@ -2097,10 +2174,10 @@ def test_explicit_projector_selection_is_persisted() -> None:
         ],
         _settings=settings,
         _record_runtime_diagnostic=MagicMock(),
-        _request_startup_calibration=MagicMock(),
     )
 
-    CameraWindow._projector_selection_changed(window)
+    with patch.object(CameraWindow, "_restore_saved_calibration"):
+        CameraWindow._projector_selection_changed(window)
 
     assert settings.setValue.call_args_list == [
         call("projector/screen_name", "remembered-projector"),
@@ -2114,7 +2191,7 @@ def test_explicit_projector_selection_is_persisted() -> None:
 
 def test_projector_screen_refresh_uses_current_enumeration() -> None:
     from types import SimpleNamespace
-    from unittest.mock import MagicMock
+    from unittest.mock import MagicMock, patch
 
     from src.chess_camera.camera_app import CameraWindow
 
@@ -2143,20 +2220,123 @@ def test_projector_screen_refresh_uses_current_enumeration() -> None:
         _settings=settings,
         _projector_selector=selector,
         _screens=[],
-        _request_startup_calibration=MagicMock(),
+        _projector_lost=False,
+        _calibration_result=None,
     )
 
-    CameraWindow._refresh_projector_screens(
-        window,
-        [primary, mini],
-    )
+    with patch.object(CameraWindow, "_restore_saved_calibration") as restore:
+        CameraWindow._refresh_projector_screens(
+            window,
+            [primary, mini],
+        )
 
     assert window._screens == [primary, mini]
     assert selector.addItem.call_args_list[-1].args == (
         "ABC TV - 1280x720 at (0, 0)",
     )
     selector.setCurrentIndex.assert_called_once_with(1)
-    window._request_startup_calibration.assert_called_once_with()
+    restore.assert_called_once_with(window)
+
+
+def test_projector_display_loss_closes_window_and_return_reopens_it() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    geometry = SimpleNamespace(
+        width=lambda: 1280,
+        height=lambda: 720,
+        x=lambda: 0,
+        y=lambda: 0,
+    )
+    primary = SimpleNamespace(
+        name=lambda: "primary",
+        geometry=lambda: geometry,
+        manufacturer=lambda: "",
+        model=lambda: "",
+    )
+    projector = SimpleNamespace(
+        name=lambda: "ABC TV",
+        geometry=lambda: geometry,
+        manufacturer=lambda: "",
+        model=lambda: "",
+    )
+    selector = MagicMock()
+    settings = MagicMock()
+    settings.value.return_value = "ABC TV"
+    projector_window = MagicMock()
+    projector_window.isVisible.return_value = True
+    window = SimpleNamespace(
+        _settings=settings,
+        _projector_selector=selector,
+        _screens=[primary, projector],
+        _projector_lost=False,
+        _calibration_result=object(),
+        _focus_dialog=None,
+        _focus_guide_grid=None,
+        _calibrator=SimpleNamespace(active=True, cancel=MagicMock()),
+        _projector_window=projector_window,
+        _alignment_monitor=MagicMock(),
+        _suspend_selected_square=MagicMock(),
+        _invalidate_calibration=MagicMock(),
+        _projector_status=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
+        _open_projector=MagicMock(return_value=True),
+    )
+
+    with patch.object(CameraWindow, "_restore_saved_calibration") as restore:
+        CameraWindow._refresh_projector_screens(window, [primary])
+
+        window._calibrator.cancel.assert_called_once_with()
+        projector_window.close.assert_called_once_with()
+        window._invalidate_calibration.assert_called_once_with()
+        assert window._projector_lost is True
+        restore.assert_not_called()
+
+        CameraWindow._refresh_projector_screens(window, [primary, projector])
+
+    window._open_projector.assert_called_once_with()
+    restore.assert_called_once_with(window)
+    assert window._projector_lost is False
+
+
+def test_camera_removal_stops_projector_output() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    camera = MagicMock()
+    window = SimpleNamespace(
+        _devices=[object()],
+        _active_device_index=0,
+        _device_key=lambda _device: "gone",
+        _external_camera_devices=lambda: [],
+        _camera_selector=MagicMock(),
+        _calibrator=SimpleNamespace(active=True, cancel=MagicMock()),
+        _camera=camera,
+        _preview=MagicMock(),
+        _focus_dialog=None,
+        _focus_guide_grid=None,
+        _projector_window=MagicMock(),
+        _suspend_selected_square=MagicMock(),
+        _alignment_monitor=MagicMock(),
+        _invalidate_calibration=MagicMock(),
+        _projector_status=MagicMock(),
+        _wait_for_external_camera=MagicMock(),
+    )
+
+    CameraWindow._camera_devices_changed(window)
+
+    camera.stop.assert_called_once_with()
+    window._calibrator.cancel.assert_called_once_with()
+    window._projector_window.show_black.assert_called_once_with()
+    window._alignment_monitor.set_black.assert_called_once_with()
+    window._invalidate_calibration.assert_called_once_with()
+    assert "projector output stopped" in (
+        window._projector_status.setText.call_args.args[0]
+    )
 
 
 def test_reset_to_start_blacks_projector_before_verification() -> None:
