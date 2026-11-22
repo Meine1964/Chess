@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .board_detector import BoardDetection, BoardDetector, ImageArray
+from .board_detector import BoardDetection, BoardDetector, FloatArray, ImageArray
 from .alignment_monitor import AlignmentMonitor
 from .calibration_controller import (
     CalibrationResult,
@@ -112,7 +112,12 @@ from .occupancy import (
 )
 from .offline_clock import OfflineClock, OfflineClockSnapshot
 from .piece_color_classifier import PieceColorLabel, classify_piece_colors
-from .projector import ProjectorWindow, TurnIndicatorCorner, focus_pattern
+from .projector import (
+    ProjectorWindow,
+    TurnIndicatorCorner,
+    board_focus_pattern,
+    focus_pattern,
+)
 from .promotion_selection import (
     ManipulationSettlingDetector,
     PromotionEdge,
@@ -693,6 +698,20 @@ def _ui_square_from_name(name: str) -> tuple[int, int]:
     return 8 - int(name[1]), ord(name[0]) - ord("a")
 
 
+def _draw_board_guide(frame: ImageArray, grid: FloatArray) -> ImageArray:
+    guided = frame.copy()
+    outer = np.asarray(grid, dtype=np.float32)[[0, 0, 8, 8], [0, 8, 8, 0]]
+    cv2.polylines(
+        guided,
+        [np.round(outer).astype(np.int32).reshape(-1, 1, 2)],
+        True,
+        (0, 255, 0),
+        3,
+        cv2.LINE_AA,
+    )
+    return guided
+
+
 def _diagnostic_position(position: Position) -> dict[str, PieceCode]:
     return {
         square_name(square): piece
@@ -1183,6 +1202,9 @@ class CameraWindow(QMainWindow):
         self._startup_calibration_pending = False
         self._startup_calibration_ready_at: float | None = None
         self._startup_calibration_running = False
+        self._startup_focus_pending = False
+        self._startup_focus_dialog: QMessageBox | None = None
+        self._focus_guide_grid: FloatArray | None = None
         self._reference_store = ReferenceImageStore(
             _PROJECT_ROOT / "calibrations" / "move_reference.npz"
         )
@@ -8798,6 +8820,8 @@ class CameraWindow(QMainWindow):
         selected_index = self._projector_selector.currentIndex()
         if not 0 <= selected_index < len(self._screens):
             self._startup_calibration_pending = False
+            self._startup_focus_pending = False
+            CameraWindow._close_startup_focus(self)
             self._invalidate_calibration()
             self._projector_status.setText(
                 "No projector display is selected; startup calibration waits "
@@ -8811,18 +8835,134 @@ class CameraWindow(QMainWindow):
             return
 
         self._invalidate_calibration()
-        self._startup_calibration_pending = True
+        CameraWindow._close_startup_focus(self)
+        self._startup_calibration_pending = False
+        self._startup_focus_pending = True
         self._startup_calibration_ready_at = None
         self._projector_status.setText(
-            "Startup calibration starts when the camera image has settled; "
-            "pieces may stay on the board."
+            "Startup calibration begins with focusing and pointing the "
+            "camera; pieces may stay on the board."
         )
         self._record_runtime_diagnostic(
             "startup-calibration-scheduled",
             self._projector_status.text(),
         )
 
+    def _close_startup_focus(self) -> None:
+        dialog = self._startup_focus_dialog
+        self._startup_focus_dialog = None
+        self._focus_guide_grid = None
+        if dialog is not None:
+            dialog.close()
+
+    def _begin_startup_focus(self) -> None:
+        if not self._open_projector():
+            CameraWindow._report_startup_calibration_failure(
+                self,
+                "Startup calibration could not start.",
+            )
+            return
+        selected_screen = self._screens[self._projector_selector.currentIndex()]
+        geometry = selected_screen.geometry()
+        saved = None
+        if self._latest_frame is not None:
+            camera_height, camera_width = self._latest_frame.shape[:2]
+            active_device = self._devices[self._active_device_index]
+            try:
+                saved = self._calibration_store.load_for_projector(
+                    camera_id=self._device_key(active_device),
+                    camera_resolution=(camera_width, camera_height),
+                    projector_name=selected_screen.name(),
+                    projector_resolution=(geometry.width(), geometry.height()),
+                )
+            except OSError:
+                saved = None
+        if saved is None:
+            pattern = focus_pattern(geometry.width(), geometry.height())
+        else:
+            pattern = board_focus_pattern(
+                geometry.width(),
+                geometry.height(),
+                saved.result.mapping.projector_grid,
+            )
+            if saved.camera_matches:
+                self._focus_guide_grid = saved.result.mapping.camera_grid
+        self._suspend_selected_square()
+        self._alignment_monitor.set_paused("focus pattern")
+        self._projector_window.show_pattern(pattern)
+        self._projector_status.setText(
+            "Focus and point the camera, then click OK to calibrate."
+        )
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Information)
+        dialog.setWindowTitle("Focus and point the camera")
+        guide = (
+            " Aim the camera until the board fills the green outline in the "
+            "camera view."
+            if self._focus_guide_grid is not None
+            else ""
+        )
+        dialog.setText(
+            "Focus the camera and the projector on the pattern, and point "
+            f"the camera at the whole board.{guide} Click OK to calibrate."
+        )
+        dialog.setStandardButtons(
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
+        )
+        dialog.setModal(False)
+        dialog.finished.connect(
+            lambda _result, shown=dialog: CameraWindow._finish_startup_focus(
+                self,
+                shown,
+                shown.clickedButton()
+                is shown.button(QMessageBox.StandardButton.Ok),
+            )
+        )
+        self._startup_focus_dialog = dialog
+        self._record_runtime_diagnostic(
+            "startup-focus-shown",
+            self._projector_status.text(),
+            details={
+                "saved_board_area": saved is not None,
+                "camera_guide": self._focus_guide_grid is not None,
+            },
+        )
+        dialog.show()
+
+    def _finish_startup_focus(
+        self,
+        dialog: QMessageBox,
+        accepted: bool,
+    ) -> None:
+        if dialog is not self._startup_focus_dialog:
+            return
+        self._startup_focus_dialog = None
+        self._focus_guide_grid = None
+        self._projector_window.show_black()
+        self._alignment_monitor.set_black()
+        if accepted:
+            self._startup_calibration_pending = True
+            self._startup_calibration_ready_at = None
+            self._projector_status.setText(
+                "Startup calibration starts when the camera image has "
+                "settled; pieces may stay on the board."
+            )
+        else:
+            self._projector_status.setText(
+                "Startup calibration was cancelled; the projector is not "
+                "calibrated. Start Board-cropped calibration when ready."
+            )
+        self._record_runtime_diagnostic(
+            "startup-focus-finished",
+            self._projector_status.text(),
+            details={"accepted": accepted},
+        )
+
     def _advance_startup_calibration(self) -> None:
+        if self._startup_focus_pending:
+            self._startup_focus_pending = False
+            CameraWindow._begin_startup_focus(self)
+            return
         if not self._startup_calibration_pending or self._calibrator.active:
             return
         now = monotonic()
@@ -9082,7 +9222,12 @@ class CameraWindow(QMainWindow):
         self._calibrator.accept_frame(camera_frame)
         CameraWindow._advance_startup_calibration(self)
         if not self._snapshot_visible:
-            self._display_frame(camera_frame)
+            guide_grid = self._focus_guide_grid
+            self._display_frame(
+                camera_frame
+                if guide_grid is None
+                else _draw_board_guide(camera_frame, guide_grid)
+            )
             self._detection_status.setText(
                 "Live preview. Take a snapshot to detect the board."
             )

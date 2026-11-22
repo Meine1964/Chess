@@ -1,5 +1,6 @@
 from typing import Literal, cast
 
+import cv2
 import numpy as np
 from numpy.typing import NDArray
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
@@ -116,6 +117,23 @@ def focus_pattern(
     pattern[-border:, :] = 255
     pattern[:, :border] = 255
     pattern[:, -border:] = 255
+    return pattern
+
+
+def board_focus_pattern(
+    width: int,
+    height: int,
+    projector_grid: NDArray[np.float32],
+) -> NDArray[np.uint8]:
+    """Focus pattern limited to a board area enlarged by one square."""
+    pattern = focus_pattern(width, height)
+    grid = np.asarray(projector_grid, dtype=np.float32)
+    outer = grid[[0, 0, 8, 8], [0, 8, 8, 0]]
+    center = np.mean(outer, axis=0)
+    enlarged = center + (outer - center) * 1.25
+    mask = np.zeros((height, width), dtype=np.uint8)
+    cv2.fillConvexPoly(mask, np.round(enlarged).astype(np.int32), 255)
+    pattern[mask == 0] = 0
     return pattern
 
 

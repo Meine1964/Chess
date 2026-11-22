@@ -17,6 +17,7 @@ from src.chess_camera.projector import (
     PROJECTED_ON_LIGHT_SQUARE,
     PROMOTION_GLYPHS,
     ProjectorWindow,
+    board_focus_pattern,
     focus_pattern,
 )
 
@@ -40,6 +41,22 @@ def test_focus_pattern_has_checkerboard_cross_and_border() -> None:
     assert np.all(pattern[:, 0] == 255)
     assert pattern[24, 20] == 255
     assert pattern[12, 40] == 255
+
+
+def test_board_focus_pattern_is_limited_to_enlarged_board_area() -> None:
+    columns, rows = np.meshgrid(
+        np.linspace(400, 720, 9, dtype=np.float32),
+        np.linspace(200, 520, 9, dtype=np.float32),
+    )
+    grid = np.stack((columns, rows), axis=2)
+
+    pattern = board_focus_pattern(1280, 720, grid)
+
+    full = focus_pattern(1280, 720)
+    np.testing.assert_array_equal(pattern[200:520, 400:720], full[200:520, 400:720])
+    assert np.any(pattern[165:195, 365:395])
+    assert not np.any(pattern[:150, :])
+    assert not np.any(pattern[:, 780:])
 
 
 def test_projector_window_stays_above_screen_savers(

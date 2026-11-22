@@ -225,17 +225,21 @@ Restored settings are provisional until the startup checks below succeed.
    projector changes, and a projector display is selected, the application
    automatically runs the piece-tolerant board-cropped calibration, as
    described in `adaptive-board-cropped-calibration-specification.md`. It
-   does not first trust the saved calibration. The calibration begins after
-   two seconds of camera frames, works with pieces in any position, and on
+   does not first trust the saved calibration. It first shows the focus
+   pattern, cropped to the saved board area when one exists, with a pop-up
+   so the player can focus and point the camera; OK starts the calibration
+   and Cancel skips it. The calibration begins two seconds after OK, works
+   with pieces in any position, and on
    success is activated and saved as live verified. When it fails or is
    cancelled, the application stays uncalibrated and never loads the saved
    calibration. The failure and its corrective action are reported
    non-modally, and a board map shows usable squares in green and squares
    to clear in red.
 
-   The saved-calibration loading and automatic alignment recovery described
-   below are no longer invoked by the application, because startup always
-   recalibrates. Their code is retained until its removal is decided.
+   The automatic alignment recovery described below is no longer invoked by
+   the application, because startup always recalibrates. Saved calibration
+   is loaded only to place the startup focus pattern. The retained code
+   stays until its removal is decided.
 
    Previously, the saved calibration was loaded when its projector display
    name and resolution match the selected projector. Camera-only operation is

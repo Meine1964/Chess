@@ -992,6 +992,7 @@ def test_startup_calibration_starts_after_camera_settles() -> None:
     from src.chess_camera.camera_app import CameraWindow
 
     window = SimpleNamespace(
+        _startup_focus_pending=False,
         _startup_calibration_pending=True,
         _startup_calibration_ready_at=None,
         _startup_calibration_running=False,
@@ -1011,6 +1012,115 @@ def test_startup_calibration_starts_after_camera_settles() -> None:
     )
     assert window._startup_calibration_running is True
     assert window._startup_calibration_pending is False
+
+
+def _startup_focus_window(saved: object) -> object:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    screen = MagicMock()
+    screen.geometry.return_value.width.return_value = 1280
+    screen.geometry.return_value.height.return_value = 720
+    screen.name.return_value = "Projector"
+    return SimpleNamespace(
+        _open_projector=MagicMock(return_value=True),
+        _screens=[screen],
+        _projector_selector=SimpleNamespace(currentIndex=lambda: 0),
+        _latest_frame=np.zeros((1080, 1920, 3), dtype=np.uint8),
+        _devices=[object()],
+        _active_device_index=0,
+        _device_key=MagicMock(return_value="camera"),
+        _calibration_store=SimpleNamespace(
+            load_for_projector=MagicMock(return_value=saved)
+        ),
+        _focus_guide_grid=None,
+        _startup_focus_dialog=None,
+        _startup_calibration_pending=False,
+        _startup_calibration_ready_at=None,
+        _suspend_selected_square=MagicMock(),
+        _alignment_monitor=MagicMock(),
+        _projector_window=MagicMock(),
+        _projector_status=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
+    )
+
+
+@pytest.mark.parametrize("camera_matches", [True, False])
+def test_startup_focus_crops_pattern_to_saved_board(
+    camera_matches: bool,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    projector_grid = _detection(400, 200, 720, 520).grid_points
+    camera_grid = _detection(600, 300, 1100, 800).grid_points
+    saved = SimpleNamespace(
+        result=SimpleNamespace(
+            mapping=SimpleNamespace(
+                projector_grid=projector_grid,
+                camera_grid=camera_grid,
+            )
+        ),
+        camera_matches=camera_matches,
+    )
+    window = _startup_focus_window(saved)
+
+    with patch("src.chess_camera.camera_app.QMessageBox") as message_box:
+        CameraWindow._begin_startup_focus(window)
+
+    pattern = window._projector_window.show_pattern.call_args.args[0]
+    assert not np.any(pattern[:150, :])
+    assert np.any(pattern[200:520, 400:720])
+    assert (window._focus_guide_grid is camera_grid) is camera_matches
+    message_box.return_value.show.assert_called_once_with()
+    assert window._startup_focus_dialog is message_box.return_value
+    assert window._startup_calibration_pending is False
+
+
+def test_startup_focus_without_saved_calibration_shows_full_pattern() -> None:
+    from unittest.mock import patch
+
+    from src.chess_camera.camera_app import CameraWindow
+    from src.chess_camera.projector import focus_pattern
+
+    window = _startup_focus_window(None)
+
+    with patch("src.chess_camera.camera_app.QMessageBox"):
+        CameraWindow._begin_startup_focus(window)
+
+    np.testing.assert_array_equal(
+        window._projector_window.show_pattern.call_args.args[0],
+        focus_pattern(1280, 720),
+    )
+    assert window._focus_guide_grid is None
+
+
+@pytest.mark.parametrize("accepted", [True, False])
+def test_startup_focus_ok_schedules_calibration_and_cancel_skips_it(
+    accepted: bool,
+) -> None:
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    window = _startup_focus_window(None)
+    dialog = MagicMock()
+    window._startup_focus_dialog = dialog
+    window._focus_guide_grid = np.zeros((9, 9, 2), dtype=np.float32)
+
+    CameraWindow._finish_startup_focus(window, MagicMock(), accepted)
+
+    assert window._startup_focus_dialog is dialog
+    window._projector_window.show_black.assert_not_called()
+
+    CameraWindow._finish_startup_focus(window, dialog, accepted)
+
+    window._projector_window.show_black.assert_called_once_with()
+    assert window._startup_focus_dialog is None
+    assert window._focus_guide_grid is None
+    assert window._startup_calibration_pending is accepted
 
 
 def test_startup_calibration_failure_projects_support_map() -> None:

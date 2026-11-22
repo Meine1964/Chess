@@ -297,8 +297,27 @@ calibration) with a corrective action:
 - Whenever the camera starts or the projector selection changes, and a
   projector display is selected, the application runs this calibration
   automatically. The saved calibration is not trusted first.
+- **Focus and pointing step.** Before calibrating, the projector shows the
+  focus pattern so the player can focus the camera and the projector and
+  point the camera at the board:
+  - When a saved calibration exists for the selected projector display and
+    resolution, the pattern is limited to the saved board area, enlarged by
+    one square on every side. Everything else stays black. The saved
+    calibration only places this pattern; it is never used as the mapping.
+  - Without such a saved calibration, the full-screen focus pattern is shown.
+  - When the saved calibration also matches the camera and its resolution,
+    the live camera preview outlines the saved board position in green, so
+    the player can aim the camera until the board fills the outline.
+  - A non-modal pop-up, "Focus and point the camera", explains this and
+    offers **OK** and **Cancel**. The live preview keeps updating behind it.
+  - **OK** turns the projector black, removes the outline, and schedules the
+    calibration. **Cancel** does the same but skips the calibration, so the
+    application stays uncalibrated until a calibration is requested.
+  - Restarting the camera or changing the projector closes an open pop-up
+    and begins a new focus step.
+  - Manually requested calibrations skip this step.
 - The calibration starts after the camera has delivered frames for two
-  seconds, so exposure can settle.
+  seconds after OK, so exposure can settle.
 - On success, the result is activated and saved like a requested
   calibration.
 - On failure or cancellation, the application remains uncalibrated. A saved
@@ -352,6 +371,10 @@ calibration) with a corrective action:
     from individually visible corners to within one camera pixel. When too
     few corners are visible, the failure outlines the squares to clear in the
     camera view and names that action.
+15. At startup, the focus pattern is shown cropped to the saved board area
+    plus one square, or full-screen without a saved calibration. The camera
+    preview outlines the saved board when the camera matches. Calibration
+    starts only after OK; Cancel leaves the application uncalibrated.
 
 ## Implementation Status
 
@@ -395,9 +418,17 @@ fully covering pieces raise the clearing error with red outlines on the middle
 band, and a startup failure freezes the camera view with the clearing action.
 On the field image of the failed 35-piece startup, the fit verified 41 of the
 49 interior corners at 0.65 camera-pixel RMS. A hardware rerun of the
-complete calibration with that position is pending.
+complete calibration with that position confirmed it.
+
+The startup focus and pointing step is implemented and validated by
+automated tests: the pattern is cropped to the enlarged saved board area or
+shown full-screen without a saved calibration, the camera guide outline is
+set only when the saved calibration matches the camera, OK schedules the
+calibration, Cancel leaves the app uncalibrated, and a stale dialog is
+ignored. The dialog interaction and the preview outline await hardware
+confirmation.
 
 Validation:
 
-- Projector calibration and projector tests: 111 passed.
-- Full repository quality gate: 486 passed.
+- Projector calibration and projector tests: 120 passed.
+- Full repository quality gate: 495 passed.
