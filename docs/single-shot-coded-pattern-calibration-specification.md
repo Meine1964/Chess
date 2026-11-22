@@ -645,8 +645,10 @@ into projector coordinates. When the 7x5 search is obscured but the rough
 detection itself comes from internal corners with confidence at least `0.85`,
 grid alignment at least `0.8`, and reprojection error no greater than `1.1`
 camera pixels, the internal-corner grid is sufficiently verified to serve as
-the populated-board lattice. Independent projected-target validation remains
-mandatory.
+the populated-board lattice. Otherwise the lattice is fitted from
+individually verified visible corners, as specified in "Board lattice with
+pieces" of the adaptive board-cropped calibration specification.
+Independent projected-target validation remains mandatory.
 Hidden outer ranks are extrapolated from that fit. Rough outer-boundary
 observations may weakly anchor the extrapolation
 only when they remain within 20% of a square and the rough interior has no

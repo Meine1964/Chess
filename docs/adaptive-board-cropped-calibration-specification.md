@@ -130,6 +130,50 @@ unfiltered dense fit was rejected with "33% inliers, 1.30 px RMS error".
   deciding test. If occupancy fails or the retained candidates do not satisfy
   the spread rules, repeat the selection using every square.
 
+### Board lattice with pieces
+
+Discovery first refines the rough camera board grid from the black reference.
+The existing method needs an unbroken 7×5 block of interior corners, which
+only a nearly empty middle board provides. Field evidence: with about 35
+pieces spread over the board, discovery failed with "The visible 7x5
+middle-board intersections were not detected", before plane support or any
+board map existed, so the player received only a generic instruction.
+
+When the 7×5 block is not found, or the block found disagrees with the rough
+board location (pieces can form a false lattice), and the rough detection is
+not a verified internal-corner detection, the lattice is fitted from
+individually visible corners:
+
+- **Candidates:** each of the 49 interior corners is refined with sub-pixel
+  corner search, starting from its rough-grid position. A candidate moving
+  more than a quarter of a square is discarded.
+- **Corner test:** four samples, offset from the candidate by 0.2 of a square
+  along both grid axes towards each adjacent square, must form a
+  checkerboard corner: both diagonally opposite samples are brighter than
+  both of the other pair by at least 16 grey levels. A piece covering a
+  sample breaks this pattern, so the corner is discarded.
+- **Parity:** the brighter diagonal alternates from corner to corner. Corners
+  whose parity disagrees with the majority are discarded.
+- **Fit:** a RANSAC homography from board coordinates to camera pixels, with
+  a threshold of 5% of a square, selects the inliers. The fit needs at least
+  12 inliers, an inlier strictly inside each 4×4 quadrant, and at most
+  2 camera pixels RMS error after a least-squares refit. The 9×9 grid is
+  then extrapolated from it.
+
+### Clearing instruction when the board is hidden
+
+If the lattice still cannot be fitted, no projector mapping exists yet, so
+nothing can be projected. Instead:
+
+- The calibration fails with "Too many pieces cover the board squares."
+- The camera preview freezes on the black reference, with four middle rows
+  of squares outlined in red. These are grid rows 2–5, or grid columns 2–5
+  when more verified corners lie there. Clearing them leaves at least 21
+  fully surrounded corners spread over all quadrants.
+- The corrective action is "Clear the squares outlined in red in the camera
+  view, then start Board-cropped calibration again."
+- The next calibration start resumes the live preview.
+
 ### Phase 1: discovery markers
 
 - Discard coded markers whose camera-space centre lies in a square that is not
@@ -229,7 +273,9 @@ calibration) with a corrective action:
 - With a map but no red squares: "Green squares were usable for calibration.
   Keep hands and shadows off the board, then start Board-cropped calibration
   again."
-- Without a map: "Keep hands and shadows off the board, then start
+- When pieces hide the board lattice: "Clear the squares outlined in red in
+  the camera view, then start Board-cropped calibration again."
+- Otherwise, without a map: "Keep hands and shadows off the board, then start
   Board-cropped calibration again."
 
 ### Diagnostics
@@ -302,6 +348,10 @@ calibration) with a corrective action:
 13. Validation targets lie on retained square centres. Calibration succeeds
     when at least 9 targets hit and every quadrant has a hit, even if a
     piece hides or displaces the others. Misses never feed refinement.
+14. With pieces breaking every 7×5 block, discovery fits the board lattice
+    from individually visible corners to within one camera pixel. When too
+    few corners are visible, the failure outlines the squares to clear in the
+    camera view and names that action.
 
 ## Implementation Status
 
@@ -337,6 +387,15 @@ the map colours, and RGB projector output. They await a hardware retest. The
 contrast and agreement thresholds, the forced-capture delay, and the
 smoothness and per-square inlier thresholds also await further hardware
 validation with pieces on the board.
+
+The piece-tolerant board lattice and the camera-view clearing instruction are
+implemented and validated by automated tests: the starting position and a
+scattered position with an unverified rough grid fit within one camera pixel,
+fully covering pieces raise the clearing error with red outlines on the middle
+band, and a startup failure freezes the camera view with the clearing action.
+On the field image of the failed 35-piece startup, the fit verified 41 of the
+49 interior corners at 0.65 camera-pixel RMS. A hardware rerun of the
+complete calibration with that position is pending.
 
 Validation:
 

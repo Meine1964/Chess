@@ -157,6 +157,10 @@ _CALIBRATION_RETRY_ACTION = (
     "Keep hands and shadows off the board, then start Board-cropped "
     "calibration again."
 )
+_CALIBRATION_CLEAR_ACTION = (
+    "Clear the squares outlined in red in the camera view, then start "
+    "Board-cropped calibration again."
+)
 _BOARD_EDGE_STUCK_DIAGNOSTIC_SECONDS = 3.0
 _BOARD_EDGE_STUCK_REPEAT_SECONDS = 5.0
 _ILLEGAL_CORRECTION_FALLBACK_MILLISECONDS = 2000
@@ -1434,6 +1438,7 @@ class CameraWindow(QMainWindow):
         self._pending_board_square: tuple[int, int] | None = None
         self._latest_frame: ImageArray | None = None
         self._snapshot_visible = False
+        self._clearance_view_visible = False
         self._current_pixmap: QPixmap | None = None
 
         self._capture_session = QMediaCaptureSession(self)
@@ -2633,6 +2638,7 @@ class CameraWindow(QMainWindow):
 
         self._latest_frame = None
         self._snapshot_visible = False
+        self._clearance_view_visible = False
         self._snapshot_button.setEnabled(True)
         self._start_calibration_button.setEnabled(True)
         self._coded_calibration_button.setEnabled(True)
@@ -2912,6 +2918,8 @@ class CameraWindow(QMainWindow):
         if not self._open_projector():
             return False
 
+        if self._clearance_view_visible:
+            self._resume_live_camera()
         self._suspend_selected_square()
         selected_index = self._projector_selector.currentIndex()
         screen_geometry = self._screens[selected_index].geometry()
@@ -8860,8 +8868,22 @@ class CameraWindow(QMainWindow):
         self._projector_window.show_pattern(pattern)
         return True
 
+    def _show_camera_clearance_view(self) -> bool:
+        image = self._calibrator.camera_clearance_view
+        if image is None:
+            return False
+        self._snapshot_visible = True
+        self._clearance_view_visible = True
+        self._snapshot_button.setEnabled(False)
+        self._resume_button.setEnabled(True)
+        self._detection_status.setText(_CALIBRATION_CLEAR_ACTION)
+        self._display_frame(image)
+        return True
+
     def _calibration_failure_action(self, map_shown: bool) -> str:
         if not map_shown:
+            if CameraWindow._show_camera_clearance_view(self):
+                return _CALIBRATION_CLEAR_ACTION
             return _CALIBRATION_RETRY_ACTION
         if self._calibrator.clearance_squares:
             return (
@@ -9146,6 +9168,7 @@ class CameraWindow(QMainWindow):
 
     def _resume_live_camera(self) -> None:
         self._snapshot_visible = False
+        self._clearance_view_visible = False
         self._snapshot_button.setEnabled(True)
         self._resume_button.setEnabled(False)
         self._detection_status.setText(

@@ -17,6 +17,22 @@ class CalibrationError(RuntimeError):
     pass
 
 
+class BoardLatticeHiddenError(CalibrationError):
+    """Pieces hide too many board corners to locate the squares."""
+
+    def __init__(
+        self,
+        message: str,
+        rough_detection: BoardDetection,
+        clear_axis: Literal["rows", "columns"],
+        verified_corners: int,
+    ) -> None:
+        super().__init__(message)
+        self.rough_detection = rough_detection
+        self.clear_axis = clear_axis
+        self.verified_corners = verified_corners
+
+
 @dataclass(frozen=True)
 class CoverageResult:
     board_mask: BoolArray
@@ -247,9 +263,7 @@ def fit_visible_middle_lattice(
                 rough_detection,
                 method="verified internal corners",
             )
-        raise CalibrationError(
-            "The visible 7x5 middle-board intersections were not detected."
-        )
+        return fit_partial_board_lattice(black, rough_detection)
 
     best_observed: FloatArray | None = None
     best_expected: FloatArray | None = None
@@ -292,10 +306,7 @@ def fit_visible_middle_lattice(
                 rough_detection,
                 method="verified internal corners",
             )
-        raise CalibrationError(
-            "The detected middle lattice does not agree with the rough "
-            "board location."
-        )
+        return fit_partial_board_lattice(black, rough_detection)
 
     model_points = np.asarray(
         [
@@ -395,6 +406,247 @@ def fit_visible_middle_lattice(
         ),
         grid_alignment=rough_detection.grid_alignment,
     )
+
+
+_PARTIAL_LATTICE_MINIMUM_CORNERS = 12
+_PARTIAL_LATTICE_CORNER_CONTRAST = 16.0
+_PARTIAL_LATTICE_SAMPLE_OFFSET = 0.2
+_PARTIAL_LATTICE_MAXIMUM_SHIFT = 0.25
+_PARTIAL_LATTICE_RANSAC_FRACTION = 0.05
+_PARTIAL_LATTICE_MAXIMUM_RMS = 2.0
+
+
+def _sample(image: NDArray[np.float32], point: FloatArray) -> float | None:
+    height, width = image.shape
+    x, y = float(point[0]), float(point[1])
+    if not (0.0 <= x < width - 1 and 0.0 <= y < height - 1):
+        return None
+    patch = cv2.getRectSubPix(image, (1, 1), (x, y))
+    return float(patch[0, 0])
+
+
+def _checkerboard_corner_parity(
+    smoothed: NDArray[np.float32],
+    point: FloatArray,
+    grid: FloatArray,
+    row: int,
+    column: int,
+) -> int | None:
+    along_columns = (grid[row, column + 1] - grid[row, column - 1]) / 2.0
+    along_rows = (grid[row + 1, column] - grid[row - 1, column]) / 2.0
+    offset = _PARTIAL_LATTICE_SAMPLE_OFFSET
+    samples = [
+        _sample(
+            smoothed,
+            point + offset * (column_sign * along_columns + row_sign * along_rows),
+        )
+        for column_sign, row_sign in ((1, 1), (-1, -1), (1, -1), (-1, 1))
+    ]
+    if any(value is None for value in samples):
+        return None
+    values = [float(value) for value in samples if value is not None]
+    main, opposite = values[:2], values[2:]
+    if min(main) - max(opposite) >= _PARTIAL_LATTICE_CORNER_CONTRAST:
+        return 1
+    if min(opposite) - max(main) >= _PARTIAL_LATTICE_CORNER_CONTRAST:
+        return -1
+    return None
+
+
+def _covers_board_quadrants(model_points: FloatArray) -> bool:
+    columns = model_points[:, 0]
+    rows = model_points[:, 1]
+    return all(
+        bool(np.any(column_side & row_side))
+        for column_side in (columns < 4, columns > 4)
+        for row_side in (rows < 4, rows > 4)
+    )
+
+
+def fit_partial_board_lattice(
+    black: GrayImage,
+    rough_detection: BoardDetection,
+) -> BoardDetection:
+    """Fit the 9x9 board lattice from individually visible corners."""
+    if black.ndim != 2:
+        raise ValueError("The board reference must be a grayscale image.")
+    grid = np.asarray(rough_detection.grid_points, dtype=np.float32)
+    square_width = float(
+        np.median(np.linalg.norm(np.diff(grid, axis=1), axis=2))
+    )
+    image = black.astype(np.float32)
+    smoothed = cv2.GaussianBlur(
+        image,
+        (0, 0),
+        max(1.0, square_width * 0.04),
+    )
+    window = max(3, int(round(square_width * 0.15)))
+    criteria = (
+        cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER,
+        40,
+        0.01,
+    )
+    height, width = black.shape
+    margin = window + 2
+    model: list[tuple[float, float]] = []
+    camera: list[FloatArray] = []
+    parities: list[int] = []
+    for row in range(1, 8):
+        for column in range(1, 8):
+            start = grid[row, column]
+            if not (
+                margin <= start[0] < width - margin
+                and margin <= start[1] < height - margin
+            ):
+                continue
+            try:
+                refined = cv2.cornerSubPix(
+                    image,
+                    start.reshape(1, 1, 2).copy(),
+                    (window, window),
+                    (-1, -1),
+                    criteria,
+                ).reshape(2)
+            except cv2.error:
+                continue
+            if (
+                np.linalg.norm(refined - start)
+                > square_width * _PARTIAL_LATTICE_MAXIMUM_SHIFT
+            ):
+                continue
+            parity = _checkerboard_corner_parity(
+                smoothed,
+                refined,
+                grid,
+                row,
+                column,
+            )
+            if parity is None:
+                continue
+            model.append((float(column), float(row)))
+            camera.append(refined)
+            parities.append(parity if (row + column) % 2 == 0 else -parity)
+
+    majority = 1 if sum(parities) >= 0 else -1
+    keep = np.asarray(parities, dtype=np.int32) == majority
+    model_points = np.asarray(model, dtype=np.float32).reshape(-1, 2)[keep]
+    camera_points = np.asarray(camera, dtype=np.float32).reshape(-1, 2)[keep]
+
+    def hidden(verified: int) -> BoardLatticeHiddenError:
+        in_rows = int(
+            np.count_nonzero(
+                (model_points[:, 1] >= 2) & (model_points[:, 1] <= 6)
+            )
+        )
+        in_columns = int(
+            np.count_nonzero(
+                (model_points[:, 0] >= 2) & (model_points[:, 0] <= 6)
+            )
+        )
+        return BoardLatticeHiddenError(
+            "Too many pieces cover the board squares: "
+            f"{verified} board corners were verified, but at least "
+            f"{_PARTIAL_LATTICE_MINIMUM_CORNERS} spread over all four "
+            "quadrants are required.",
+            rough_detection,
+            "columns" if in_columns > in_rows else "rows",
+            verified,
+        )
+
+    if model_points.shape[0] < _PARTIAL_LATTICE_MINIMUM_CORNERS:
+        raise hidden(int(model_points.shape[0]))
+    _homography, mask = cv2.findHomography(
+        model_points,
+        camera_points,
+        cv2.RANSAC,
+        square_width * _PARTIAL_LATTICE_RANSAC_FRACTION,
+    )
+    if mask is None:
+        raise hidden(0)
+    inliers = mask.reshape(-1).astype(bool)
+    inlier_model = model_points[inliers]
+    inlier_camera = camera_points[inliers]
+    if (
+        inlier_model.shape[0] < _PARTIAL_LATTICE_MINIMUM_CORNERS
+        or not _covers_board_quadrants(inlier_model)
+    ):
+        raise hidden(int(inlier_model.shape[0]))
+    homography, _mask = cv2.findHomography(
+        inlier_model,
+        inlier_camera,
+        method=0,
+    )
+    if homography is None:
+        raise hidden(int(inlier_model.shape[0]))
+    projected = cv2.perspectiveTransform(
+        inlier_model.reshape(-1, 1, 2),
+        homography,
+    ).reshape(-1, 2)
+    residual = float(
+        np.sqrt(np.mean(np.sum(np.square(projected - inlier_camera), axis=1)))
+    )
+    if residual > _PARTIAL_LATTICE_MAXIMUM_RMS:
+        raise CalibrationError(
+            f"The visible board corners fit has {residual:.2f} camera-pixel "
+            "RMS error."
+        )
+    grid_model = np.asarray(
+        [(column, row) for row in range(9) for column in range(9)],
+        dtype=np.float32,
+    )
+    fitted_grid = np.asarray(
+        cv2.perspectiveTransform(grid_model.reshape(-1, 1, 2), homography),
+        dtype=np.float32,
+    ).reshape(9, 9, 2)
+    return BoardDetection(
+        grid_points=fitted_grid,
+        confidence=min(0.99, max(0.0, 1.0 - residual / 10.0)),
+        reprojection_error=residual,
+        method=f"piece-tolerant visible corners ({inlier_model.shape[0]})",
+        grid_alignment=rough_detection.grid_alignment,
+    )
+
+
+def camera_clearance_image(
+    black: ImageArray,
+    grid: FloatArray,
+    clear_axis: Literal["rows", "columns"],
+) -> ImageArray:
+    """Outline the four middle grid rows or columns to clear in red."""
+    image = (
+        cv2.cvtColor(black, cv2.COLOR_GRAY2BGR)
+        if black.ndim == 2
+        else black.copy()
+    )
+    square_width = float(
+        np.median(np.linalg.norm(np.diff(grid, axis=1), axis=2))
+    )
+    thickness = max(2, int(round(square_width * 0.06)))
+    for first in range(2, 6):
+        for second in range(8):
+            row, column = (
+                (first, second) if clear_axis == "rows" else (second, first)
+            )
+            polygon = np.asarray(
+                [
+                    grid[row, column],
+                    grid[row, column + 1],
+                    grid[row + 1, column + 1],
+                    grid[row + 1, column],
+                ],
+                dtype=np.float32,
+            )
+            center = np.mean(polygon, axis=0)
+            inset = center + (polygon - center) * 0.85
+            cv2.polylines(
+                image,
+                [np.round(inset).astype(np.int32).reshape(-1, 1, 2)],
+                True,
+                (0, 0, 255),
+                thickness,
+                cv2.LINE_AA,
+            )
+    return image
 
 
 def _is_verified_internal_corner_detection(

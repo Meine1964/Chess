@@ -11,6 +11,7 @@ from .board_detector import BoardDetection, BoardDetector, FloatArray, ImageArra
 from .occupancy import empty_square_candidates
 from .projector import ProjectorWindow
 from .projector_calibration import (
+    BoardLatticeHiddenError,
     CalibrationError,
     CodedPattern,
     GrayImage,
@@ -20,6 +21,7 @@ from .projector_calibration import (
     board_mask,
     board_circle_polygon,
     bgr_to_gray,
+    camera_clearance_image,
     clearance_squares,
     coded_marker_pattern,
     decode_gray_code,
@@ -162,6 +164,7 @@ class ProjectorCalibrationController(QObject):
             None
         )
         self._clearance_squares: tuple[tuple[int, int], ...] = ()
+        self._lattice_hidden: BoardLatticeHiddenError | None = None
         self._validation_log: list[dict[str, object]] = []
         self._capture_progress_base = 0
         self._coded_pattern: CodedPattern | None = None
@@ -206,6 +209,19 @@ class ProjectorCalibrationController(QObject):
     @property
     def clearance_squares(self) -> tuple[tuple[int, int], ...]:
         return self._clearance_squares
+
+    @property
+    def camera_clearance_view(self) -> ImageArray | None:
+        """Black reference with the squares to clear outlined in red."""
+        hidden = self._lattice_hidden
+        black = self._captures.get("black")
+        if not self._adaptive_cropped_mode or hidden is None or black is None:
+            return None
+        return camera_clearance_image(
+            black,
+            hidden.rough_detection.grid_points,
+            hidden.clear_axis,
+        )
 
     @property
     def support_map(self) -> NDArray[np.uint8] | None:
@@ -415,6 +431,7 @@ class ProjectorCalibrationController(QObject):
         self._gray_pair_recaptures = {}
         self._gray_weakest_pair = None
         self._clearance_squares = ()
+        self._lattice_hidden = None
         self._validation_log = []
         self._coded_pattern = pattern
         self._inverse_coded_pattern = None
@@ -941,6 +958,8 @@ class ProjectorCalibrationController(QObject):
             )
         except (CalibrationError, ValueError, cv2.error) as error:
             self._adaptive_discovery_candidate = None
+            if isinstance(error, BoardLatticeHiddenError):
+                self._lattice_hidden = error
             self._fail(f"Coded discovery failed: {error}")
             return
 

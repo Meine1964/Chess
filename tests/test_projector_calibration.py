@@ -12,10 +12,12 @@ from src.chess_camera.calibration_controller import (
 )
 from src.chess_camera.calibration_store import CalibrationStore
 from src.chess_camera.projector_calibration import (
+    BoardLatticeHiddenError,
     CalibrationError,
     MappingResult,
     ValidationResult,
     board_circle_polygon,
+    camera_clearance_image,
     clearance_squares,
     coded_marker_pattern,
     decode_gray_code,
@@ -388,8 +390,10 @@ def test_coded_mapping_uses_measured_visible_lattice() -> None:
     )
 
 
-def test_middle_lattice_accepts_verified_internal_corners_on_populated_board(
-) -> None:
+def _populated_board_image(
+    occupied: set[tuple[int, int]],
+    piece_radius: int = 28,
+) -> tuple[np.ndarray, np.ndarray]:
     image = np.full((1080, 1920), 125, dtype=np.uint8)
     canonical = np.empty((800, 800), dtype=np.uint8)
     for row in range(8):
@@ -398,15 +402,14 @@ def test_middle_lattice_accepts_verified_internal_corners_on_populated_board(
                 row * 100 : (row + 1) * 100,
                 column * 100 : (column + 1) * 100,
             ] = 190 if (row + column) % 2 == 0 else 45
-    for row in (0, 1, 6, 7):
-        for column in range(8):
-            cv2.circle(
-                canonical,
-                (column * 100 + 50, row * 100 + 50),
-                28,
-                90 if row < 2 else 15,
-                -1,
-            )
+    for row, column in occupied:
+        cv2.circle(
+            canonical,
+            (column * 100 + 50, row * 100 + 50),
+            piece_radius,
+            90 if row < 4 else 15,
+            -1,
+        )
 
     canonical_outer = np.asarray(
         [[0, 0], [799, 0], [799, 799], [0, 799]],
@@ -444,6 +447,25 @@ def test_middle_lattice_accepts_verified_internal_corners_on_populated_board(
         model_grid.reshape(-1, 1, 2),
         homography,
     ).reshape(9, 9, 2)
+    return image, expected_grid
+
+
+def _unverified_rough_detection(grid: np.ndarray) -> BoardDetection:
+    return BoardDetection(
+        grid_points=grid + np.asarray([3.0, -2.0], dtype=np.float32),
+        confidence=0.95,
+        reprojection_error=None,
+        method="alternating-color quadrilateral",
+        grid_alignment=0.96,
+    )
+
+
+def test_middle_lattice_accepts_verified_internal_corners_on_populated_board(
+) -> None:
+    starting_position = {
+        (row, column) for row in (0, 1, 6, 7) for column in range(8)
+    }
+    image, expected_grid = _populated_board_image(starting_position)
     rough_detection = BoardDetection(
         grid_points=expected_grid,
         confidence=0.909,
@@ -457,20 +479,66 @@ def test_middle_lattice_accepts_verified_internal_corners_on_populated_board(
     assert refined.method == "verified internal corners"
     np.testing.assert_allclose(refined.grid_points, expected_grid)
 
+    unverified = fit_visible_middle_lattice(
+        image,
+        BoardDetection(
+            grid_points=expected_grid,
+            confidence=0.909,
+            reprojection_error=1.11,
+            method="internal corners",
+            grid_alignment=1.0,
+        ),
+    )
+
+    assert unverified.method.startswith("piece-tolerant visible corners")
+    assert np.max(
+        np.linalg.norm(unverified.grid_points - expected_grid, axis=2)
+    ) < 1.0
+
+
+def test_board_lattice_is_fitted_between_scattered_pieces() -> None:
+    scattered = {
+        (row, column)
+        for row in range(8)
+        for column in range(8)
+        if (row * 3 + column) % 3 == 0
+    }
+    image, expected_grid = _populated_board_image(scattered)
+
+    refined = fit_visible_middle_lattice(
+        image,
+        _unverified_rough_detection(expected_grid),
+    )
+
+    assert refined.method.startswith("piece-tolerant visible corners")
+    assert np.max(
+        np.linalg.norm(refined.grid_points - expected_grid, axis=2)
+    ) < 1.0
+
+
+def test_hidden_board_lattice_outlines_squares_to_clear() -> None:
+    covered = {(row, column) for row in range(8) for column in range(8)}
+    image, expected_grid = _populated_board_image(covered, piece_radius=75)
+
     with pytest.raises(
-        CalibrationError,
-        match="middle-board intersections",
-    ):
+        BoardLatticeHiddenError,
+        match="Too many pieces cover the board squares",
+    ) as caught:
         fit_visible_middle_lattice(
             image,
-            BoardDetection(
-                grid_points=expected_grid,
-                confidence=0.909,
-                reprojection_error=1.11,
-                method="internal corners",
-                grid_alignment=1.0,
-            ),
+            _unverified_rough_detection(expected_grid),
         )
+
+    view = camera_clearance_image(
+        image,
+        expected_grid,
+        caught.value.clear_axis,
+    )
+    red = (view[:, :, 2] == 255) & (view[:, :, 1] < 80)
+    middle = np.mean(expected_grid[4, 1:8], axis=0).astype(int)
+    outer = np.mean(expected_grid[0:2, 0:2], axis=(0, 1)).astype(int)
+    assert np.any(red[middle[1] - 30 : middle[1] + 30, middle[0] - 30 : middle[0] + 30])
+    assert not np.any(red[outer[1] - 5 : outer[1] + 5, outer[0] - 5 : outer[0] + 5])
 
 
 def test_gray_code_patterns_decode_projector_coordinates() -> None:
@@ -891,6 +959,7 @@ def test_failed_experimental_calibration_retains_previous_mapping(
             diagnostic_captures={},
             diagnostic_details={},
             support_map=None,
+            camera_clearance_view=None,
             clearance_squares=(),
         ),
         _startup_calibration_running=False,
@@ -981,6 +1050,47 @@ def test_startup_calibration_failure_projects_support_map() -> None:
     failure = window._record_runtime_diagnostic.call_args_list[0]
     assert failure.kwargs["details"]["startup"] is True
     assert "plane_support" in failure.kwargs["details"]
+
+
+def test_hidden_board_failure_outlines_squares_in_camera_view() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    clearance_view = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    window = SimpleNamespace(
+        _projector_window=MagicMock(),
+        _calibrator=SimpleNamespace(
+            support_map=None,
+            camera_clearance_view=clearance_view,
+            clearance_squares=(),
+        ),
+        _invalidate_calibration=MagicMock(),
+        _set_calibration_indicator=MagicMock(),
+        _projector_calibration_indicator=object(),
+        _projector_status=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
+        _snapshot_visible=False,
+        _clearance_view_visible=False,
+        _snapshot_button=MagicMock(),
+        _resume_button=MagicMock(),
+        _detection_status=MagicMock(),
+        _display_frame=MagicMock(),
+    )
+
+    CameraWindow._report_startup_calibration_failure(
+        window,
+        "Coded discovery failed: Too many pieces cover the board squares.",
+    )
+
+    window._projector_window.show_pattern.assert_not_called()
+    window._display_frame.assert_called_once_with(clearance_view)
+    assert window._snapshot_visible is True
+    assert window._clearance_view_visible is True
+    window._resume_button.setEnabled.assert_called_once_with(True)
+    status = window._projector_status.setText.call_args.args[0]
+    assert "Clear the squares outlined in red in the camera view" in status
 
 
 def test_alignment_loss_invalidates_projection_mapping() -> None:
