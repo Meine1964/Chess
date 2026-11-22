@@ -89,6 +89,8 @@ def _accepted_update(
         if update.state in (
             "accepted",
             "compound-accepted",
+            "compound-correction",
+            "compound-correction-restored",
             "illegal-relocation",
         ):
             return update
@@ -287,6 +289,146 @@ def test_required_signature_rejects_different_geometric_relocation() -> None:
 
     assert update.state == "illegal-relocation"
     assert update.move == (source, destination)
+
+
+def test_compound_correction_commits_only_proven_opponent_move() -> None:
+    controller = LichessGameController(
+        "game1234",
+        "startpos",
+        "white",
+        "Opponent",
+        physical_fen=(
+            "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/"
+            "RNBQKBNR b KQkq - 0 1"
+        ),
+    )
+    controller.accept_server_history(("e2e4",))
+    controller.accept_server_history(("e2e4", "e7e5"))
+    expected = controller.expected_signature
+    opponent_result = controller.pending_result
+    assert expected is not None
+    assert opponent_result is not None
+
+    reference = _empty_board()
+    for square, piece in controller.physical_position.items():
+        _draw_piece(
+            reference,
+            square,
+            (255, 255, 255) if piece.isupper() else (20, 20, 20),
+        )
+    incorrect_position = dict(opponent_result.position)
+    incorrect_position[(3, 5)] = incorrect_position.pop((6, 5))
+    incorrect = _empty_board()
+    for square, piece in incorrect_position.items():
+        _draw_piece(
+            incorrect,
+            square,
+            (255, 255, 255) if piece.isupper() else (20, 20, 20),
+        )
+    tracker = ReferenceMoveTracker()
+    tracker.set_reference(reference, _camera_grid(), 0)
+
+    update = _accepted_update(
+        tracker,
+        incorrect,
+        controller.physical_position,
+        (expected,),
+        required_signature=expected,
+        compound_signatures=tuple(
+            candidate.verification_signature
+            for candidate in controller.compound_move_candidates
+        ),
+    )
+
+    assert update.state == "compound-correction"
+    assert update.opponent_move_proven is True
+    assert update.correction_moves[-1] == ((6, 5), (3, 5))
+    assert update.correction_squares == ((6, 5), (3, 5))
+    np.testing.assert_array_equal(tracker.reference, reference)
+
+    opponent_only = _empty_board()
+    for square, piece in opponent_result.position.items():
+        _draw_piece(
+            opponent_only,
+            square,
+            (255, 255, 255) if piece.isupper() else (20, 20, 20),
+        )
+    restored = _accepted_update(
+        tracker,
+        opponent_only,
+        opponent_result.position,
+    )
+
+    assert restored.state == "compound-correction-restored"
+    tracker.commit_compound_correction_reference()
+    np.testing.assert_allclose(
+        tracker.reference,
+        opponent_only,
+        atol=2,
+    )
+
+
+def test_compound_correction_rejects_both_when_opponent_move_is_wrong() -> None:
+    controller = LichessGameController(
+        "game1234",
+        "startpos",
+        "white",
+        "Opponent",
+        physical_fen=(
+            "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/"
+            "RNBQKBNR b KQkq - 0 1"
+        ),
+    )
+    controller.accept_server_history(("e2e4",))
+    controller.accept_server_history(("e2e4", "e7e5"))
+    expected = controller.expected_signature
+    assert expected is not None
+
+    reference = _empty_board()
+    for square, piece in controller.physical_position.items():
+        _draw_piece(
+            reference,
+            square,
+            (255, 255, 255) if piece.isupper() else (20, 20, 20),
+        )
+    incorrect_position = dict(controller.physical_position)
+    incorrect_position[(2, 4)] = incorrect_position.pop((1, 4))
+    incorrect_position[(5, 5)] = incorrect_position.pop((6, 5))
+    incorrect = _empty_board()
+    for square, piece in incorrect_position.items():
+        _draw_piece(
+            incorrect,
+            square,
+            (255, 255, 255) if piece.isupper() else (20, 20, 20),
+        )
+    tracker = ReferenceMoveTracker()
+    tracker.set_reference(reference, _camera_grid(), 0)
+
+    update = _accepted_update(
+        tracker,
+        incorrect,
+        controller.physical_position,
+        (expected,),
+        required_signature=expected,
+        compound_signatures=tuple(
+            candidate.verification_signature
+            for candidate in controller.compound_move_candidates
+        ),
+    )
+
+    assert update.state == "compound-correction"
+    assert update.opponent_move_proven is False
+    assert update.correction_moves == (
+        ((1, 4), (2, 4)),
+        ((6, 5), (5, 5)),
+    )
+    assert update.correction_squares == (
+        (1, 4),
+        (2, 4),
+        (6, 5),
+        (5, 5),
+    )
+    np.testing.assert_array_equal(tracker.reference, reference)
 
 
 def test_change_scores_localize_source_and_destination() -> None:

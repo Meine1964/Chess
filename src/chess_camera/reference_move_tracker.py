@@ -38,6 +38,8 @@ ReferenceTrackerState = Literal[
     "illegal-relocation",
     "accepted",
     "compound-accepted",
+    "compound-correction",
+    "compound-correction-restored",
     "ambiguous",
 ]
 
@@ -50,6 +52,16 @@ class ReferenceTrackerUpdate:
     change_scores: FloatArray | None = None
     decision_details: dict[str, object] | None = None
     compound_uci: str | None = None
+    correction_moves: tuple[tuple[Square, Square], ...] = ()
+    correction_squares: tuple[Square, ...] = ()
+    opponent_move_proven: bool | None = None
+
+
+@dataclass(frozen=True)
+class _CompoundCorrection:
+    opponent_move_proven: bool
+    moves: tuple[tuple[Square, Square], ...]
+    squares: tuple[Square, ...]
 
 
 class ReferenceMoveTracker:
@@ -84,6 +96,12 @@ class ReferenceMoveTracker:
         self._camera_grid_remapped = False
         self._piece_color_reference: PieceColorReferenceModel | None = None
         self._piece_color_reference_position: Position | None = None
+        self._compound_correction_target: LegalMoveSignature | None = None
+        self._compound_correction_position: Position | None = None
+        self._compound_correction_moves: tuple[
+            tuple[Square, Square], ...
+        ] = ()
+        self._compound_correction_squares: tuple[Square, ...] = ()
 
     @property
     def initialized(self) -> bool:
@@ -97,6 +115,7 @@ class ReferenceMoveTracker:
         self._reference = None
         self._camera_grid_remapped = False
         self._clear_piece_color_reference()
+        self._clear_compound_correction()
         self.reset_activity()
 
     def reset_activity(self) -> None:
@@ -120,6 +139,7 @@ class ReferenceMoveTracker:
         )
         self._camera_grid_remapped = False
         self._clear_piece_color_reference()
+        self._clear_compound_correction()
         self.reset_activity()
 
     def canonical_frame(
@@ -147,11 +167,13 @@ class ReferenceMoveTracker:
         self._reference = np.asarray(reference, dtype=np.uint8).copy()
         self._camera_grid_remapped = False
         self._clear_piece_color_reference()
+        self._clear_compound_correction()
         self.reset_activity()
 
     def note_camera_grid_remap(self) -> None:
         self._camera_grid_remapped = True
         self._clear_piece_color_reference()
+        self._clear_compound_correction()
         self.reset_activity()
 
     def observe(
@@ -246,6 +268,52 @@ class ReferenceMoveTracker:
                 "Board matches the accepted reference.",
                 scores,
             )
+        if (
+            self._compound_correction_target is not None
+            and self._compound_correction_position is not None
+        ):
+            correction_colors = self._classify_piece_colors(
+                normalized,
+                self._compound_correction_position,
+            )
+            correction_signatures = prefilter_complete_signatures(
+                scores,
+                (self._compound_correction_target,),
+                piece_colors=correction_colors,
+                minimum_square_change=self._minimum_square_change,
+            )
+            correction_match = match_legal_move_signature(
+                scores,
+                correction_signatures,
+                piece_colors=correction_colors,
+                minimum_square_change=self._minimum_square_change,
+                minimum_dominance=self._minimum_dominance,
+            )
+            if correction_match.signature == self._compound_correction_target:
+                self._pending_reference = normalized.copy()
+                return ReferenceTrackerUpdate(
+                    "compound-correction-restored",
+                    (
+                        self._compound_correction_target.source,
+                        self._compound_correction_target.destination,
+                    ),
+                    "Incorrect local reply was undone; the opponent-only "
+                    "position is verified.",
+                    scores,
+                    correction_moves=self._compound_correction_moves,
+                    correction_squares=self._compound_correction_squares,
+                    opponent_move_proven=True,
+                )
+            return ReferenceTrackerUpdate(
+                "compound-correction",
+                None,
+                "Undo the incorrect local reply to restore the verified "
+                "opponent-only position.",
+                scores,
+                correction_moves=self._compound_correction_moves,
+                correction_squares=self._compound_correction_squares,
+                opponent_move_proven=True,
+            )
         move: tuple[Square, Square] | None = None
         pending_capture_destination: Square | None = None
         pending_capture_sources: tuple[Square, ...] = ()
@@ -339,6 +407,43 @@ class ReferenceMoveTracker:
                     matched_signature.source,
                     matched_signature.destination,
                 )
+            elif (
+                required_signature is not None
+                and compound_signatures
+                and piece_colors is not None
+                and not has_large_obstruction
+            ):
+                correction = _match_incorrect_compound_attempt(
+                    scores,
+                    position,
+                    required_signature,
+                    piece_colors,
+                    minimum_square_change=self._minimum_square_change,
+                )
+                if correction is not None:
+                    if correction.opponent_move_proven:
+                        self._compound_correction_target = required_signature
+                        self._compound_correction_position = dict(position)
+                        self._compound_correction_moves = correction.moves
+                        self._compound_correction_squares = correction.squares
+                    self._clear_pending()
+                    return ReferenceTrackerUpdate(
+                        "compound-correction",
+                        None,
+                        (
+                            "Opponent move verified; undo the incorrect "
+                            "local reply."
+                            if correction.opponent_move_proven
+                            else "Opponent move is incorrect; restore both "
+                            "physical relocations."
+                        ),
+                        scores,
+                        correction_moves=correction.moves,
+                        correction_squares=correction.squares,
+                        opponent_move_proven=(
+                            correction.opponent_move_proven
+                        ),
+                    )
             elif piece_colors is not None:
                 castling_match = match_pending_castling(
                     scores,
@@ -650,6 +755,22 @@ class ReferenceMoveTracker:
         self._reference = accepted_reference
         self._camera_grid_remapped = False
         self._clear_piece_color_reference()
+        self._clear_compound_correction()
+
+    def commit_compound_correction_reference(self) -> None:
+        if (
+            self._compound_correction_target is None
+            or self._pending_reference is None
+        ):
+            raise ValueError(
+                "No verified compound correction reference is ready."
+            )
+        accepted_reference = self._pending_reference
+        self.reset_activity()
+        self._reference = accepted_reference
+        self._camera_grid_remapped = False
+        self._clear_piece_color_reference()
+        self._clear_compound_correction()
 
     def _classify_piece_colors(
         self,
@@ -694,6 +815,12 @@ class ReferenceMoveTracker:
     def _clear_piece_color_reference(self) -> None:
         self._piece_color_reference = None
         self._piece_color_reference_position = None
+
+    def _clear_compound_correction(self) -> None:
+        self._compound_correction_target = None
+        self._compound_correction_position = None
+        self._compound_correction_moves = ()
+        self._compound_correction_squares = ()
 
     def rejected_move_is_restored(
         self,
@@ -893,6 +1020,239 @@ class ReferenceMoveTracker:
         self._settled_count = 0
         self._candidate_move = None
         self._candidate_count = 0
+
+
+def _match_incorrect_compound_attempt(
+    scores: FloatArray,
+    position: Position,
+    required_signature: LegalMoveSignature,
+    piece_colors: dict[Square, PieceColorClassification],
+    *,
+    minimum_square_change: float,
+) -> _CompoundCorrection | None:
+    required_piece = position.get(required_signature.source)
+    if required_piece is None:
+        return None
+    opponent_is_white = required_piece.isupper()
+    intermediate = _apply_signature_changes(position, required_signature)
+    required_squares = {
+        change.square for change in required_signature.changes
+    }
+    local_relocations = _observed_relocations(
+        scores,
+        intermediate,
+        piece_colors,
+        mover_is_white=not opponent_is_white,
+        minimum_square_change=minimum_square_change,
+    )
+    proven_candidates = [
+        relocation
+        for relocation in local_relocations
+        if required_squares.isdisjoint(relocation)
+        and _relocation_sequence_matches(
+            scores,
+            position,
+            (
+                (
+                    required_signature.source,
+                    required_signature.destination,
+                ),
+                relocation,
+            ),
+            piece_colors,
+            minimum_square_change=minimum_square_change,
+            required_signature=required_signature,
+        )
+    ]
+    if len(proven_candidates) == 1:
+        local_move = proven_candidates[0]
+        moves = (
+            (
+                required_signature.source,
+                required_signature.destination,
+            ),
+            local_move,
+        )
+        return _CompoundCorrection(
+            True,
+            moves,
+            tuple(dict.fromkeys(local_move)),
+        )
+
+    first_relocations = _observed_relocations(
+        scores,
+        position,
+        piece_colors,
+        mover_is_white=opponent_is_white,
+        minimum_square_change=minimum_square_change,
+    )
+    incorrect_pairs: list[
+        tuple[tuple[Square, Square], tuple[Square, Square]]
+    ] = []
+    required_move = (
+        required_signature.source,
+        required_signature.destination,
+    )
+    for first_move in first_relocations:
+        if first_move == required_move:
+            continue
+        after_first = _apply_relocation(position, first_move)
+        for second_move in _observed_relocations(
+            scores,
+            after_first,
+            piece_colors,
+            mover_is_white=not opponent_is_white,
+            minimum_square_change=minimum_square_change,
+        ):
+            moves = (first_move, second_move)
+            if _relocation_sequence_matches(
+                scores,
+                position,
+                moves,
+                piece_colors,
+                minimum_square_change=minimum_square_change,
+            ):
+                incorrect_pairs.append(moves)
+    unique_pairs = tuple(dict.fromkeys(incorrect_pairs))
+    if len(unique_pairs) != 1:
+        return None
+    moves = unique_pairs[0]
+    return _CompoundCorrection(
+        False,
+        moves,
+        tuple(
+            dict.fromkeys(
+                square for relocation in moves for square in relocation
+            )
+        ),
+    )
+
+
+def _observed_relocations(
+    scores: FloatArray,
+    position: Position,
+    piece_colors: dict[Square, PieceColorClassification],
+    *,
+    mover_is_white: bool,
+    minimum_square_change: float,
+) -> tuple[tuple[Square, Square], ...]:
+    source_threshold = minimum_square_change * 0.7
+    mover_label = "white" if mover_is_white else "black"
+    sources = tuple(
+        square
+        for square, piece in position.items()
+        if piece.isupper() == mover_is_white
+        and float(scores[square]) >= source_threshold
+        and (
+            classification := piece_colors.get(square)
+        ) is not None
+        and classification.label == "empty"
+    )
+    destinations = tuple(
+        (row, column)
+        for row in range(8)
+        for column in range(8)
+        if float(scores[row, column]) >= source_threshold
+        and (
+            classification := piece_colors.get((row, column))
+        ) is not None
+        and classification.label == mover_label
+    )
+    return tuple(
+        (source, destination)
+        for source in sources
+        for destination in destinations
+        if source != destination
+        and (
+            destination not in position
+            or position[destination].isupper() != mover_is_white
+        )
+    )
+
+
+def _relocation_sequence_matches(
+    scores: FloatArray,
+    position: Position,
+    moves: tuple[tuple[Square, Square], ...],
+    piece_colors: dict[Square, PieceColorClassification],
+    *,
+    minimum_square_change: float,
+    required_signature: LegalMoveSignature | None = None,
+) -> bool:
+    result = dict(position)
+    touched: list[Square] = []
+    start_index = 0
+    if required_signature is not None:
+        result = _apply_signature_changes(result, required_signature)
+        touched.extend(
+            change.square for change in required_signature.changes
+        )
+        start_index = 1
+    for move in moves[start_index:]:
+        source, destination = move
+        piece = result.pop(source, None)
+        if piece is None:
+            return False
+        result[destination] = piece
+        touched.extend(move)
+    touched_squares = tuple(dict.fromkeys(touched))
+    if not touched_squares:
+        return False
+    for square in touched_squares:
+        piece = result.get(square)
+        expected = (
+            "empty"
+            if piece is None
+            else "white"
+            if piece.isupper()
+            else "black"
+        )
+        classification = piece_colors.get(square)
+        if classification is None or classification.label != expected:
+            return False
+    changed_scores = [float(scores[square]) for square in touched_squares]
+    if any(
+        score < minimum_square_change * 0.7
+        for score in changed_scores
+    ):
+        return False
+    unexpected_limit = max(
+        minimum_square_change,
+        min(changed_scores) * 0.75,
+    )
+    return all(
+        square in touched_squares
+        or float(scores[square]) <= unexpected_limit
+        for square in (
+            (row, column)
+            for row in range(8)
+            for column in range(8)
+        )
+    )
+
+
+def _apply_signature_changes(
+    position: Position,
+    signature: LegalMoveSignature,
+) -> Position:
+    result = dict(position)
+    for change in signature.changes:
+        if change.after is None:
+            result.pop(change.square, None)
+        else:
+            result[change.square] = change.after
+    return result
+
+
+def _apply_relocation(
+    position: Position,
+    move: tuple[Square, Square],
+) -> Position:
+    source, destination = move
+    result = dict(position)
+    piece = result.pop(source)
+    result[destination] = piece
+    return result
 
 
 def _uci_move(uci: str) -> tuple[Square, Square]:

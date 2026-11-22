@@ -1377,7 +1377,7 @@ class CameraWindow(QMainWindow):
             tuple[tuple[int, int], ...]
         ) = ()
         self._illegal_correction_last_projected_move: (
-            tuple[tuple[int, int], tuple[int, int]] | None
+            tuple[tuple[int, int], ...] | None
         ) = None
         self._lichess_guidance_generation = 0
         self._latest_lichess_state: LichessGameState | None = None
@@ -4281,6 +4281,8 @@ class CameraWindow(QMainWindow):
             if update.state in {
                 "accepted",
                 "compound-accepted",
+                "compound-correction",
+                "compound-correction-restored",
                 "ambiguous",
                 "illegal-removal",
                 "illegal-relocation",
@@ -4305,6 +4307,7 @@ class CameraWindow(QMainWindow):
         )
         if correction_restored:
             self._board_widget.set_illegal_source(None)
+            self._board_widget.set_reconciliation_squares(())
             restored_move = self._last_rejected_move
             self._last_rejected_move = None
             self._illegal_correction_last_projected_move = None
@@ -4351,6 +4354,116 @@ class CameraWindow(QMainWindow):
                 self._piece_status.setText(
                     _accepted_position_message(self._legal_game)
                 )
+        if update.state == "compound-correction-restored":
+            try:
+                self._reference_move_tracker.commit_compound_correction_reference()
+            except ValueError as error:
+                self._piece_status.setText(
+                    f"Compound correction could not be committed: {error}"
+                )
+                return
+            self._board_widget.set_illegal_source(None)
+            self._board_widget.set_reconciliation_squares(())
+            self._board_widget.set_guidance_move(None)
+            self._last_rejected_move = None
+            self._illegal_correction_last_projected_move = None
+            self._persist_move_reference()
+            self._resume_board_edge_activity_indicator()
+            message = (
+                "Incorrect local reply was undone. The opponent move is "
+                "accepted; make a legal local move."
+            )
+            self._piece_status.setText(message)
+            self._lichess_sync_status.setText(message)
+            self._record_runtime_diagnostic(
+                "lichess-compound-correction-restored",
+                message,
+                tracker_update=update,
+                include_images=True,
+            )
+            return
+        if (
+            update.state == "compound-correction"
+            and update.correction_moves
+            and update.correction_squares
+            and lichess_controller is not None
+        ):
+            if (
+                update.opponent_move_proven
+                and lichess_signature is not None
+            ):
+                opponent_result = lichess_controller.pending_result
+                if opponent_result is None:
+                    self._piece_status.setText(
+                        "The proven opponent move cannot be committed."
+                    )
+                    return
+                expected_move = (
+                    lichess_signature.source,
+                    lichess_signature.destination,
+                )
+                previous_position = self._piece_synchronizer.position
+                try:
+                    position_update = (
+                        self._piece_synchronizer.accept_authoritative_move(
+                            expected_move[0],
+                            expected_move[1],
+                            opponent_result.position,
+                        )
+                    )
+                    synchronization = (
+                        lichess_controller.confirm_expected_move(
+                            expected_move
+                        )
+                    )
+                except ValueError as error:
+                    self._piece_synchronizer.restore(previous_position)
+                    self._piece_status.setText(
+                        f"Proven opponent move could not be committed: "
+                        f"{error}"
+                    )
+                    return
+                self._board_widget.set_pieces(position_update.position)
+                self._board_widget.set_occupied_squares(
+                    position_update.position
+                )
+                self._board_widget.set_last_move(expected_move)
+                self._persist_piece_position(position_update.position)
+                self._lichess_sync_status.setText(synchronization.message)
+                self._last_projected_lichess_uci = None
+            self._reference_move_tracker.reset_activity()
+            self._last_rejected_move = update.correction_moves[-1]
+            self._board_widget.set_illegal_source(None)
+            self._board_widget.set_guidance_move(None)
+            self._board_widget.set_reconciliation_squares(
+                update.correction_squares
+            )
+            message = (
+                "Opponent move accepted. Undo the incorrect local reply "
+                "marked in red."
+                if update.opponent_move_proven
+                else "Opponent move is incorrect. Restore both relocations "
+                "marked in red."
+            )
+            self._piece_status.setText(message)
+            self._lichess_sync_status.setText(message)
+            self._record_runtime_diagnostic(
+                "lichess-compound-correction",
+                message,
+                tracker_update=update,
+                details={
+                    "opponent_move_proven": update.opponent_move_proven,
+                    "correction_squares": [
+                        square_name(square)
+                        for square in update.correction_squares
+                    ],
+                },
+                include_images=True,
+            )
+            self._project_illegal_correction_squares(
+                update.correction_squares
+            )
+            return
         if update.state == "illegal-removal" and update.move is not None:
             if lichess_controller is not None:
                 if lichess_signature is not None:
@@ -5796,6 +5909,15 @@ class CameraWindow(QMainWindow):
         self,
         move: tuple[tuple[int, int], tuple[int, int]],
     ) -> None:
+        CameraWindow._project_illegal_correction_squares(
+            self,
+            tuple(dict.fromkeys(move))
+        )
+
+    def _project_illegal_correction_squares(
+        self,
+        logical_squares: tuple[tuple[int, int], ...],
+    ) -> None:
         if (
             self._illegal_correction_projection_active
             or self._illegal_correction_blackout_pending
@@ -5813,20 +5935,27 @@ class CameraWindow(QMainWindow):
                 "projector is available."
             )
             return
-        source, destination = move
-        physical_source = self._physical_board_square(*source)
-        physical_destination = self._physical_board_square(*destination)
+        if not logical_squares:
+            raise ValueError("At least one correction square is required.")
+        correction_squares = tuple(
+            dict.fromkeys(
+                self._physical_board_square(*square)
+                for square in logical_squares
+            )
+        )
         try:
-            if source == destination:
-                self._projector_window.show_illegal_square(*physical_source)
-                correction_squares = (physical_source,)
-            else:
-                self._projector_window.show_correction(
-                    physical_source,
-                    physical_destination,
+            if len(correction_squares) == 1:
+                self._projector_window.show_illegal_square(
+                    *correction_squares[0]
                 )
-                correction_squares = tuple(
-                    dict.fromkeys((physical_source, physical_destination))
+            elif len(correction_squares) == 2:
+                self._projector_window.show_correction(
+                    correction_squares[0],
+                    correction_squares[1],
+                )
+            else:
+                self._projector_window.show_reconciliation(
+                    correction_squares
                 )
         except (RuntimeError, ValueError) as error:
             self._projector_status.setText(
@@ -5843,13 +5972,37 @@ class CameraWindow(QMainWindow):
         status_message = (
             "Projecting the illegally removed square in red until entry or "
             "fallback blackout."
-            if source == destination
-            else "Projecting both illegal move squares in red until entry "
-            "or fallback blackout."
+            if len(correction_squares) == 1
+            else (
+                "Projecting both illegal move squares in red until entry "
+                "or fallback blackout."
+                if len(correction_squares) == 2
+                else (
+                    f"Projecting {len(correction_squares)} correction "
+                    "squares in red until entry or fallback blackout."
+                )
+            )
         )
         self._projector_status.setText(status_message)
-        reprojection = self._illegal_correction_last_projected_move == move
-        self._illegal_correction_last_projected_move = move
+        reprojection = (
+            self._illegal_correction_last_projected_move == logical_squares
+        )
+        self._illegal_correction_last_projected_move = logical_squares
+        diagnostic_details: dict[str, object] = {
+            "generation": self._illegal_correction_generation,
+            "physical_squares": [
+                [row, column] for row, column in correction_squares
+            ],
+        }
+        if len(logical_squares) == 2:
+            diagnostic_details["logical_move"] = [
+                square_name(logical_squares[0]),
+                square_name(logical_squares[1]),
+            ]
+        else:
+            diagnostic_details["logical_squares"] = [
+                square_name(square) for square in logical_squares
+            ]
         self._record_runtime_diagnostic(
             (
                 "illegal-correction-reprojected"
@@ -5857,16 +6010,7 @@ class CameraWindow(QMainWindow):
                 else "illegal-correction-projected"
             ),
             status_message,
-            details={
-                "generation": self._illegal_correction_generation,
-                "logical_move": [
-                    square_name(source),
-                    square_name(destination),
-                ],
-                "physical_squares": [
-                    [row, column] for row, column in correction_squares
-                ],
-            },
+            details=diagnostic_details,
             include_images=True,
         )
         generation = self._illegal_correction_generation

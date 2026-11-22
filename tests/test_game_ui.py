@@ -2506,6 +2506,204 @@ def test_pending_opponent_move_offers_compound_replies_to_tracker(
     )
 
 
+def test_compound_correction_commits_only_proven_opponent_move() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.chess_position import PiecePositionSynchronizer
+
+    controller = LichessGameController(
+        "game1234",
+        "startpos",
+        "white",
+        "Opponent",
+        physical_fen=(
+            "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/"
+            "RNBQKBNR b KQkq - 0 1"
+        ),
+    )
+    controller.accept_server_history(("e2e4",))
+    controller.accept_server_history(("e2e4", "e7e5"))
+    expected = controller.expected_signature
+    opponent_result = controller.pending_result
+    assert expected is not None
+    assert opponent_result is not None
+    wrong_reply = ((6, 5), (3, 5))
+    correction_squares = wrong_reply
+    tracker = MagicMock()
+    tracker.observe.return_value = ReferenceTrackerUpdate(
+        "compound-correction",
+        None,
+        "Opponent move verified; undo the incorrect local reply.",
+        correction_moves=(
+            (expected.source, expected.destination),
+            wrong_reply,
+        ),
+        correction_squares=correction_squares,
+        opponent_move_proven=True,
+    )
+    tracker.rejected_move_is_restored.return_value = False
+    synchronizer = PiecePositionSynchronizer()
+    synchronizer.restore(controller.physical_position)
+    board_widget = MagicMock()
+    window = SimpleNamespace(
+        _latest_frame=object(),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(camera_grid=object())
+        ),
+        _pending_lichess_local_move=None,
+        _lichess_game_controller=controller,
+        _piece_synchronizer=synchronizer,
+        _legal_game=LegalGame(),
+        _game_mode="diagnostic",
+        _promotion_mode="auto-queen",
+        _reference_move_tracker=tracker,
+        _board_quarter_turns=0,
+        _occupancy_status=MagicMock(),
+        _last_runtime_tracker_state="watching",
+        _record_runtime_diagnostic=MagicMock(),
+        _restore_pending_lichess_guidance_after_no_change=MagicMock(),
+        _last_rejected_move=None,
+        _illegal_correction_last_projected_move=None,
+        _board_widget=board_widget,
+        _piece_status=MagicMock(),
+        _lichess_sync_status=MagicMock(),
+        _last_projected_lichess_uci=expected.uci,
+        _persist_piece_position=MagicMock(),
+        _project_illegal_correction_squares=MagicMock(),
+    )
+
+    CameraWindow._update_reference_move_tracking(window)
+
+    assert controller.pending_moves == ()
+    assert controller.physical_position == opponent_result.position
+    assert synchronizer.position == opponent_result.position
+    tracker.commit_accepted.assert_not_called()
+    board_widget.set_reconciliation_squares.assert_called_once_with(
+        correction_squares
+    )
+    window._project_illegal_correction_squares.assert_called_once_with(
+        correction_squares
+    )
+
+
+def test_compound_correction_commits_neither_when_opponent_move_is_wrong() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    controller = LichessGameController(
+        "game1234",
+        "startpos",
+        "white",
+        "Opponent",
+        physical_fen=(
+            "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/"
+            "RNBQKBNR b KQkq - 0 1"
+        ),
+    )
+    controller.accept_server_history(("e2e4",))
+    controller.accept_server_history(("e2e4", "e7e5"))
+    original_position = controller.physical_position
+    moves = (((1, 4), (2, 4)), ((6, 5), (5, 5)))
+    correction_squares = tuple(
+        square for move in moves for square in move
+    )
+    tracker = MagicMock()
+    tracker.observe.return_value = ReferenceTrackerUpdate(
+        "compound-correction",
+        None,
+        "Opponent move is incorrect; restore both relocations.",
+        correction_moves=moves,
+        correction_squares=correction_squares,
+        opponent_move_proven=False,
+    )
+    tracker.rejected_move_is_restored.return_value = False
+    board_widget = MagicMock()
+    window = SimpleNamespace(
+        _latest_frame=object(),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(camera_grid=object())
+        ),
+        _pending_lichess_local_move=None,
+        _lichess_game_controller=controller,
+        _piece_synchronizer=SimpleNamespace(position=original_position),
+        _legal_game=LegalGame(),
+        _game_mode="diagnostic",
+        _promotion_mode="auto-queen",
+        _reference_move_tracker=tracker,
+        _board_quarter_turns=0,
+        _occupancy_status=MagicMock(),
+        _last_runtime_tracker_state="watching",
+        _record_runtime_diagnostic=MagicMock(),
+        _restore_pending_lichess_guidance_after_no_change=MagicMock(),
+        _last_rejected_move=None,
+        _illegal_correction_last_projected_move=None,
+        _board_widget=board_widget,
+        _piece_status=MagicMock(),
+        _lichess_sync_status=MagicMock(),
+        _project_illegal_correction_squares=MagicMock(),
+    )
+
+    CameraWindow._update_reference_move_tracking(window)
+
+    assert controller.pending_moves == ("e7e5",)
+    assert controller.physical_position == original_position
+    tracker.commit_accepted.assert_not_called()
+    board_widget.set_reconciliation_squares.assert_called_once_with(
+        correction_squares
+    )
+    window._project_illegal_correction_squares.assert_called_once_with(
+        correction_squares
+    )
+
+
+def test_compound_correction_restoration_commits_new_reference() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    tracker = MagicMock()
+    tracker.observe.return_value = ReferenceTrackerUpdate(
+        "compound-correction-restored",
+        ((1, 4), (3, 4)),
+        "Opponent-only position verified.",
+        opponent_move_proven=True,
+    )
+    tracker.rejected_move_is_restored.return_value = False
+    board_widget = MagicMock()
+    window = SimpleNamespace(
+        _latest_frame=object(),
+        _calibration_result=SimpleNamespace(
+            mapping=SimpleNamespace(camera_grid=object())
+        ),
+        _pending_lichess_local_move=None,
+        _lichess_game_controller=MagicMock(expected_signature=None),
+        _piece_synchronizer=SimpleNamespace(position={}),
+        _legal_game=LegalGame(),
+        _game_mode="diagnostic",
+        _promotion_mode="auto-queen",
+        _reference_move_tracker=tracker,
+        _board_quarter_turns=0,
+        _occupancy_status=MagicMock(),
+        _last_runtime_tracker_state="compound-correction",
+        _record_runtime_diagnostic=MagicMock(),
+        _restore_pending_lichess_guidance_after_no_change=MagicMock(),
+        _last_rejected_move=((6, 5), (3, 5)),
+        _illegal_correction_last_projected_move=((6, 5), (3, 5)),
+        _board_widget=board_widget,
+        _piece_status=MagicMock(),
+        _lichess_sync_status=MagicMock(),
+        _persist_move_reference=MagicMock(),
+        _resume_board_edge_activity_indicator=MagicMock(),
+    )
+
+    CameraWindow._update_reference_move_tracking(window)
+
+    tracker.commit_compound_correction_reference.assert_called_once_with()
+    window._persist_move_reference.assert_called_once_with()
+    board_widget.set_reconciliation_squares.assert_called_once_with(())
+    assert window._last_rejected_move is None
+
+
 def test_select_promotion_mode_excludes_only_compound_promotions() -> None:
     from types import SimpleNamespace
     from unittest.mock import MagicMock

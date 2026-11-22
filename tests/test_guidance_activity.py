@@ -836,6 +836,44 @@ def test_illegal_correction_schedules_bounded_fallback() -> None:
     )
 
 
+def test_compound_correction_projects_all_squares_red() -> None:
+    window = SimpleNamespace(
+        _illegal_correction_projection_active=False,
+        _illegal_correction_blackout_pending=False,
+        _illegal_correction_generation=0,
+        _illegal_correction_physical_squares=(),
+        _illegal_correction_last_projected_move=None,
+        _camera_only_calibration=False,
+        _calibration_result=object(),
+        _open_projector=MagicMock(return_value=True),
+        _physical_board_square=lambda row, column: (row, column),
+        _projector_window=MagicMock(),
+        _resume_board_edge_activity_indicator=MagicMock(),
+        _alignment_monitor=MagicMock(),
+        _projector_status=MagicMock(),
+        _record_runtime_diagnostic=MagicMock(),
+        _begin_illegal_correction_observation_if_current=MagicMock(),
+    )
+    squares = ((1, 4), (2, 4), (6, 5), (5, 5))
+
+    with patch("src.chess_camera.camera_app.QTimer.singleShot"):
+        CameraWindow._project_illegal_correction_squares(
+            window,
+            squares,
+        )
+
+    window._projector_window.show_reconciliation.assert_called_once_with(
+        squares
+    )
+    assert window._illegal_correction_physical_squares == squares
+    assert (
+        window._record_runtime_diagnostic.call_args.kwargs["details"][
+            "logical_squares"
+        ]
+        == ["e7", "e6", "f2", "f3"]
+    )
+
+
 def test_boundary_entry_starts_illegal_correction_blackout() -> None:
     window = SimpleNamespace(
         _illegal_correction_projection_active=True,

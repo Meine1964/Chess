@@ -1055,6 +1055,53 @@ The settled final frame shall produce exactly one of these outcomes:
 The opponent and local move shall be displayed as two ordered plies. They
 shall not be collapsed into one synthetic chess move.
 
+#### 10.5.4.1 Incorrect compound attempts
+
+Correction shall distinguish whether the required opponent move itself is
+proven by the settled final frame. The application shall not reject the whole
+visit merely because the subsequent local action is illegal or does not match
+any legal reply.
+
+When the required opponent move is proven but the subsequent local action is
+an unambiguous incorrect relocation:
+
+- the opponent move shall be committed to the physical logical position;
+- the incorrect local action shall not be submitted or committed;
+- only the incorrect local action's origin and destination shall be marked
+  red on the physical-position UI and projector, using the ordinary illegal
+  correction behavior;
+- the pre-visit camera reference shall remain authoritative while correction
+  is active because the incorrect final frame is not a valid opponent-only
+  reference; and
+- after the incorrect local action is undone and a clear settled frame proves
+  the opponent-only result, that frame shall become the accepted reference and
+  normal local-move tracking shall resume.
+
+When the required opponent move is incorrect, missing, or cannot be proven
+independently of the subsequent action:
+
+- neither physical ply shall be committed;
+- no local move shall be submitted;
+- the pre-visit logical position and camera reference shall remain
+  authoritative;
+- the known opponent move's origin and destination and the unambiguous
+  subsequent relocation's origin and destination shall all be marked red,
+  with duplicate or overlapping squares shown only once; and
+- the player shall restore the complete pre-visit accepted position before
+  the pending opponent guidance resumes.
+
+The combined correction therefore marks at most four distinct origin or
+destination squares for ordinary two-ply attempts, and fewer when squares
+overlap. If the subsequent relocation cannot be identified unambiguously, the
+application shall mark every unambiguous origin or destination from the failed
+attempt and shall not guess the remaining squares. Castling, en passant, and
+promotion correction shall continue to include any additional required
+special-move correction squares defined by their existing workflows.
+
+No logical move or camera reference may be committed from a frame in which the
+required opponent move is unproven. Ambiguity about whether the opponent move
+was executed correctly shall use the second, non-committing outcome.
+
 #### 10.5.5 Submission and commit
 
 Compound local submission shall retain the existing network two-phase commit:
@@ -1480,6 +1527,13 @@ The first ordinary-move slice is accepted when all of the following pass.
 - Two legal replies with indistinguishable final camera evidence submit
   nothing and report ambiguity.
 - An extra unexplained changed square rejects the compound candidate.
+- A proven opponent move followed by one unambiguous incorrect local
+  relocation commits only the opponent move, marks the incorrect relocation's
+  origin and destination red, and accepts a new reference only after the
+  incorrect action is undone.
+- An incorrect or unproven opponent move commits neither ply and marks the
+  deduplicated origin and destination squares of both identifiable
+  relocations red.
 - Checkmate or another terminal opponent result offers no compound reply.
 - Multiple pending opponent moves use the sequential workflow.
 - In select-promoted-piece mode, ordinary, capture, castling, and en-passant
@@ -1560,7 +1614,7 @@ promotion slices are implemented:
   until both move footprints are released, submits only a unique reply, and
   atomically commits both plies after authoritative Lichess confirmation.
 
-The current validated automated suite contains 438 passing tests. Live
+The current validated automated suite contains 448 passing tests. Live
 ordinary-move, polling, reconciliation, and guidance acceptance has been
 exercised on the target camera/projector setup. Lichess capture, castling, en
 passant, and auto-queen behavior is automated-test validated and awaits live
@@ -1579,3 +1633,7 @@ guidance remains staged. Single-visit opponent-plus-local movement is
 automated-test validated and awaits live acceptance. Select-promoted-piece mode
 retains single-visit ordinary, capture, castling, and en-passant replies while
 reserving local promotion replies for the sequential selection workflow.
+Incorrect compound attempts now distinguish a proven opponent ply from an
+incorrect or unproven one, preserve the appropriate authoritative reference,
+and project the specified two- or four-square red correction; this correction
+workflow is automated-test validated and awaits live acceptance.
