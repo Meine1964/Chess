@@ -135,6 +135,7 @@ class BoardEdgeActivityDetector:
         quiet_observations: int = 1,
         pixel_difference_threshold: int = 18,
         minimum_square_fraction: float = 0.06,
+        halo_squares: float = 1.0,
     ) -> None:
         if (
             arming_observations < 1
@@ -146,6 +147,9 @@ class BoardEdgeActivityDetector:
             raise ValueError("The pixel difference threshold is invalid.")
         if not 0 < minimum_square_fraction <= 1:
             raise ValueError("The minimum square fraction is invalid.")
+        if halo_squares <= 0:
+            raise ValueError("The observation halo width must be positive.")
+        self._halo_squares = halo_squares
         self._arming_observations = arming_observations
         self._confirmation_observations = confirmation_observations
         self._quiet_observations = quiet_observations
@@ -416,7 +420,11 @@ class BoardEdgeActivityDetector:
         grid: FloatArray,
     ) -> "_EdgeGeometry":
         height, width = frame_shape
-        guidance_polygon = _guidance_region_polygon(frame_shape, grid)
+        guidance_polygon = _guidance_region_polygon(
+            frame_shape,
+            grid,
+            self._halo_squares,
+        )
         x, y, polygon_width, polygon_height = cv2.boundingRect(
             guidance_polygon
         )
@@ -472,9 +480,10 @@ class BoardEdgeHandGate(BoardEdgeActivityDetector):
         still_release_seconds: float = 5.0,
         still_pixel_fraction: float = 0.01,
         minimum_square_coverage: float = 0.1,
+        halo_squares: float = 2.0,
         clock: Callable[[], float] = monotonic,
     ) -> None:
-        super().__init__()
+        super().__init__(halo_squares=halo_squares)
         if still_release_seconds <= 0:
             raise ValueError("The stillness release duration must be positive.")
         if not 0 <= still_pixel_fraction < 1:
@@ -489,6 +498,7 @@ class BoardEdgeHandGate(BoardEdgeActivityDetector):
         self._baseline_grid_key: bytes | None = None
         self._previous_gray: np.ndarray | None = None
         self._still_since: float | None = None
+        self._still_bounds: tuple[int, int, int, int] | None = None
         self._released = False
 
     @property
@@ -515,6 +525,7 @@ class BoardEdgeHandGate(BoardEdgeActivityDetector):
         self._baseline_grid_key = None
         self._previous_gray = None
         self._still_since = None
+        self._still_bounds = None
         self._released = False
 
     def capture_baseline(
@@ -527,6 +538,7 @@ class BoardEdgeHandGate(BoardEdgeActivityDetector):
         self._baseline_grid_key = geometry.grid_key
         self._previous_gray = None
         self._still_since = None
+        self._still_bounds = None
         self._released = False
         self._active = False
         self._clear_measurements()
@@ -549,18 +561,24 @@ class BoardEdgeHandGate(BoardEdgeActivityDetector):
         self._crossing_detected = crossing
         previous = self._previous_gray
         self._previous_gray = gray
+        if crossing:
+            self._still_bounds = self._largest_component_bounds
+        if (
+            previous is None
+            or self._still_bounds is None
+            or not self._is_still(previous, gray, geometry, self._still_bounds)
+        ):
+            self._still_since = None
         if not crossing:
             self._active = False
-            self._still_since = None
             return False
         now = self._clock()
-        if previous is None or not self._is_still(previous, gray, geometry):
-            self._still_since = now
-        elif self._still_since is None:
+        if self._still_since is None:
             self._still_since = now
         if now - self._still_since >= self._still_release_seconds:
             self._baseline = gray
             self._still_since = None
+            self._still_bounds = None
             self._active = False
             self._released = True
             return False
@@ -606,10 +624,8 @@ class BoardEdgeHandGate(BoardEdgeActivityDetector):
         previous: np.ndarray,
         current: np.ndarray,
         geometry: "_EdgeGeometry",
+        bounds: tuple[int, int, int, int],
     ) -> bool:
-        bounds = self._largest_component_bounds
-        if bounds is None:
-            return False
         left, top = geometry.crop[:2]
         margin = round(geometry.square_area**0.5)
         height, width = current.shape
@@ -681,6 +697,7 @@ def _edge_geometry(
         1,
     ).astype(np.float64)
     outer_rim_width = max(1, round(square_area**0.5 * 0.15))
+    # A zero border makes a band clipped by the camera frame edge end in rim.
     eroded = cv2.erode(
         guidance_mask,
         np.ones(
@@ -688,6 +705,8 @@ def _edge_geometry(
             dtype=np.uint8,
         ),
         iterations=1,
+        borderType=cv2.BORDER_CONSTANT,
+        borderValue=0,
     )
     guidance = guidance_mask != 0
     board = board_mask != 0
@@ -765,26 +784,23 @@ def _inner_square_polygons(
 def _guidance_region_polygon(
     frame_shape: tuple[int, int],
     camera_grid: FloatArray,
+    halo_squares: float = 1.0,
 ) -> np.ndarray:
     height, width = frame_shape
-    top_left = (
-        camera_grid[0, 0]
-        + (camera_grid[0, 0] - camera_grid[1, 0])
+    top_left = camera_grid[0, 0] + halo_squares * (
+        (camera_grid[0, 0] - camera_grid[1, 0])
         + (camera_grid[0, 0] - camera_grid[0, 1])
     )
-    top_right = (
-        camera_grid[0, 8]
-        + (camera_grid[0, 8] - camera_grid[1, 8])
+    top_right = camera_grid[0, 8] + halo_squares * (
+        (camera_grid[0, 8] - camera_grid[1, 8])
         + (camera_grid[0, 8] - camera_grid[0, 7])
     )
-    bottom_right = (
-        camera_grid[8, 8]
-        + (camera_grid[8, 8] - camera_grid[7, 8])
+    bottom_right = camera_grid[8, 8] + halo_squares * (
+        (camera_grid[8, 8] - camera_grid[7, 8])
         + (camera_grid[8, 8] - camera_grid[8, 7])
     )
-    bottom_left = (
-        camera_grid[8, 0]
-        + (camera_grid[8, 0] - camera_grid[7, 0])
+    bottom_left = camera_grid[8, 0] + halo_squares * (
+        (camera_grid[8, 0] - camera_grid[7, 0])
         + (camera_grid[8, 0] - camera_grid[8, 1])
     )
     polygon = np.rint(

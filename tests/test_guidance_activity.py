@@ -99,93 +99,136 @@ def test_board_edge_indicator_requires_activity_across_boundary() -> None:
     assert detector.largest_component_pixels == 0
 
 
-def test_hand_gate_blocks_resting_arm_against_clean_baseline() -> None:
-    clean = _frame()
-    gate = BoardEdgeHandGate()
-    assert not gate.observe(clean, _camera_grid())
+def _gate_grid() -> np.ndarray:
+    return _camera_grid() + 200.0
 
-    gate.capture_baseline(clean, _camera_grid())
+
+def _gate_frame() -> np.ndarray:
+    return np.full((1600, 1600, 3), 110, dtype=np.uint8)
+
+
+def test_hand_gate_blocks_resting_arm_against_clean_baseline() -> None:
+    clean = _gate_frame()
+    gate = BoardEdgeHandGate()
+    assert not gate.observe(clean, _gate_grid())
+
+    gate.capture_baseline(clean, _gate_grid())
     reaching = clean.copy()
-    cv2.rectangle(reaching, (350, 100), (550, 260), (20, 20, 20), -1)
+    cv2.rectangle(reaching, (550, 150), (750, 460), (20, 20, 20), -1)
     resting = clean.copy()
-    cv2.rectangle(resting, (360, 100), (560, 270), (20, 20, 20), -1)
+    cv2.rectangle(resting, (560, 150), (760, 470), (20, 20, 20), -1)
     for frame in (reaching, resting, resting, resting):
-        assert gate.observe(frame, _camera_grid())
+        assert gate.observe(frame, _gate_grid())
 
     edge_square_change = clean.copy()
     cv2.rectangle(
-        edge_square_change, (350, 175), (550, 260), (20, 20, 20), -1
+        edge_square_change, (550, 375), (750, 460), (20, 20, 20), -1
     )
-    assert not gate.observe(edge_square_change, _camera_grid())
+    assert not gate.observe(edge_square_change, _gate_grid())
     assert gate.has_baseline
+
+
+def test_hand_gate_ignores_piece_outline_reaching_one_square_out() -> None:
+    clean = _gate_frame()
+    gate = BoardEdgeHandGate()
+    gate.capture_baseline(clean, _gate_grid())
+    vacated_edge_square = clean.copy()
+    cv2.rectangle(
+        vacated_edge_square, (520, 290), (590, 470), (20, 20, 20), -1
+    )
+
+    assert not gate.observe(vacated_edge_square, _gate_grid())
+    assert gate.largest_square_coverage >= 0.1
+    assert gate.largest_component_outside_pixels > 0
+    assert gate.largest_component_outer_halo_pixels == 0
 
 
 def test_hand_gate_releases_crossing_still_for_five_seconds() -> None:
     now = 0.0
-    clean = _frame()
+    clean = _gate_frame()
     gate = BoardEdgeHandGate(clock=lambda: now)
-    gate.capture_baseline(clean, _camera_grid())
+    gate.capture_baseline(clean, _gate_grid())
     crossing = clean.copy()
-    cv2.rectangle(crossing, (350, 100), (550, 260), (20, 20, 20), -1)
+    cv2.rectangle(crossing, (550, 150), (750, 460), (20, 20, 20), -1)
     moved = clean.copy()
-    cv2.rectangle(moved, (380, 100), (580, 260), (20, 20, 20), -1)
+    cv2.rectangle(moved, (580, 150), (780, 460), (20, 20, 20), -1)
 
-    assert gate.observe(crossing, _camera_grid())
+    assert gate.observe(crossing, _gate_grid())
     now = 4.0
-    assert gate.observe(moved, _camera_grid())
+    assert gate.observe(moved, _gate_grid())
     now = 8.9
-    assert gate.observe(moved, _camera_grid())
+    assert gate.observe(moved, _gate_grid())
     assert not gate.released
     now = 9.0
-    assert not gate.observe(moved, _camera_grid())
+    assert not gate.observe(moved, _gate_grid())
     assert gate.released
     now = 9.2
-    assert not gate.observe(moved, _camera_grid())
+    assert not gate.observe(moved, _gate_grid())
     assert not gate.released
+
+
+def test_hand_gate_release_survives_briefly_undetected_crossing() -> None:
+    now = 0.0
+    clean = _gate_frame()
+    gate = BoardEdgeHandGate(clock=lambda: now)
+    gate.capture_baseline(clean, _gate_grid())
+    crossing = clean.copy()
+    cv2.rectangle(crossing, (550, 150), (650, 460), (64, 64, 64), -1)
+    undetected = clean.copy()
+    cv2.rectangle(undetected, (550, 150), (650, 460), (74, 74, 74), -1)
+
+    assert gate.observe(crossing, _gate_grid())
+    now = 2.0
+    assert not gate.observe(undetected, _gate_grid())
+    now = 3.0
+    assert gate.observe(crossing, _gate_grid())
+    now = 5.0
+    assert not gate.observe(crossing, _gate_grid())
+    assert gate.released
 
 
 def test_hand_gate_ignores_sleeve_overhanging_only_edge_square_margins() -> None:
-    clean = _frame()
+    clean = _gate_frame()
     gate = BoardEdgeHandGate()
-    gate.capture_baseline(clean, _camera_grid())
+    gate.capture_baseline(clean, _gate_grid())
     sleeve = clean.copy()
-    cv2.rectangle(sleeve, (350, 90), (550, 207), (20, 20, 20), -1)
+    cv2.rectangle(sleeve, (550, 150), (750, 407), (20, 20, 20), -1)
 
-    assert not gate.observe(sleeve, _camera_grid())
+    assert not gate.observe(sleeve, _gate_grid())
     assert gate.largest_component_inside_pixels >= 600
     assert gate.largest_square_coverage < 0.1
 
     reaching = clean.copy()
-    cv2.rectangle(reaching, (350, 90), (550, 240), (20, 20, 20), -1)
-    assert gate.observe(reaching, _camera_grid())
+    cv2.rectangle(reaching, (550, 150), (750, 440), (20, 20, 20), -1)
+    assert gate.observe(reaching, _gate_grid())
     assert gate.largest_square_coverage >= 0.1
 
 
 def test_hand_gate_release_ignores_distant_motion() -> None:
     now = 0.0
-    clean = _frame()
+    clean = _gate_frame()
     gate = BoardEdgeHandGate(clock=lambda: now)
-    gate.capture_baseline(clean, _camera_grid())
+    gate.capture_baseline(clean, _gate_grid())
     crossing = clean.copy()
-    cv2.rectangle(crossing, (350, 100), (550, 260), (20, 20, 20), -1)
+    cv2.rectangle(crossing, (550, 150), (750, 460), (20, 20, 20), -1)
     ticking = crossing.copy()
-    cv2.rectangle(ticking, (850, 1020), (950, 1080), (200, 200, 200), -1)
+    cv2.rectangle(ticking, (1050, 1250), (1150, 1310), (200, 200, 200), -1)
 
     for now, frame in ((0.0, crossing), (2.5, ticking), (4.9, crossing)):
-        assert gate.observe(frame, _camera_grid())
+        assert gate.observe(frame, _gate_grid())
     now = 5.0
-    assert not gate.observe(ticking, _camera_grid())
+    assert not gate.observe(ticking, _gate_grid())
     assert gate.released
 
 
 def test_hand_gate_drops_baseline_when_camera_grid_changes() -> None:
-    clean = _frame()
+    clean = _gate_frame()
     gate = BoardEdgeHandGate()
-    gate.capture_baseline(clean, _camera_grid())
+    gate.capture_baseline(clean, _gate_grid())
     crossing = clean.copy()
-    cv2.rectangle(crossing, (350, 100), (550, 260), (20, 20, 20), -1)
+    cv2.rectangle(crossing, (550, 150), (750, 460), (20, 20, 20), -1)
 
-    assert not gate.observe(crossing, _camera_grid() + 2.0)
+    assert not gate.observe(crossing, _gate_grid() + 2.0)
     assert not gate.has_baseline
 
 

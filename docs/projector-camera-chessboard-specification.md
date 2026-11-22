@@ -479,6 +479,15 @@ blocks move registration on the black board while an arm crosses the edge.
   score and must not block. Measured on the board image, the tracker's lowest
   change threshold needs about 15-20 % inner coverage even for a high-contrast
   sleeve, so 10 % keeps a safety margin while ignoring edge slivers.
+- The gate's observation band extends two square widths beyond the board,
+  instead of the indicator's one, and its outer rim is the outermost 15 % of
+  a square width of that band. A piece standing on an edge square hides frame
+  and floor behind it in the camera image; when it leaves or arrives, the
+  revealed or hidden area forms a permanent change from the edge square
+  outward that reaches about one square width beyond the board. An arm
+  continues to the player's body, well beyond two square widths. Observed on
+  2026-11-22: Bc1-e3 was held for 27 seconds because the bishop's outline on
+  c1 reached the one-square rim.
 - It compares against a clean baseline instead of a rolling one, so a hand
   that rests still can never become part of the comparison image. The
   baseline is the camera crop of the most recent tracker observation that
@@ -490,7 +499,7 @@ blocks move registration on the black board while an arm crosses the edge.
   candidate sequence must follow, and report that a hand or object crosses the
   board edge. Capture the baseline after the occupancy tick in which the
   tracker reported `watching`, `accepted`, or `compound-accepted`.
-- The crossing measurement costs about 30 ms. Skip it while the gate is not
+- The crossing measurement costs about 35 ms with the two-square band. Skip it while the gate is not
   blocking and the tracker's latest state is `watching` or `activity`: both
   discard settled observations, and the tracker needs two settled
   observations before it can register anything, so the next observation
@@ -506,7 +515,11 @@ blocks move registration on the black board while an arm crosses the edge.
   no more than 1 % of those pixels may change by the crossing threshold
   between consecutive observations, after brightness compensation. Distant
   motion, such as the projected clock digits on the frame or the player
-  moving elsewhere, must not restart the five seconds.
+  moving elsewhere, must not restart the five seconds. Observations in which
+  the crossing briefly drops below the thresholds do not restart the five
+  seconds either: stillness of the last crossing's region is still checked,
+  and only motion there restarts the timer. A faint crossing part flickering
+  in and out of detection previously restarted the timer every few seconds.
   This releases an object left across the edge or a far-edge piece whose
   silhouette reaches the halo rim. Any later movement is measured against
   that new baseline.
