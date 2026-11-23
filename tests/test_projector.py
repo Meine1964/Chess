@@ -366,6 +366,26 @@ def test_edge_clock_compensates_lower_projector_pixel_density() -> None:
     assert abs(len(dense_columns) - len(sparse_columns)) <= 1
 
 
+def test_fractional_clock_text_renders(application: QApplication) -> None:
+    window = ProjectorWindow()
+    window.resize(360, 180)
+    window.show()
+    x_values = np.linspace(80, 280, 9, dtype=np.float32)
+    y_values = np.asarray((10, 20, 30, 40, 80, 120, 130, 140, 150), dtype=np.float32)
+    x_grid, y_grid = np.meshgrid(x_values, y_values)
+    window.set_projector_grid(np.stack((x_grid, y_grid), axis=2))
+    window.set_edge_clocks("00:09.2", "00:08.45", board_quarter_turns=0)
+    window.show_black()
+    application.processEvents()
+
+    image = window.grab().toImage()
+    assert any(
+        image.pixelColor(x, y).red() > 0
+        for x in range(50, 82)
+        for y in range(5, 35)
+    )
+
+
 def test_result_visibility_does_not_change_clock_rasterization(
     application: QApplication,
 ) -> None:

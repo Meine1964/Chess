@@ -246,10 +246,6 @@ class ProjectorWindow(QWidget):
             if clock is not None and (
                 clock.count(":") != 1
                 or clock.count(".") > 1
-                or (
-                    "." in clock
-                    and clock.index(".") > clock.index(":")
-                )
                 or any(
                     character not in "0123456789:."
                     for character in clock
@@ -257,7 +253,7 @@ class ProjectorWindow(QWidget):
             ):
                 raise ValueError(
                     "Projected clocks must use digits, one colon, and an "
-                    "optional hour full stop."
+                    "optional hour or fractional full stop."
                 )
         if result not in (None, "1-0", "0-1", "1/2-1/2"):
             raise ValueError(

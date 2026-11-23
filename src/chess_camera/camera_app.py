@@ -94,6 +94,7 @@ from .legal_game import (
     PromotionPiece,
 )
 from .lichess_browser import LichessBrowserError, open_lichess_game
+from .lichess_browser_clocks import BrowserClockReader, BrowserClocks
 from .lichess_client import (
     AccountGameEvent,
     AiChallengeColor,
@@ -1548,6 +1549,7 @@ class CameraWindow(QMainWindow):
         self._close_pending = False
         self._lichess_game_id: str | None = None
         self._lichess_browser_attempted_games: set[str] = set()
+        self._browser_clock_reader: BrowserClockReader | None = None
         self._preferred_lichess_game_id = str(
             self._settings.value(_LICHESS_GAME_SETTING, "")
         )
@@ -2059,6 +2061,7 @@ class CameraWindow(QMainWindow):
         self._lichess_browser_status = QLabel(
             "Lichess browser opens when a game is selected."
         )
+        self._browser_clock_status = QLabel("Lichess clocks: estimated.")
         self._lichess_sync_status.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
@@ -2072,6 +2075,7 @@ class CameraWindow(QMainWindow):
             self._lichess_status,
             self._lichess_sync_status,
             self._lichess_browser_status,
+            self._browser_clock_status,
             self._instructions,
         ):
             status_label.setWordWrap(True)
@@ -2153,6 +2157,7 @@ class CameraWindow(QMainWindow):
         interaction_layout.addWidget(self._lichess_status)
         interaction_layout.addWidget(self._lichess_sync_status)
         interaction_layout.addWidget(self._lichess_browser_status)
+        interaction_layout.addWidget(self._browser_clock_status)
         interaction_layout.addWidget(self._instructions)
         interaction_layout.addStretch(1)
         interaction_content.setLayout(interaction_layout)
@@ -2303,6 +2308,13 @@ class CameraWindow(QMainWindow):
             and self._lichess_game_selector.currentData() == game.game_id
             and not _can_start_new_lichess_game(game.state)
         )
+        reader = getattr(self, "_browser_clock_reader", None)
+        if reader is not None and (
+            not active or game is None or reader.game_id != game.game_id
+        ):
+            reader.stop()
+            self._browser_clock_reader = None
+            self._browser_clock_status.setText("Lichess clocks: browser reading inactive.")
         if active != self._lichess_layout_active:
             CameraWindow._set_lichess_layout(self, active)
         self._top_stack.setCurrentWidget(
@@ -2333,11 +2345,23 @@ class CameraWindow(QMainWindow):
                 "Select an active Lichess game before opening the browser."
             )
             return
-        def placement_completed(error: str | None) -> None:
+        def placement_completed(error: str | None, hwnd: int | None) -> None:
             if error is None:
                 self._lichess_browser_status.setText(
                     "Lichess browser positioned on the right."
                 )
+                if (
+                    hwnd is not None
+                    and self._lichess_game_id == game.game_id
+                    and self._lichess_player_color in ("white", "black")
+                    and self._lichess_game_selector.currentData() == game.game_id
+                    and not self._lichess_disconnect_requested
+                ):
+                    if self._browser_clock_reader is not None:
+                        self._browser_clock_reader.stop()
+                    self._browser_clock_reader = BrowserClockReader(
+                        hwnd, game.game_id, self._lichess_player_color
+                    )
                 return
             message = (
                 f"Lichess browser could not be positioned: {error} "
@@ -2352,7 +2376,7 @@ class CameraWindow(QMainWindow):
         try:
             open_lichess_game(game.game_id, self, placement_completed)
         except LichessBrowserError as error:
-            placement_completed(str(error))
+            placement_completed(str(error), None)
             return
         self._lichess_browser_status.setText(
             "Opening and positioning the Lichess browser window..."
@@ -8320,6 +8344,13 @@ class CameraWindow(QMainWindow):
         self,
         status: str = "No active Lichess game information.",
     ) -> None:
+        reader = getattr(self, "_browser_clock_reader", None)
+        if reader is not None:
+            reader.stop()
+            self._browser_clock_reader = None
+        status_label = getattr(self, "_browser_clock_status", None)
+        if status_label is not None:
+            status_label.setText("Lichess clocks: browser reading inactive.")
         self._lichess_clocks_available = False
         self._lichess_clock_snapshot_monotonic = None
         self._projector_window.set_edge_clocks(
@@ -8521,9 +8552,37 @@ class CameraWindow(QMainWindow):
             game,
             clocks_available=self._lichess_clocks_available,
         )
-        self._lichess_black_clock.setText(information[1])
-        self._lichess_white_clock.setText(information[3])
+        browser_clocks, reason = CameraWindow._browser_clock_values(self, game)
+        status = getattr(self, "_browser_clock_status", None)
+        if status is not None:
+            status.setText(
+                "Lichess clocks: browser (opponent above)."
+                if browser_clocks is not None
+                else f"Lichess clocks: estimated ({reason})."
+            )
+        self._lichess_black_clock.setText(
+            f"Black clock: {browser_clocks.black}"
+            if browser_clocks is not None else information[1]
+        )
+        self._lichess_white_clock.setText(
+            f"White clock: {browser_clocks.white}"
+            if browser_clocks is not None else information[3]
+        )
         self._update_projected_lichess_clocks(game)
+
+    def _browser_clock_values(
+        self, game: LichessGameFull
+    ) -> tuple[BrowserClocks | None, str]:
+        reader = getattr(self, "_browser_clock_reader", None)
+        if (
+            reader is None
+            or reader.game_id != game.game_id
+            or getattr(self, "_lichess_game_id", None) != game.game_id
+            or getattr(self, "_lichess_disconnect_requested", False)
+            or _can_start_new_lichess_game(game.state)
+        ):
+            return None, "browser clocks unavailable"
+        return reader.snapshot()
 
     def _update_projected_lichess_clocks(
         self,
@@ -8584,14 +8643,24 @@ class CameraWindow(QMainWindow):
         white_time_ms, black_time_ms = _lichess_display_clock_times(
             game.state
         )
+        browser_clocks, _reason = CameraWindow._browser_clock_values(self, game)
+        white_clock = _format_projected_lichess_clock(white_time_ms)
+        black_clock = _format_projected_lichess_clock(black_time_ms)
+        if browser_clocks is not None:
+            white_clock = browser_clocks.white.replace(":", ".", 1) if (
+                browser_clocks.white.count(":") == 2
+            ) else browser_clocks.white
+            black_clock = browser_clocks.black.replace(":", ".", 1) if (
+                browser_clocks.black.count(":") == 2
+            ) else browser_clocks.black
         expired_player: PlayerColor | None = None
         if timeout_result:
             expired_player = (
                 "black" if game.state.winner == "white" else "white"
             )
         self._projector_window.set_edge_clocks(
-            _format_projected_lichess_clock(white_time_ms),
-            _format_projected_lichess_clock(black_time_ms),
+            white_clock,
+            black_clock,
             board_quarter_turns=self._board_quarter_turns,
             result=result,
             expired_player=expired_player,
@@ -10064,6 +10133,10 @@ class CameraWindow(QMainWindow):
             self._settings.sync()
         if not self._lichess_layout_active:
             _save_window_placement(self, self._settings)
+        reader = getattr(self, "_browser_clock_reader", None)
+        if reader is not None:
+            reader.stop()
+            self._browser_clock_reader = None
         self._calibrator.cancel()
         self._alignment_monitor.clear()
         if self._camera is not None:

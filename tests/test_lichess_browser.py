@@ -46,7 +46,7 @@ def test_open_game_identifies_and_positions_new_window(
     )
     launch = MagicMock(return_value=(True, 123))
     monkeypatch.setattr(lichess_browser.QProcess, "startDetached", launch)
-    place = MagicMock(return_value=True)
+    place = MagicMock(return_value=12345)
     monkeypatch.setattr(lichess_browser, "place_identified_browser", place)
     owner = QWidget()
     completed = MagicMock()
@@ -63,7 +63,7 @@ def test_open_game_identifies_and_positions_new_window(
     marker = place.call_args.args[0]
     assert f"<title>{marker}</title>" in page
     assert place.call_args.args[1] == int(owner.winId())
-    completed.assert_called_once_with(None)
+    completed.assert_called_once_with(None, 12345)
 
 
 @pytest.mark.parametrize("game_id", ["", "abc", "abc12345secret", "abc/2345"])

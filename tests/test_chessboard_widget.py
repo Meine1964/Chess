@@ -190,12 +190,16 @@ def test_lichess_browser_failure_is_visible_and_retryable(
         _lichess_game_selector=selector,
         _lichess_worker=object(),
         _lichess_disconnect_requested=False,
+        _lichess_player_color="white",
+        _browser_clock_reader=None,
         _lichess_browser_status=status,
         _record_runtime_diagnostic=MagicMock(),
         screen=MagicMock(return_value=screen),
     )
     launch = MagicMock(side_effect=[LichessBrowserError("No profile"), None])
     monkeypatch.setattr(camera_app, "open_lichess_game", launch)
+    clock_reader = MagicMock()
+    monkeypatch.setattr(camera_app, "BrowserClockReader", clock_reader)
 
     camera_app.CameraWindow._open_selected_lichess_browser(window)
     assert "No profile" in status.text()
@@ -204,9 +208,11 @@ def test_lichess_browser_failure_is_visible_and_retryable(
 
     camera_app.CameraWindow._open_selected_lichess_browser(window)
     assert "positioning" in status.text()
-    launch.call_args.args[2](None)
+    launch.call_args.args[2](None, 12345)
     assert "positioned" in status.text()
     assert launch.call_count == 2
+    clock_reader.assert_called_once_with(12345, "abc12345", "white")
+    assert window._browser_clock_reader is clock_reader.return_value
 
 
 @pytest.mark.parametrize("maximized", [False, True])

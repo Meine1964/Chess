@@ -15,7 +15,7 @@ class _MonitorInfo(ctypes.Structure):
     ]
 
 
-def place_identified_browser(marker: str, owner_window: int) -> bool:
+def place_identified_browser(marker: str, owner_window: int) -> int | None:
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
     user32.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
@@ -61,7 +61,7 @@ def place_identified_browser(marker: str, owner_window: int) -> bool:
     if not user32.EnumWindows(collect, 0):
         raise BrowserWindowError("Could not enumerate browser windows.")
     if not matches:
-        return False
+        return None
     if len(matches) != 1:
         raise BrowserWindowError("Could not uniquely identify the new browser window.")
     if not user32.IsWindow(owner_window):
@@ -91,4 +91,4 @@ def place_identified_browser(marker: str, owner_window: int) -> bool:
         or actual.bottom != work.bottom
     ):
         raise BrowserWindowError("Windows did not apply the requested browser position.")
-    return True
+    return hwnd

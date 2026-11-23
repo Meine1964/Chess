@@ -100,7 +100,7 @@ def _last_used_profile(user_data: Path) -> str:
 def open_lichess_game(
     game_id: str,
     owner: QWidget,
-    completed: Callable[[str | None], None],
+    completed: Callable[[str | None, int | None], None],
 ) -> None:
     if re.fullmatch(r"[A-Za-z0-9]{8}", game_id) is None:
         raise LichessBrowserError("The selected Lichess game ID is invalid.")
@@ -131,16 +131,16 @@ def open_lichess_game(
         except BrowserWindowError as error:
             timer.stop()
             timer.deleteLater()
-            completed(str(error))
+            completed(str(error), None)
             return
         if placed:
             timer.stop()
             timer.deleteLater()
-            completed(None)
+            completed(None, placed)
         elif time.monotonic() >= deadline:
             timer.stop()
             timer.deleteLater()
-            completed("Could not identify the new browser window in time.")
+            completed("Could not identify the new browser window in time.", None)
 
     timer.timeout.connect(try_placement)
     timer.start()

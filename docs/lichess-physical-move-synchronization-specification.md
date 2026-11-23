@@ -215,6 +215,39 @@ Black beside a7-a8. Clock placement shall read the already-established logical
 board orientation solely to map that edge into calibrated projector geometry.
 It shall neither request board-orientation detection nor modify the orientation
 used to map move squares. Both clocks shall be readable from the board center.
+When the independent browser shows the currently selected game and both clock
+values can be unambiguously identified and associated with their colors, the
+projected clock text shall mirror those displayed values. Browser-derived
+values are presentation only: the Lichess API remains authoritative for game
+state, move handling and timeout. If the browser is closed, displays another
+game, or its clocks cannot be read reliably, the existing API-based countdown
+shall remain available and the interaction pane shall clearly identify it as
+estimated. Browser reads shall not block the camera/UI thread or alter the
+browser, and shall not require authentication credentials or transmit data.
+Acceptance shall include the selected game, both player orientations, clock
+changes, stale and missing browser values, game switches, and the estimated
+fallback. Browser and projected text may differ briefly due to observation
+and display latency. Where Lichess displays fractional seconds, the projected
+text shall include them; its hour separator remains a dot.
+
+The browser is expected to remain in the player's normal orientation, with the
+opponent's clock above the player's clock. When all board rank labels are
+visible, the reader shall reject an orientation inconsistent with this
+arrangement. When rank labels are unavailable, normal orientation is assumed;
+the player must not flip the browser board.
+The reader shall use Windows built-in facilities without requiring installation
+or administrator rights.
+
+**Browser-clock implementation status:** Implemented using Windows UI
+Automation in a background process. Samples older than two seconds and
+unrecognized or ambiguous layouts use the labelled estimated fallback.
+Focused tests cover both player colors, unequal and fractional values, hours,
+ambiguous layouts, stale readings, game switches, and projector rendering. A
+live Chrome check read and projected two equal `05:00` clocks without installing
+software or using administrator rights. A live game with unequal, changing
+clocks and a live Edge check remain to be verified; brief display latency is
+expected. The local quality entry point passed all 578 tests.
+
 Their projective quadrilaterals shall preserve winding and shall never reflect
 the seven-segment glyphs.
 Within those non-reflecting quadrilaterals, both complete clock faces shall be

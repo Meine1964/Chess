@@ -1561,6 +1561,72 @@ def test_lichess_clock_refresh_updates_labels_from_monotonic_elapsed_time(
     assert window._latest_lichess_game.state is state
 
 
+def test_browser_clocks_are_projected_without_changing_server_state() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from src.chess_camera.lichess_browser_clocks import BrowserClocks
+
+    state = LichessGameState(
+        (), "unused", "white", 65000, 9000, 0, 0, "started", None, "*"
+    )
+    game = LichessGameFull(
+        "game1234", "unused",
+        LichessPlayer("white", "Local", 1510),
+        LichessPlayer("black", "Remote", 1490), state,
+    )
+    reader = SimpleNamespace(
+        game_id=game.game_id,
+        snapshot=MagicMock(
+            return_value=(BrowserClocks("00:59.4", "01:02:03", 0), "")
+        ),
+    )
+    window = SimpleNamespace(
+        _browser_clock_reader=reader,
+        _lichess_game_id=game.game_id,
+        _lichess_clocks_available=True,
+        _lichess_clock_snapshot_monotonic=10.0,
+        _calibration_result=object(),
+        _board_orientation_needs_detection=False,
+        _piece_side_orientation_needs_detection=False,
+        _projector_window=MagicMock(),
+        _board_quarter_turns=0,
+    )
+
+    CameraWindow._update_projected_lichess_clocks(window, game)
+
+    window._projector_window.set_edge_clocks.assert_called_once_with(
+        "00:59.4", "01.02:03", board_quarter_turns=0,
+        result=None, expired_player=None,
+    )
+    assert game.state is state
+
+
+def test_browser_clock_fallback_after_game_switch() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    game = LichessGameFull(
+        "game1234", "unused",
+        LichessPlayer("white", "Local", 1510),
+        LichessPlayer("black", "Remote", 1490),
+        LichessGameState(
+            (), "unused", "white", 65000, 9000, 0, 0, "started", None, "*"
+        ),
+    )
+    reader = SimpleNamespace(game_id="oldgame1", snapshot=MagicMock())
+    window = SimpleNamespace(
+        _browser_clock_reader=reader,
+        _lichess_game_id=game.game_id,
+    )
+
+    clocks, reason = CameraWindow._browser_clock_values(window, game)
+
+    assert clocks is None
+    assert reason == "browser clocks unavailable"
+    reader.snapshot.assert_not_called()
+
+
 @pytest.mark.parametrize(
     (
         "winner",
