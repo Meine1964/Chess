@@ -37,43 +37,14 @@ main window.
   setup, camera diagnosis, and recovery when no legal history is active; it
   shall not be presented as an equivalent gameplay mode.
 - **Lichess** contains an **Active game** submenu populated from the current
-  ongoing games.
+  ongoing games, a connection command, and an **Open selected game in browser**
+  command for retrying or reopening the independent browser window.
 
-The Lichess position panel shall contain a compact **Connect** or **Disconnect**
-button centered in the Black information row between the player identity and
-Black's clock. It shall display **Connecting...** while the initial connection
-is pending and **Disconnecting...** while shutdown is pending; the pending
-button shall be disabled. After connection succeeds it shall display
-**Disconnect** and be enabled. The panel shall also contain a centered
-Lichess-style icon control bar beneath the game status. It shall show takeback,
-draw, resign, and new-game buttons with tooltips and accessible names. Takeback
-remains a visible disabled placeholder and no takeback request shall be
-submitted. Draw and resign shall be enabled only for an active selected game
-with an authenticated Lichess client and while no other game-control request is
-pending.
-
-The draw button shall submit a draw offer through the Board API and disable
-while the local player's offer remains active. When authoritative stream state
-reports an opponent draw offer, the offer button shall be replaced by explicit
-accept and decline buttons. Accept and decline shall use the Board API and
-disappear when authoritative state clears the offer. Read-only polling does not
-expose Lichess draw-offer flags, so incoming-offer controls are unavailable in
-polling mode.
-
-The resign button shall require explicit confirmation before submitting a
-resignation. All game-control operations shall execute outside the UI thread,
-disable game-control buttons while pending, report server rejection explicitly,
-and report an uncertain outcome when the connection fails before confirmation.
-Resignation shall remain disabled after submission until authoritative terminal
-game state arrives.
-
-An abort button shall be visible beside the other Lichess controls. It shall be
-enabled only for an active standard-start game with fewer than two known plies,
-which conservatively represents the opening interval in which Lichess may allow
-an abort. It shall require confirmation and use the Board API asynchronously.
-Lichess remains authoritative: a rejected abort shall leave the game active and
-surface the rejection. After confirmed submission, abort shall remain disabled
-until terminal game state arrives.
+The interaction pane shall provide a visible **Start new Lichess game** button
+for the existing computer-game setup, in both offline and Lichess modes. The
+player uses the separate browser for ongoing-game controls. The connection
+command remains in the Game > Lichess menu, and the application's
+synchronization and connection status remain in the interaction pane.
 
 The new-game button shall be available while no Lichess game is loaded and
 after the loaded game has finished, but not during active play or while a
@@ -87,13 +58,12 @@ API outside the UI thread. Cancelling shall make no state or network change.
 
 When the account event stream reports the selected game finished, or polling
 removes it from the ongoing-game list, the cached game state shall become
-terminal before the new-game button is enabled. The final board may remain
-visible, but stale `created` or `started` state shall not block a replacement
+terminal before the new-game button is enabled. Stale `created` or `started`
+state shall not block a replacement
 game after resignation or another terminal outcome.
 
 After Lichess confirms creation, the application shall persist and follow the
-returned exact game ID. The completed previous board, players, and result shall
-remain visible until the replacement snapshot arrives. Rejected and uncertain
+returned exact game ID. Rejected and uncertain
 creation outcomes shall be reported explicitly without a browser fallback or
 success-shaped local game.
 

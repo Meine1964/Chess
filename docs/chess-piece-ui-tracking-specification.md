@@ -536,9 +536,7 @@ the context menu shall not make its squares selectable.
 - When flipped, rank labels run 1-8 from top to bottom along the right edge
   and file labels run h-a along the bottom edge. Pieces stay upright. Copy
   Board copies the board as displayed; Copy FEN is unchanged.
-- The Lichess panel shows the player row of the side at the top of the board
-  above it: Black above and White below when not flipped, White above and
-  Black below when flipped.
+- The separate Lichess browser displays its own board and player rows.
 - The orientation is stored in the application settings and restored at
   startup.
 - When a Lichess game becomes the attached game, set the orientation to the

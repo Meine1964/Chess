@@ -39,7 +39,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -49,6 +48,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QStackedWidget,
     QTabWidget,
     QToolButton,
     QVBoxLayout,
@@ -93,6 +93,7 @@ from .legal_game import (
     LegalMoveResult,
     PromotionPiece,
 )
+from .lichess_browser import LichessBrowserError, open_lichess_game
 from .lichess_client import (
     AccountGameEvent,
     AiChallengeColor,
@@ -1546,6 +1547,7 @@ class CameraWindow(QMainWindow):
         self._lichess_disconnect_requested = False
         self._close_pending = False
         self._lichess_game_id: str | None = None
+        self._lichess_browser_attempted_games: set[str] = set()
         self._preferred_lichess_game_id = str(
             self._settings.value(_LICHESS_GAME_SETTING, "")
         )
@@ -1854,13 +1856,8 @@ class CameraWindow(QMainWindow):
         self._lichess_abort_button.clicked.connect(
             self._confirm_lichess_abort
         )
-        self._start_new_lichess_game_button = QToolButton(self)
-        _configure_lichess_control_button(
-            self._start_new_lichess_game_button,
-            "+",
-            "Start new Lichess game",
-            "Start new Lichess game",
-            enabled=True,
+        self._start_new_lichess_game_button = QPushButton(
+            "Start new Lichess game", self
         )
         self._start_new_lichess_game_button.clicked.connect(
             self._start_new_lichess_game
@@ -2059,6 +2056,9 @@ class CameraWindow(QMainWindow):
         self._lichess_sync_status = QLabel(
             "Lichess physical synchronization is inactive."
         )
+        self._lichess_browser_status = QLabel(
+            "Lichess browser opens when a game is selected."
+        )
         self._lichess_sync_status.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
@@ -2071,6 +2071,7 @@ class CameraWindow(QMainWindow):
             self._piece_status,
             self._lichess_status,
             self._lichess_sync_status,
+            self._lichess_browser_status,
             self._instructions,
         ):
             status_label.setWordWrap(True)
@@ -2119,9 +2120,6 @@ class CameraWindow(QMainWindow):
         )
         lichess_controls_layout.addWidget(self._lichess_abort_button)
         lichess_controls_layout.addWidget(self._lichess_resign_button)
-        lichess_controls_layout.addWidget(
-            self._start_new_lichess_game_button
-        )
         lichess_controls_layout.addStretch(1)
 
         lichess_panel = QGroupBox("Lichess position")
@@ -2135,11 +2133,14 @@ class CameraWindow(QMainWindow):
         )
         lichess_panel_layout.addLayout(lichess_controls_layout)
         lichess_panel.setLayout(lichess_panel_layout)
+        lichess_panel.setParent(self)
+        lichess_panel.hide()
 
         interaction_content = QWidget()
         _set_readable_interaction_font(interaction_content)
         interaction_layout = QVBoxLayout()
         interaction_layout.addLayout(camera_layout)
+        interaction_layout.addWidget(self._start_new_lichess_game_button)
         interaction_layout.addWidget(self._offline_clock_panel)
         interaction_layout.addWidget(self._calibration_progress)
         interaction_layout.addLayout(calibration_indicator_layout)
@@ -2151,6 +2152,7 @@ class CameraWindow(QMainWindow):
         interaction_layout.addWidget(self._piece_status)
         interaction_layout.addWidget(self._lichess_status)
         interaction_layout.addWidget(self._lichess_sync_status)
+        interaction_layout.addWidget(self._lichess_browser_status)
         interaction_layout.addWidget(self._instructions)
         interaction_layout.addStretch(1)
         interaction_content.setLayout(interaction_layout)
@@ -2163,18 +2165,18 @@ class CameraWindow(QMainWindow):
         interaction_panel_layout.addWidget(interaction_scroll)
         interaction_panel.setLayout(interaction_panel_layout)
 
-        quadrant_layout = QGridLayout()
-        quadrant_layout.addWidget(camera_panel, 0, 0)
-        quadrant_layout.addWidget(physical_panel, 0, 1)
-        quadrant_layout.addWidget(interaction_panel, 1, 0)
-        quadrant_layout.addWidget(lichess_panel, 1, 1)
-        quadrant_layout.setColumnStretch(0, 3)
-        quadrant_layout.setColumnStretch(1, 2)
-        quadrant_layout.setRowStretch(0, 2)
-        quadrant_layout.setRowStretch(1, 3)
+        self._camera_panel = camera_panel
+        self._physical_panel = physical_panel
+        self._top_stack = QStackedWidget()
+        self._top_stack.addWidget(physical_panel)
+        self._top_stack.addWidget(camera_panel)
+        self._preview.setMinimumSize(240, 180)
+        self._lichess_layout_active = False
+        self._pre_lichess_geometry: QByteArray | None = None
 
         layout = QVBoxLayout()
-        layout.addLayout(quadrant_layout)
+        layout.addWidget(self._top_stack, 2)
+        layout.addWidget(interaction_panel, 3)
         container = QWidget()
         container.setLayout(layout)
         self.setCentralWidget(container)
@@ -2202,6 +2204,7 @@ class CameraWindow(QMainWindow):
         self._occupancy_timer = QTimer(self)
         self._occupancy_timer.setInterval(100)
         self._occupancy_timer.timeout.connect(self._timed_occupancy_tick)
+        self._occupancy_timer.timeout.connect(self._refresh_lichess_layout)
         self._occupancy_timer.start()
         self._lichess_clock_timer = QTimer(self)
         self._lichess_clock_timer.setInterval(250)
@@ -2263,6 +2266,12 @@ class CameraWindow(QMainWindow):
         self._sync_game_mode_actions()
 
         lichess_menu = game_menu.addMenu("Lichess")
+        connection_action = lichess_menu.addAction("Connect / Disconnect")
+        connection_action.triggered.connect(
+            self._lichess_connection_button.click
+        )
+        browser_action = lichess_menu.addAction("Open selected game in browser")
+        browser_action.triggered.connect(self._open_selected_lichess_browser)
         self._lichess_games_menu = lichess_menu.addMenu("Active game")
         self._lichess_game_action_group = QActionGroup(self)
         self._lichess_game_action_group.setExclusive(True)
@@ -2283,6 +2292,97 @@ class CameraWindow(QMainWindow):
         calibration_menu.addAction(self._validate_calibration_button)
         calibration_menu.addSeparator()
         calibration_menu.addAction(self._cancel_calibration_button)
+
+    def _refresh_lichess_layout(self) -> None:
+        game = self._latest_lichess_game
+        active = (
+            self._lichess_worker is not None
+            and not self._lichess_disconnect_requested
+            and game is not None
+            and game.game_id == self._lichess_game_id
+            and self._lichess_game_selector.currentData() == game.game_id
+            and not _can_start_new_lichess_game(game.state)
+        )
+        if active != self._lichess_layout_active:
+            CameraWindow._set_lichess_layout(self, active)
+        self._top_stack.setCurrentWidget(
+            self._camera_panel
+            if self._snapshot_visible
+            or CameraWindow._live_preview_wanted(self)
+            else self._physical_panel
+        )
+        if active:
+            if (
+                game is not None
+                and game.game_id not in self._lichess_browser_attempted_games
+            ):
+                self._lichess_browser_attempted_games.add(game.game_id)
+                self._open_selected_lichess_browser()
+
+    def _open_selected_lichess_browser(self) -> None:
+        game = self._latest_lichess_game
+        if (
+            self._lichess_worker is None
+            or self._lichess_disconnect_requested
+            or game is None
+            or game.game_id != self._lichess_game_id
+            or self._lichess_game_selector.currentData() != game.game_id
+            or _can_start_new_lichess_game(game.state)
+        ):
+            self._lichess_browser_status.setText(
+                "Select an active Lichess game before opening the browser."
+            )
+            return
+        def placement_completed(error: str | None) -> None:
+            if error is None:
+                self._lichess_browser_status.setText(
+                    "Lichess browser positioned on the right."
+                )
+                return
+            message = (
+                f"Lichess browser could not be positioned: {error} "
+                "Use Game > Lichess > Open selected game in browser to retry."
+            )
+            self._lichess_browser_status.setText(message)
+            self._record_runtime_diagnostic(
+                "lichess-browser-open-failed",
+                message,
+            )
+
+        try:
+            open_lichess_game(game.game_id, self, placement_completed)
+        except LichessBrowserError as error:
+            placement_completed(str(error))
+            return
+        self._lichess_browser_status.setText(
+            "Opening and positioning the Lichess browser window..."
+        )
+
+    def _set_lichess_layout(self, active: bool) -> None:
+        if active == self._lichess_layout_active:
+            return
+        if active:
+            screen = self.screen()
+            if screen is None:
+                raise RuntimeError("Cannot arrange Lichess layout without a screen.")
+            _save_window_placement(self, self._settings)
+            self._pre_lichess_geometry = self.saveGeometry()
+            if self.isMaximized():
+                self.showNormal()
+            available = screen.availableGeometry()
+            client = self.geometry()
+            frame = self.frameGeometry()
+            self.setGeometry(
+                available.x() + client.x() - frame.x(),
+                available.y() + client.y() - frame.y(),
+                available.width() // 2 - (frame.width() - client.width()),
+                available.height() - (frame.height() - client.height()),
+            )
+        else:
+            if self._pre_lichess_geometry is not None:
+                self.restoreGeometry(self._pre_lichess_geometry)
+                self._pre_lichess_geometry = None
+        self._lichess_layout_active = active
 
     def _sync_game_mode_actions(self) -> None:
         diagnostic = self._game_mode_selector.currentData() == "diagnostic"
@@ -9962,7 +10062,8 @@ class CameraWindow(QMainWindow):
             offline_clock.pause()
             self._persist_offline_clock()
             self._settings.sync()
-        _save_window_placement(self, self._settings)
+        if not self._lichess_layout_active:
+            _save_window_placement(self, self._settings)
         self._calibrator.cancel()
         self._alignment_monitor.clear()
         if self._camera is not None:

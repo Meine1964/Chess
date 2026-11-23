@@ -4,10 +4,20 @@ from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
-from PySide6.QtCore import QPoint, QPointF, QSettings, Qt
+from PySide6.QtCore import QByteArray, QPoint, QPointF, QRect, QSettings, Qt
 from PySide6.QtGui import QAction, QColor
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QComboBox, QMainWindow, QToolButton
+from PySide6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QGridLayout,
+    QLabel,
+    QMainWindow,
+    QPushButton,
+    QStackedWidget,
+    QToolButton,
+    QWidget,
+)
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -33,6 +43,224 @@ def application() -> QApplication:
     if isinstance(existing, QApplication):
         return existing
     return QApplication([])
+
+
+def test_lichess_layout_switches_panes_and_restores_window(
+    application: QApplication,
+) -> None:
+    from types import SimpleNamespace
+
+    from src.chess_camera.camera_app import CameraWindow
+
+    container = QWidget()
+    grid = QGridLayout(container)
+    camera = QWidget()
+    physical = QWidget()
+    interaction = QWidget()
+    lichess = QWidget()
+    top_stack = QStackedWidget()
+    top_stack.addWidget(physical)
+    top_stack.addWidget(camera)
+    grid.addWidget(top_stack, 0, 0)
+    grid.addWidget(interaction, 1, 0)
+    lichess.hide()
+    selector = QComboBox()
+    selector.addItem("Game", "game1")
+    preview_action = QAction()
+    preview_action.setCheckable(True)
+    screen = application.primaryScreen()
+    assert screen is not None
+    geometry = QByteArray(b"previous")
+    window = SimpleNamespace(
+        _camera_panel=camera,
+        _physical_panel=physical,
+        _top_stack=top_stack,
+        _lichess_layout_active=False,
+        _pre_lichess_geometry=None,
+        _preview=QLabel(),
+        _settings=MagicMock(),
+        _lichess_worker=object(),
+        _lichess_browser_attempted_games=set(),
+        _open_selected_lichess_browser=MagicMock(),
+        _lichess_disconnect_requested=False,
+        _lichess_game_id="game1",
+        _lichess_game_selector=selector,
+        _latest_lichess_game=SimpleNamespace(
+            game_id="game1",
+            state=SimpleNamespace(status="started", result="*"),
+        ),
+        _snapshot_visible=False,
+        _live_preview_action=preview_action,
+        _focus_dialog=None,
+        _focus_pattern_preview_active=False,
+        screen=MagicMock(return_value=screen),
+        saveGeometry=MagicMock(return_value=geometry),
+        geometry=MagicMock(return_value=QRect(20, 20, 600, 500)),
+        frameGeometry=MagicMock(return_value=QRect(12, -10, 616, 538)),
+        isMaximized=MagicMock(return_value=False),
+        showNormal=MagicMock(),
+        setGeometry=MagicMock(),
+        restoreGeometry=MagicMock(return_value=True),
+    )
+
+    CameraWindow._refresh_lichess_layout(window)
+
+    assert window._lichess_layout_active
+    assert window._top_stack.currentWidget() is physical
+    window._open_selected_lichess_browser.assert_called_once_with()
+    assert grid.itemAtPosition(1, 0).widget() is interaction
+    assert lichess.isHidden()
+    available = screen.availableGeometry()
+    window.setGeometry.assert_called_once_with(
+        available.x() + 8,
+        available.y() + 30,
+        available.width() // 2 - 16,
+        available.height() - 38,
+    )
+
+    preview_action.setChecked(True)
+    CameraWindow._refresh_lichess_layout(window)
+    assert window._top_stack.currentWidget() is camera
+    preview_action.setChecked(False)
+    window._snapshot_visible = True
+    CameraWindow._refresh_lichess_layout(window)
+    assert window._top_stack.currentWidget() is camera
+    window._snapshot_visible = False
+    window._focus_pattern_preview_active = True
+    CameraWindow._refresh_lichess_layout(window)
+    assert window._top_stack.currentWidget() is camera
+    window._focus_pattern_preview_active = False
+    CameraWindow._refresh_lichess_layout(window)
+    assert window._top_stack.currentWidget() is physical
+    window._open_selected_lichess_browser.assert_called_once_with()
+
+    selector.addItem("Second game", "game2")
+    selector.setCurrentIndex(1)
+    window._lichess_game_id = "game2"
+    window._latest_lichess_game.game_id = "game2"
+    CameraWindow._refresh_lichess_layout(window)
+    assert window._open_selected_lichess_browser.call_count == 2
+    selector.setCurrentIndex(0)
+    window._lichess_game_id = "game1"
+    window._latest_lichess_game.game_id = "game1"
+    CameraWindow._refresh_lichess_layout(window)
+    assert window._open_selected_lichess_browser.call_count == 2
+
+    window._latest_lichess_game.state.status = "mate"
+    CameraWindow._refresh_lichess_layout(window)
+    assert not window._lichess_layout_active
+    assert grid.itemAtPosition(0, 0).widget() is top_stack
+    assert grid.itemAtPosition(1, 0).widget() is interaction
+    preview_action.setChecked(True)
+    CameraWindow._refresh_lichess_layout(window)
+    assert window._top_stack.currentWidget() is camera
+    preview_action.setChecked(False)
+    CameraWindow._refresh_lichess_layout(window)
+    assert window._top_stack.currentWidget() is physical
+    window.restoreGeometry.assert_called_once_with(geometry)
+
+    window._latest_lichess_game.state.status = "started"
+    CameraWindow._refresh_lichess_layout(window)
+    assert window._lichess_layout_active
+    window._lichess_disconnect_requested = True
+    CameraWindow._refresh_lichess_layout(window)
+    assert not window._lichess_layout_active
+    assert window.restoreGeometry.call_count == 2
+
+
+def test_lichess_browser_failure_is_visible_and_retryable(
+    application: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from src.chess_camera import camera_app
+    from src.chess_camera.lichess_browser import LichessBrowserError
+
+    selector = QComboBox()
+    selector.addItem("Game", "abc12345")
+    status = QLabel()
+    screen = application.primaryScreen()
+    assert screen is not None
+    window = SimpleNamespace(
+        _latest_lichess_game=SimpleNamespace(
+            game_id="abc12345",
+            state=SimpleNamespace(status="started", result="*"),
+        ),
+        _lichess_game_id="abc12345",
+        _lichess_game_selector=selector,
+        _lichess_worker=object(),
+        _lichess_disconnect_requested=False,
+        _lichess_browser_status=status,
+        _record_runtime_diagnostic=MagicMock(),
+        screen=MagicMock(return_value=screen),
+    )
+    launch = MagicMock(side_effect=[LichessBrowserError("No profile"), None])
+    monkeypatch.setattr(camera_app, "open_lichess_game", launch)
+
+    camera_app.CameraWindow._open_selected_lichess_browser(window)
+    assert "No profile" in status.text()
+    assert "retry" in status.text()
+    window._record_runtime_diagnostic.assert_called_once()
+
+    camera_app.CameraWindow._open_selected_lichess_browser(window)
+    assert "positioning" in status.text()
+    launch.call_args.args[2](None)
+    assert "positioned" in status.text()
+    assert launch.call_count == 2
+
+
+@pytest.mark.parametrize("maximized", [False, True])
+def test_lichess_layout_fits_half_the_screen(
+    application: QApplication, maximized: bool
+) -> None:
+    from src.chess_camera.camera_app import CameraWindow
+
+    window = QMainWindow()
+    container = QWidget()
+    grid = QGridLayout(container)
+    camera = QWidget()
+    camera_layout = QGridLayout(camera)
+    preview = QLabel()
+    preview.setMinimumSize(240, 180)
+    camera_layout.addWidget(preview)
+    physical = ChessboardWidget()
+    physical.setMinimumSize(240, 240)
+    interaction = QWidget()
+    top_stack = QStackedWidget()
+    top_stack.addWidget(physical)
+    top_stack.addWidget(camera)
+    grid.addWidget(top_stack, 0, 0)
+    grid.addWidget(interaction, 1, 0)
+    window.setCentralWidget(container)
+    window.resize(700, 600)
+    if maximized:
+        window.showMaximized()
+    else:
+        window.show()
+    application.processEvents()
+    screen = window.screen()
+    assert screen is not None
+    available = screen.availableGeometry()
+    original_geometry = window.geometry()
+    window._camera_panel = camera
+    window._physical_panel = physical
+    window._lichess_layout_active = False
+    window._pre_lichess_geometry = None
+    window._preview = preview
+    window._settings = MagicMock()
+
+    CameraWindow._set_lichess_layout(window, True)
+    application.processEvents()
+    assert window.frameGeometry() == QRect(
+        available.x(), available.y(), available.width() // 2, available.height()
+    )
+
+    CameraWindow._set_lichess_layout(window, False)
+    application.processEvents()
+    assert window.geometry().size() == original_geometry.size()
+    assert window.isMaximized() == maximized
+    assert window.screen() is screen
+    window.close()
 
 
 def test_lichess_board_colors_match_classic_brown_theme() -> None:
@@ -678,6 +906,7 @@ def test_main_commands_are_available_from_menus(
             )
             self._lichess_game_selector = QComboBox()
             self._lichess_game_selector.addItem("No ongoing games", None)
+            self._lichess_connection_button = QPushButton()
             self._create_application_menus()
 
         def _show_settings_dialog(self) -> None:
@@ -739,8 +968,14 @@ def test_main_commands_are_available_from_menus(
     )
     assert lichess_menu is not None
     assert [action.text() for action in lichess_menu.actions()] == [
+        "Connect / Disconnect",
+        "Open selected game in browser",
         "Active game"
     ]
+    clicked = MagicMock()
+    window._lichess_connection_button.clicked.connect(clicked)
+    lichess_menu.actions()[0].trigger()
+    clicked.assert_called_once()
     assert "Start new Lichess game" not in {
         action.text() for action in lichess_menu.actions()
     }

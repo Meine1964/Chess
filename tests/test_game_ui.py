@@ -1343,7 +1343,10 @@ def test_saved_offline_position_restore_commits_after_occupancy_match() -> None:
     window._persist_game_state.assert_called_once_with()
 
 
-def test_normal_close_persists_main_window_geometry() -> None:
+@pytest.mark.parametrize("lichess_layout_active", [False, True])
+def test_normal_close_persists_main_window_geometry(
+    lichess_layout_active: bool,
+) -> None:
     from types import SimpleNamespace
     from unittest.mock import MagicMock
 
@@ -1358,6 +1361,7 @@ def test_normal_close_persists_main_window_geometry() -> None:
         _lichess_submission_thread=None,
         _lichess_worker=None,
         _lichess_thread=None,
+        _lichess_layout_active=lichess_layout_active,
         _settings=settings,
         saveGeometry=MagicMock(return_value=geometry),
         screen=MagicMock(return_value=None),
@@ -1371,11 +1375,15 @@ def test_normal_close_persists_main_window_geometry() -> None:
 
     CameraWindow.closeEvent(window, event)
 
-    settings.setValue.assert_called_once_with(
-        "window/main_geometry",
-        geometry,
-    )
-    settings.sync.assert_called_once_with()
+    if lichess_layout_active:
+        settings.setValue.assert_not_called()
+        settings.sync.assert_not_called()
+    else:
+        settings.setValue.assert_called_once_with(
+            "window/main_geometry",
+            geometry,
+        )
+        settings.sync.assert_called_once_with()
     window._runtime_diagnostics.close.assert_called_once_with()
     assert event.isAccepted()
 

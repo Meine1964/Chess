@@ -529,12 +529,12 @@ move list, exposes players, colors, clocks, side to move, status, winner, and
 result, validates game identity and event ordering, handles keep-alives, and
 surfaces redacted HTTP/protocol errors.
 
-The desktop UI now provides explicit connect and disconnect controls, a
-persistent Lichess status line, and simultaneous `Physical position` and
-`Lichess position` board panels. The dashboard uses four quadrants: camera,
-physical position, scrollable interaction panel, and Lichess position. Remote
-updates render their reconstructed FEN and last move on the Lichess board
-without changing the accepted physical position or camera reference. Network
+The desktop UI provides explicit connect and disconnect controls and a
+persistent Lichess status line. Both offline and Lichess play use the same
+two-pane physical position and interaction layout described in the
+synchronization specification. An active selected game opens a separate
+Lichess browser beside it. Remote updates do not
+change the accepted physical position or camera reference. Network
 iteration runs in a cancellable Qt worker thread and never on the camera/UI
 thread. The worker keeps at most one HTTP stream open: it closes the account
 stream after `gameStart`, follows that game, and returns to the account stream
@@ -679,13 +679,13 @@ Add UI support for:
 - Return to setup after game completion.
 
 **Game-information slice:** Implemented and automated-test validated. The
-Lichess panel displays White and Black player identity/rating, authoritative
+Lichess data includes White and Black player identity/rating, authoritative
 clocks when available, side to move, game status, and result. Polling snapshots
 without clocks show unavailable clocks rather than zero. Incremental state
 updates retain player identity from the latest full snapshot.
 
 **Start-new-game slice:** Implemented and automated-test validated. The
-Lichess-panel button creates AI games natively through a setup dialog for AI
+interaction-pane button creates AI games natively through a setup dialog for AI
 level, player color, clock enablement, initial minutes, and increment seconds.
 Persistent defaults are managed with separate fixed-choice initial-time and
 increment controls in File > Settings > Lichess, while dialog changes apply to
@@ -698,16 +698,17 @@ is no custom-value entry. Existing saved clock presets and numeric settings
 migrate to equivalent choices. The exact returned game ID is followed
 automatically. Random-human seeks and named-user challenges remain deferred.
 
-**Game-control bar slice:** Implemented and automated-test validated. The
-Lichess panel shows Lichess-style takeback, draw, resign, and new-game icon
-buttons. Takeback remains disabled and intentionally unsupported. Draw offers
+**Game-control bar slice:** The former in-app control bar is no longer shown;
+the browser provides ongoing-game controls. The existing Board API handling
+remains implemented and automated-test validated. Draw offers
 and responses plus confirmed resignations use asynchronous Board API operations
 with explicit pending, rejected, and uncertain states. Incoming offers expose
 accept and decline buttons when authoritative stream state provides the offer
 flags. The new-game button starts the native AI-game setup flow.
 
-**Abort slice:** Implemented and automated-test validated. The Lichess panel
-provides a confirmed asynchronous abort control during the conservative opening
+**Abort slice:** The former in-app control is no longer shown; the browser
+provides game controls. The existing asynchronous abort handling remains
+automated-test validated during the conservative opening
 interval for standard-start games. The server remains authoritative and may
 reject an abort even while the local control is available.
 

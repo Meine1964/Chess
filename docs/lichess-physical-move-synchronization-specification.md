@@ -138,9 +138,10 @@ remains a possible later refinement rather than an acceptance dependency.
 
 ### 2.6 Authoritative game information
 
-The Lichess panel shall display both players with their colors and ratings when
-available, separate White and Black clocks, side to move, game status, and
-result. Full snapshots establish player identity and state; incremental state
+The separate Lichess browser displays game information. The application shall
+track both players with their colors and ratings when available, separate
+White and Black clocks, side to move, game status, and result. Full snapshots
+establish player identity and state; incremental state
 events update clocks, turn, status, and result without discarding player
 identity.
 
@@ -1420,25 +1421,65 @@ The UI shall distinguish:
 - Lichess/server position.
 - Physical/reference position.
 - The active physical side to move using both a color indicator and visible
-  text, while the Lichess panel separately retains the authoritative server
-  side to move.
+  text, while Lichess retains the authoritative server side to move.
 - Number of pending physical moves.
 - Active expected move.
 - Player color and opponent.
 - Network mode: stream or polling.
 - Synchronization state.
 
-The `Lichess position` panel shall advance immediately from remote history.
-
 The `Physical position` panel shall advance only after camera confirmation.
 
-The main window shall present both boards simultaneously in a four-quadrant
-dashboard:
+In offline and Lichess modes, the application shall show the physical position
+above the scrollable interaction pane. Live preview, forced focus preview, and
+frozen camera images replace the top pane. The interaction pane shall provide
+a visible Start new Lichess game button using the existing AI-game setup.
+Offline mode retains the remembered, resizable window placement.
 
-- Top left: camera preview.
-- Top right: physical position.
-- Bottom left: scrollable interaction controls and status.
-- Bottom right: Lichess position.
+During an active selected Lichess game, the application shall use the left
+half of its current screen's available area, including its window frame and
+title bar, and open that exact game in a new,
+independent browser window occupying the right half of the same screen. On
+Windows, the default Chrome or Edge browser uses its most recently used normal
+profile. The browser first displays a brief local data page that identifies
+the new window and then automatically navigates to the public game URL after
+six seconds, even if the application has closed. Placement must be verified
+rather than relying solely on browser command-line geometry hints, and a
+failure must be reported without moving any
+unidentified browser window. The browser manages its own login; no
+Lichess token, full game ID or password is passed to it. An unsupported default
+browser, unavailable profile, or launch error shall be reported in the
+interaction pane and the player can retry using Game > Lichess > Open selected
+game in browser. A game is opened once per application session unless the
+player explicitly retries; repeated polling shall not open more windows.
+Switching games opens the newly selected game without closing browser windows
+or modifying the previous game. The browser remains open when the application
+exits. Lichess game controls and the
+server board are available in the browser rather than the application pane.
+The Board API and physical synchronization remain independent of the browser.
+Connect and disconnect remain available from the Game > Lichess menu.
+
+Outside an active selected Lichess game, the prior window placement shall be
+restored, subject to the window manager's on-screen placement constraints.
+Switching modes shall not change the
+accepted position, reference, or network game state.
+
+Acceptance: both modes show the same two-pane layout; selecting an active game
+keeps the complete application title bar and window controls visible within
+the screen's left half, places its new browser window on the same screen's
+right half, and polling
+updates do not reopen it.
+Browser launch failures are visible and retryable. Ending
+or disconnecting restores the previous window placement. Preview
+and frozen-image transitions replace and restore the physical board without
+changing tracking. Browser placement, profile login and continuation after
+application exit require manual verification with the player's browser.
+
+**Implementation status:** Implemented. Focused tests cover framed placement
+from normal and maximized windows, layout, preview, game switching, and browser
+errors. A live Windows check confirmed the title bar and window controls remain
+visible during an active Lichess game. Other DPI and multi-monitor arrangements,
+and Edge, still require verification.
 
 Transient camera phases such as activity, settling, and candidate scoring shall
 not overwrite durable move guidance or correction text.
@@ -1643,7 +1684,7 @@ The initial live test shall use a new casual game against Stockfish:
 2. Start a new standard Lichess game.
 3. Connect and verify both positions are synchronized.
 4. Make one ordinary move in the browser.
-5. Verify that the Lichess panel advances while the physical panel does not.
+5. Verify that the browser board advances while the physical panel does not.
 6. Verify source/destination guidance.
 7. Reproduce the move physically and wait for confirmation.
 8. Verify both panels synchronize.

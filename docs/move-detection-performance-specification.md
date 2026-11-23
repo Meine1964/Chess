@@ -83,16 +83,17 @@ choice persists and defaults to off.
 
 - While the action is off, incoming camera frames are still decoded and passed
   to calibration, alignment monitoring, occupancy, and move tracking, but they
-  are not converted, scaled, or drawn in the preview. The preview area shows a
-  short notice explaining how to enable the preview.
+  are not converted, scaled, or drawn in the preview. In both offline and
+  Lichess modes, the physical position occupies the top pane; enabling
+  preview replaces it.
 - While the **Focus and point camera** dialog is open, or while the projector
   shows the pattern from **Projector > Show focus pattern**, the live preview
   is shown regardless of the setting; the focus dialog also draws the
   saved-board guide outline. When the dialog closes or the projector output
-  changes, the preview returns to the notice if the setting is off.
+  changes, the physical position returns if the setting is off.
 - Snapshots, calibration clearance views, and other frozen still images are
   shown regardless of the setting. **Resume live camera** returns to the live
-  preview or to the notice according to the setting.
+  preview or physical position according to the setting.
 
 ### 4.3 Acceptance criteria
 
