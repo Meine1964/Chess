@@ -924,7 +924,12 @@ def test_main_commands_are_available_from_menus(
         action.menu().title()
         for action in window.menuBar().actions()
         if action.menu() is not None
-    ] == ["&File", "&Camera", "&Game", "&Projector", "&Calibration"]
+    ] == ["&File", "&Camera", "&Game", "&Projector", "&Calibration", "&Tools"]
+    tools_menu = window.menuBar().actions()[5].menu()
+    assert tools_menu is not None
+    assert [action.text() for action in tools_menu.actions()] == [
+        "Vision data...", "Review vision labels...",
+    ]
     assert window._settings_action.text() == "Settings..."
     camera_actions = {
         action.text()

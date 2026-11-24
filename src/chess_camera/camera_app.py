@@ -123,6 +123,14 @@ from .occupancy import (
     detect_starting_position_orientation,
 )
 from .offline_clock import OfflineClock, OfflineClockSnapshot
+from .vision_tools import (
+    close_vision_tools,
+    install_vision_tools,
+    vision_discontinuity,
+    vision_hand_observation,
+    vision_move_accepted,
+    vision_submission,
+)
 from .piece_color_classifier import PieceColorLabel, classify_piece_colors
 from .projector import (
     ProjectorWindow,
@@ -2297,6 +2305,7 @@ class CameraWindow(QMainWindow):
         calibration_menu.addAction(self._validate_calibration_button)
         calibration_menu.addSeparator()
         calibration_menu.addAction(self._cancel_calibration_button)
+        self._vision_tools = install_vision_tools(self)
 
     def _refresh_lichess_layout(self) -> None:
         game = self._latest_lichess_game
@@ -4205,6 +4214,7 @@ class CameraWindow(QMainWindow):
         self._board_widget.set_selected_square(None)
 
     def _reset_occupancy(self, status: str) -> None:
+        vision_discontinuity(self, "Occupancy or camera geometry reset.")
         self._occupancy_detector.reset()
         self._automatic_start_occupancy_detector.reset()
         self._reference_move_tracker.reset_activity()
@@ -4387,6 +4397,7 @@ class CameraWindow(QMainWindow):
             )
             return False
         self._board_edge_gate_blocking = blocking
+        vision_hand_observation(self, blocking)
         if blocking:
             self._reference_move_tracker.reset_activity()
             self._occupancy_status.setText(
@@ -4440,6 +4451,8 @@ class CameraWindow(QMainWindow):
             )
         except (ValueError, RuntimeError, cv2.error):
             self._board_edge_hand_gate.reset()
+        else:
+            vision_hand_observation(self, False, baseline=True)
 
     def _timed_occupancy_tick(self) -> None:
         edge_detector = self._board_edge_activity_detector
@@ -5238,6 +5251,10 @@ class CameraWindow(QMainWindow):
         self._board_widget.set_last_move(update.move)
         self._persist_piece_position(position_update.position)
         self._persist_move_reference()
+        vision_move_accepted(
+            self, previous_position, position_update.position,
+            finished=legal_move is not None and legal_move.status.is_game_over,
+        )
         if lichess_pending and lichess_controller is not None:
             synchronization = lichess_controller.confirm_expected_move(
                 update.move
@@ -5638,6 +5655,10 @@ class CameraWindow(QMainWindow):
         self._last_rejected_move = None
         self._persist_piece_position(position_update.position)
         self._persist_move_reference()
+        vision_move_accepted(
+            self, previous_position, position_update.position,
+            finished=legal_move.status.is_game_over,
+        )
         offline_clock_move_accepted = getattr(
             self, "_offline_clock_move_accepted", None
         )
@@ -5721,6 +5742,7 @@ class CameraWindow(QMainWindow):
             details={"uci": uci, "game_id": controller.game_id},
             include_images=True,
         )
+        vision_submission(self, self._piece_synchronizer.position, legal_move.position)
         thread.start()
         return True
 
@@ -5789,6 +5811,10 @@ class CameraWindow(QMainWindow):
         self._last_rejected_move = None
         self._persist_piece_position(position_update.position)
         self._persist_move_reference()
+        vision_move_accepted(
+            self, previous_position, position_update.position,
+            submission=True, finished=committed.status.is_game_over,
+        )
         if self._latest_lichess_state is not None:
             remote_status = "started"
             winner: PlayerColor | None = None
@@ -5946,6 +5972,7 @@ class CameraWindow(QMainWindow):
         self,
         occupied: frozenset[tuple[int, int]],
     ) -> None:
+        vision_discontinuity(self, "Starting-position reset.")
         self._reset_to_start_requested = False
         if occupied != starting_occupied_squares():
             self._piece_status.setText(
@@ -6505,6 +6532,7 @@ class CameraWindow(QMainWindow):
         self,
         logical_squares: tuple[tuple[int, int], ...],
     ) -> None:
+        vision_discontinuity(self, "Physical move correction.")
         if (
             self._illegal_correction_projection_active
             or self._illegal_correction_blackout_pending
@@ -6767,6 +6795,7 @@ class CameraWindow(QMainWindow):
         self,
         occupancy_message: str,
     ) -> None:
+        vision_discontinuity(self, "Physical reconciliation.")
         self._reconciliation_requested = True
         self._reconciliation_blackout_pending = True
         self._reconciliation_reference_acceptance_pending = False
@@ -7299,6 +7328,7 @@ class CameraWindow(QMainWindow):
         )
 
     def _game_mode_changed(self, index: int) -> None:
+        vision_discontinuity(self, "Game mode changed.")
         selected = str(self._game_mode_selector.itemData(index))
         if selected == "diagnostic":
             self._activate_board_setup_mode()
@@ -7502,6 +7532,7 @@ class CameraWindow(QMainWindow):
         self._queue_clean_reconciliation_reference_capture()
 
     def _begin_offline_position_restore(self, target: LegalGame) -> None:
+        vision_discontinuity(self, "Saved Offline position restoration.")
         self._pending_offline_restore_game = None
         self._offline_mode_recovery_error = None
         self._automatic_start_reset_recovery = False
@@ -10137,6 +10168,7 @@ class CameraWindow(QMainWindow):
         if reader is not None:
             reader.stop()
             self._browser_clock_reader = None
+        close_vision_tools(self)
         self._calibrator.cancel()
         self._alignment_monitor.clear()
         if self._camera is not None:

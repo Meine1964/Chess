@@ -30,6 +30,9 @@ The implemented minimally disruptive hybrid method is specified in
 Camera-derived occupied-square marking on the digital chessboard is specified
 in
 [Chess-Square Occupancy and UI Marking](./chess-square-occupancy-ui-specification.md).
+Future normalized-view data collection and neural occupancy/hand recognition
+are specified in
+[Neural Vision Data and Recognition](./neural-vision-data-and-recognition-specification.md).
 The initial occupied-square classifier and UI dots are implemented
 experimentally. Further occupancy hardware tuning remains open. Legal chess
 rules and reference-image physical move recognition are implemented for

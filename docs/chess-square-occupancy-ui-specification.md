@@ -12,6 +12,7 @@ reconciliation, and restoration workflows; further hardware tuning pending
 - [Single-shot coded-pattern calibration](./single-shot-coded-pattern-calibration-specification.md)
 - [Chess-piece UI rendering and move synchronization](./chess-piece-ui-tracking-specification.md)
 - [Reference-image move tracking](./reference-image-move-tracking-specification.md)
+- [Neural vision data and recognition](./neural-vision-data-and-recognition-specification.md)
 
 Post-initialization move inference is superseded by the reference-image
 specification. The absolute occupancy classifier remains responsible only for

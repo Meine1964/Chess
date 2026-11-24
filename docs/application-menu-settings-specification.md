@@ -11,6 +11,35 @@ main window.
 
 ## 2. Menu Structure
 
+### Tools: Vision data foundation
+
+- **Vision data...** opens a modeless normalized-view and opt-in collection
+  window. It does not change gameplay, calibrate, or start collection by itself.
+- **Review vision labels...** opens the modeless image-and-label correction
+  tool for occupancy and paired hand examples, without requiring hardware.
+  Labels use dropdowns and save together with **Save and next**. Labels and
+  their semantic summary remain visible without scrolling; raw metadata is
+  available separately through **Technical details...**.
+  Separate titled groups identify read-only **Model inputs** (images/masks,
+  square colour, location) and editable **Model outputs** (occupancy and piece
+  colour, or independent current-obstruction and baseline-validity labels for
+  hand examples). Projector state and colour
+  provenance remain in technical details, not the main label panel.
+  There is no redundant **Images** text row. **Previous/Next** stop at the
+  filtered-list boundaries without wrapping; saving the final example stays
+  on it, with the button labelled **Save**.
+  Hand observations show **Linked baseline** on the left and **Current
+  observation** on the right, with a shared observation counter/identity.
+  Shared baseline edits require confirmation of their affected count.
+  A missing or unreadable baseline disables only its label field, leaving a
+  readable current image available for independent review.
+  The last selected dataset directory is remembered across application
+  restarts and reopened when the reviewer is invoked. Both vision dataset
+  choosers reuse it; unavailable storage is reported without creating a
+  replacement dataset or starting collection.
+
+See [Neural vision data and recognition](./neural-vision-data-and-recognition-specification.md).
+
 ### 2.1 File
 
 - **Settings...** opens the settings dialog.
